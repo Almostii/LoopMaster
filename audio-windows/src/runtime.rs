@@ -424,6 +424,9 @@ fn mixer_worker(
     })?;
     let mut source_block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
     let mut sink_block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
+    let block_period = Duration::from_secs_f64(
+        block_frames as f64 / loopmaster_audio_core::INTERNAL_SAMPLE_RATE as f64,
+    );
     while !stop.load(Ordering::Acquire) {
         while let Ok(next) = graph_rx.try_recv() {
             match MixerPlan::new(
@@ -463,9 +466,7 @@ fn mixer_worker(
         if written < block_frames {
             counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
         }
-        if read == 0 {
-            thread::sleep(Duration::from_millis(1));
-        }
+        thread::sleep(block_period);
     }
     Ok(())
 }
@@ -489,19 +490,26 @@ fn render_worker(
         })?;
     let silence = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
     let mut block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
+    let mut pending = false;
     while !stop.load(Ordering::Acquire) {
-        block.fill(0.0);
-        let read = consumer
-            .pop_interleaved(&mut block)
-            .map(|r| r.frames())
-            .unwrap_or(0);
-        if read < block_frames {
-            counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
-            let written_samples = read * INTERNAL_CHANNELS;
-            block[written_samples..].copy_from_slice(&silence[written_samples..]);
+        if !pending {
+            block.fill(0.0);
+            let read = consumer
+                .pop_interleaved(&mut block)
+                .map(|r| r.frames())
+                .unwrap_or(0);
+            if read < block_frames {
+                counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
+                let written_samples = read * INTERNAL_CHANNELS;
+                block[written_samples..].copy_from_slice(&silence[written_samples..]);
+            }
+            pending = true;
         }
         match sink.write_f32_block(&block) {
             Ok(crate::RenderWriteResult::Written { frames }) => {
+                // 对重采样 sink 而言，返回 frame 数是设备输出 frame 数；输入的
+                // 整个内部 block 已在本次调用中被 resampler 消费，不能按该数切片。
+                pending = false;
                 counters.render_writes.fetch_add(1, Ordering::Relaxed);
                 counters
                     .rendered_frames
