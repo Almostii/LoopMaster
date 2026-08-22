@@ -497,7 +497,8 @@ fn render_worker(
             .unwrap_or(0);
         if read < block_frames {
             counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
-            block.copy_from_slice(&silence);
+            let written_samples = read * INTERNAL_CHANNELS;
+            block[written_samples..].copy_from_slice(&silence[written_samples..]);
         }
         match sink.write_f32_block(&block) {
             Ok(crate::RenderWriteResult::Written { frames }) => {
@@ -584,6 +585,16 @@ mod tests {
             AudioEngine::new(small_fifo_config),
             Err(AudioEngineError::FifoTooSmall)
         ));
+    }
+
+    #[test]
+    fn preserves_available_audio_when_render_fifo_underflows() {
+        let mut block = vec![1.0, -1.0, 0.0, 0.0];
+        let silence = vec![0.0; 4];
+        let read = 1;
+        let written_samples = read * INTERNAL_CHANNELS;
+        block[written_samples..].copy_from_slice(&silence[written_samples..]);
+        assert_eq!(block, vec![1.0, -1.0, 0.0, 0.0]);
     }
 
     #[cfg(not(windows))]
