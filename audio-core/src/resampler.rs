@@ -3,7 +3,7 @@
 //! 该封装以 interleaved `f32` 与音频边界交互，在构造阶段分配 rubato 和临时
 //! planar buffer。`process_interleaved` 只在调用方提供的固定切片中读写，不分配。
 
-use rubato::{FastFixedOut, PolynomialDegree, Resampler};
+use rubato::{FastFixedIn, FastFixedOut, PolynomialDegree, Resampler};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -32,6 +32,112 @@ pub enum ResamplerProcessError {
     Rubato(String),
     #[error("重采样器输出 frame 数 {actual}，期望 {expected}")]
     OutputFrames { expected: usize, actual: usize },
+}
+
+/// 固定输入帧数、输出帧数随采样率比例变化的重采样器。
+pub struct FixedInputResampler {
+    channels: usize,
+    input_frames: usize,
+    resampler: FastFixedIn<f32>,
+    input: Vec<Vec<f32>>,
+    output: Vec<Vec<f32>>,
+}
+
+impl FixedInputResampler {
+    pub fn new(
+        input_rate: u32,
+        output_rate: u32,
+        channels: usize,
+        input_frames: usize,
+    ) -> Result<Self, ResamplerConfigError> {
+        if input_rate == 0 {
+            return Err(ResamplerConfigError::ZeroInputRate);
+        }
+        if output_rate == 0 {
+            return Err(ResamplerConfigError::ZeroOutputRate);
+        }
+        if channels == 0 {
+            return Err(ResamplerConfigError::ZeroChannels);
+        }
+        if input_frames == 0 {
+            return Err(ResamplerConfigError::ZeroOutputFrames);
+        }
+        input_frames
+            .checked_mul(channels)
+            .ok_or(ResamplerConfigError::SampleCountOverflow)?;
+        let ratio = f64::from(output_rate) / f64::from(input_rate);
+        let resampler = FastFixedIn::new(
+            ratio,
+            1.002,
+            PolynomialDegree::Septic,
+            input_frames,
+            channels,
+        )
+        .map_err(|error| ResamplerConfigError::Rubato(error.to_string()))?;
+        let input = resampler.input_buffer_allocate(true);
+        let output = resampler.output_buffer_allocate(true);
+        Ok(Self {
+            channels,
+            input_frames,
+            resampler,
+            input,
+            output,
+        })
+    }
+
+    pub const fn channels(&self) -> usize {
+        self.channels
+    }
+
+    pub const fn input_frames(&self) -> usize {
+        self.input_frames
+    }
+
+    pub fn output_frames_max(&self) -> usize {
+        self.resampler.output_frames_max()
+    }
+
+    pub fn process_interleaved(
+        &mut self,
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<usize, ResamplerProcessError> {
+        let expected_input = self
+            .input_frames
+            .checked_mul(self.channels)
+            .ok_or(ResamplerProcessError::Rubato("输入样本容量溢出".to_owned()))?;
+        if input.len() != expected_input {
+            return Err(ResamplerProcessError::InputLength {
+                expected: expected_input,
+                actual: input.len(),
+            });
+        }
+        let max_output_samples = self
+            .output_frames_max()
+            .checked_mul(self.channels)
+            .ok_or(ResamplerProcessError::Rubato("输出样本容量溢出".to_owned()))?;
+        if output.len() < max_output_samples {
+            return Err(ResamplerProcessError::OutputLength {
+                expected: max_output_samples,
+                actual: output.len(),
+            });
+        }
+        for (channel, planar) in self.input.iter_mut().enumerate() {
+            for frame in 0..self.input_frames {
+                planar[frame] = input[frame * self.channels + channel];
+            }
+        }
+        let (_, written_frames) = self
+            .resampler
+            .process_into_buffer(&self.input, &mut self.output, None)
+            .map_err(|error| ResamplerProcessError::Rubato(error.to_string()))?;
+        for (channel, planar) in self.output.iter().enumerate() {
+            for frame in 0..written_frames {
+                output[frame * self.channels + channel] = planar[frame];
+            }
+        }
+        Ok(written_frames)
+    }
 }
 
 /// 以固定输出帧数工作的异步重采样器。
@@ -207,5 +313,21 @@ mod tests {
         for frame in 0..480 {
             assert!((output[frame * 2] - output[frame * 2 + 1]).abs() < 0.0001);
         }
+    }
+
+    #[test]
+    fn fixed_input_resampler_produces_rate_adjusted_frames() {
+        let mut resampler = FixedInputResampler::new(48_000, 44_100, 2, 480).unwrap();
+        let input = vec![0.25; 960];
+        let mut output = vec![0.0; resampler.output_frames_max() * 2];
+        let mut total_written = 0;
+        for _ in 0..4 {
+            let written = resampler.process_interleaved(&input, &mut output).unwrap();
+            total_written += written;
+            assert!(output[..written * 2]
+                .iter()
+                .all(|sample| sample.is_finite()));
+        }
+        assert!((total_written as f64 - 4.0 * 441.0).abs() <= 12.0);
     }
 }

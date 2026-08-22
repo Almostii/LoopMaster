@@ -14,7 +14,9 @@ pub use fifo::{
     UnalignedSamples,
 };
 pub use mixer::{MixerError, MixerPlan};
-pub use resampler::{FixedOutputResampler, ResamplerConfigError, ResamplerProcessError};
+pub use resampler::{
+    FixedInputResampler, FixedOutputResampler, ResamplerConfigError, ResamplerProcessError,
+};
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
