@@ -3,7 +3,9 @@
 //! 当前模块只负责读取 WASAPI endpoint 的静态能力信息。这里不打开音频流，
 //! 也不实现捕获、渲染、混音或设备恢复；这些能力由后续阶段单独实现。
 
-use loopmaster_audio_core::{AudioFormat, EndpointId};
+use loopmaster_audio_core::{
+    AudioFormat, EndpointId, FixedInputResampler, INTERNAL_CHANNELS, INTERNAL_SAMPLE_RATE,
+};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +135,8 @@ pub enum WindowsAudioError {
         reason: &'static str,
         endpoint_id: String,
     },
+    #[error("render 重采样失败: {reason}, endpoint={endpoint_id}")]
+    RenderResample { reason: String, endpoint_id: String },
 }
 
 /// WASAPI shared-mode render 写入结果。
@@ -159,6 +163,8 @@ pub struct WasapiRenderSink {
     format: EndpointFormat,
     buffer_frames: u32,
     block_frames: usize,
+    resampler: Option<FixedInputResampler>,
+    resampled_output: Vec<f32>,
 }
 
 /// 一次 WASAPI capture packet 的元数据。
@@ -228,6 +234,7 @@ impl WindowsAudioError {
             | Self::RenderState { endpoint_id, .. } => Some(endpoint_id),
             Self::CaptureFormatUnsupported { endpoint_id, .. }
             | Self::CaptureState { endpoint_id, .. } => Some(endpoint_id),
+            Self::RenderResample { endpoint_id, .. } => Some(endpoint_id),
             _ => None,
         }
     }
@@ -422,7 +429,10 @@ impl WasapiRenderSink {
     /// 输入不足一个计划 block 时，剩余部分写入静音；输入超过计划 block 或
     /// 不能按 endpoint 声道数对齐时返回错误。设备当前没有空间时返回 `NoSpace`。
     /// 该函数不分配、不加锁、不等待。
-    pub fn write_f32_block(&self, samples: &[f32]) -> Result<RenderWriteResult, WindowsAudioError> {
+    pub fn write_f32_block(
+        &mut self,
+        samples: &[f32],
+    ) -> Result<RenderWriteResult, WindowsAudioError> {
         #[cfg(not(windows))]
         {
             let _ = samples;
@@ -622,6 +632,24 @@ fn open_render_sink(
             endpoint_id: endpoint_id.0.clone(),
         });
     }
+    let (resampler, resampled_output) = if format.sample_rate == INTERNAL_SAMPLE_RATE {
+        (None, Vec::new())
+    } else {
+        let resampler = FixedInputResampler::new(
+            INTERNAL_SAMPLE_RATE,
+            format.sample_rate,
+            INTERNAL_CHANNELS,
+            block_frames,
+        )
+        .map_err(|error| WindowsAudioError::RenderResample {
+            reason: error.to_string(),
+            endpoint_id: endpoint_id.0.clone(),
+        })?;
+        let output = vec![0.0; resampler.output_frames_max() * INTERNAL_CHANNELS];
+        // Force allocation and construction before the realtime write path starts.
+        let _ = resampler.output_frames_next();
+        (Some(resampler), output)
+    };
     let render_client: IAudioRenderClient = unsafe { client.GetService() }.map_err(|error| {
         hresult_error(
             "IAudioClient::GetService(IAudioRenderClient)",
@@ -641,6 +669,8 @@ fn open_render_sink(
         format,
         buffer_frames,
         block_frames,
+        resampler,
+        resampled_output,
     })
 }
 
@@ -683,9 +713,7 @@ unsafe fn inspect_render_mix_format(
             channels: format.channels,
         });
     }
-    if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE
-        || usize::from(format.channels) != loopmaster_audio_core::INTERNAL_CHANNELS
-    {
+    if usize::from(format.channels) != INTERNAL_CHANNELS {
         return Err(WindowsAudioError::RenderFormatUnsupported {
             endpoint_id: endpoint_id.0.clone(),
             sample_rate: format.sample_rate,
@@ -698,17 +726,16 @@ unsafe fn inspect_render_mix_format(
 
 #[cfg(windows)]
 fn write_render_block(
-    sink: &WasapiRenderSink,
+    sink: &mut WasapiRenderSink,
     samples: &[f32],
 ) -> Result<RenderWriteResult, WindowsAudioError> {
-    let channels = usize::from(sink.format.channels);
-    if !samples.len().is_multiple_of(channels) {
+    if !samples.len().is_multiple_of(INTERNAL_CHANNELS) {
         return Err(WindowsAudioError::RenderInputUnaligned {
             samples: samples.len(),
-            channels,
+            channels: INTERNAL_CHANNELS,
         });
     }
-    let input_frames = samples.len() / channels;
+    let input_frames = samples.len() / INTERNAL_CHANNELS;
     if input_frames > sink.block_frames {
         return Err(WindowsAudioError::RenderBlockTooLarge {
             expected: sink.block_frames,
@@ -733,8 +760,35 @@ fn write_render_block(
     if available == 0 {
         return Ok(RenderWriteResult::NoSpace);
     }
-    let frames_to_write = available.min(sink.block_frames as u32);
-    let frame_samples = frames_to_write as usize * channels;
+    let (write_samples, frames_to_write) = if let Some(resampler) = sink.resampler.as_mut() {
+        if input_frames != resampler.input_frames() {
+            return Err(WindowsAudioError::RenderBlockTooLarge {
+                expected: resampler.input_frames(),
+                actual: input_frames,
+            });
+        }
+        let expected_frames = resampler.output_frames_next() as u32;
+        if available < expected_frames {
+            return Ok(RenderWriteResult::NoSpace);
+        }
+        let written = resampler
+            .process_interleaved(samples, &mut sink.resampled_output)
+            .map_err(|error| WindowsAudioError::RenderResample {
+                reason: error.to_string(),
+                endpoint_id: sink.endpoint_id.0.clone(),
+            })?;
+        (
+            &sink.resampled_output[..written * INTERNAL_CHANNELS],
+            written as u32,
+        )
+    } else {
+        let frames = input_frames as u32;
+        if frames > available {
+            return Ok(RenderWriteResult::NoSpace);
+        }
+        (samples, frames)
+    };
+    let frame_samples = frames_to_write as usize * INTERNAL_CHANNELS;
     let buffer = unsafe { sink.render_client.GetBuffer(frames_to_write) }.map_err(|error| {
         hresult_error(
             "IAudioRenderClient::GetBuffer",
@@ -748,9 +802,9 @@ fn write_render_block(
             endpoint_id: sink.endpoint_id.0.clone(),
         });
     }
-    let input_samples = samples.len().min(frame_samples);
+    let input_samples = write_samples.len().min(frame_samples);
     unsafe {
-        std::ptr::copy_nonoverlapping(samples.as_ptr(), buffer as *mut f32, input_samples);
+        std::ptr::copy_nonoverlapping(write_samples.as_ptr(), buffer as *mut f32, input_samples);
         if input_samples < frame_samples {
             std::ptr::write_bytes(
                 (buffer as *mut f32).add(input_samples),

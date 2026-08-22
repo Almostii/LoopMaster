@@ -47,7 +47,7 @@ fn run_capture_render_test(
         Ok(source) => source,
         Err(error) => exit_with_error("打开 capture endpoint 失败", error),
     };
-    let render = match backend.open_render_sink(&render_endpoint, 480) {
+    let mut render = match backend.open_render_sink(&render_endpoint, 480) {
         Ok(sink) => sink,
         Err(error) => exit_with_error("打开 render endpoint 失败", error),
     };

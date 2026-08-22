@@ -97,6 +97,11 @@ impl FixedInputResampler {
         self.resampler.output_frames_max()
     }
 
+    /// 下一次处理预计写出的 frame 数。该值不会小于实际写出数。
+    pub fn output_frames_next(&self) -> usize {
+        self.resampler.output_frames_next()
+    }
+
     pub fn process_interleaved(
         &mut self,
         input: &[f32],
