@@ -2726,6 +2726,7 @@ dependencies = [
 name = "loopmaster-diagnostics"
 version = "0.1.0"
 dependencies = [
+ "loopmaster-audio-core",
  "loopmaster-audio-windows",
 ]
 
