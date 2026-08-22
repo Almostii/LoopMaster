@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn preserves_available_audio_when_render_fifo_underflows() {
         let mut block = vec![1.0, -1.0, 0.0, 0.0];
-        let silence = vec![0.0; 4];
+        let silence = [0.0; 4];
         let read = 1;
         let written_samples = read * INTERNAL_CHANNELS;
         block[written_samples..].copy_from_slice(&silence[written_samples..]);
