@@ -1,0 +1,39 @@
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "LoopMaster";
+    min-width: 720px;
+    min-height: 480px;
+
+    VerticalBox {
+        padding: 24px;
+        spacing: 16px;
+
+        Text {
+            text: "LoopMaster";
+            font-size: 28px;
+        }
+
+        Text {
+            text: "Windows 音频路由器";
+            color: #60646f;
+        }
+
+        Rectangle {
+            border-width: 1px;
+            border-color: #d7d9df;
+            background: #f7f8fa;
+            VerticalBox {
+                padding: 16px;
+                Text { text: "项目骨架已创建"; font-size: 18px; }
+                Text { text: "音频设备枚举和路由引擎尚未实现。"; color: #60646f; }
+            }
+        }
+
+        Button {
+            text: "退出";
+            clicked => { root.close(); }
+        }
+    }
+}
+

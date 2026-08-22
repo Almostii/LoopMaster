@@ -1,0 +1,18 @@
+# 本地参考项目，不属于 LoopMaster Git 仓库
+/Library/
+/Doc/old
+
+# Rust 构建产物
+**/target/
+
+# Windows/.NET/IDE 生成物
+**/bin/
+**/obj/
+.vs/
+.idea/
+
+# 本地配置和日志
+*.user
+*.suo
+*.local
+*.log
