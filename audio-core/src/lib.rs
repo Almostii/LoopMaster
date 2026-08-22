@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod fifo;
+mod mixer;
 
 pub use fifo::{
     AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
     UnalignedSamples,
 };
+pub use mixer::{MixerError, MixerPlan};
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
@@ -77,7 +79,7 @@ pub struct RouteGraph {
     pub sends: Vec<SendSpec>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum RouteGraphError {
     #[error("source 不存在: {0}")]
     MissingSource(String),
