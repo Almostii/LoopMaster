@@ -1,12 +1,17 @@
 //! Windows 音频平台适配层。
 //!
-//! 当前模块只负责读取 WASAPI endpoint 的静态能力信息。这里不打开音频流，
-//! 也不实现捕获、渲染、混音或设备恢复；这些能力由后续阶段单独实现。
+//! Windows 音频平台适配层和正式音频引擎运行时。
 
 use loopmaster_audio_core::{
     AudioFormat, EndpointId, FixedInputResampler, INTERNAL_CHANNELS, INTERNAL_SAMPLE_RATE,
 };
 use thiserror::Error;
+
+mod runtime;
+
+pub use runtime::{
+    AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineStats, AudioEngineStatus,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Windows 音频 endpoint 的数据流方向。

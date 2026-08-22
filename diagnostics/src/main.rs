@@ -1,8 +1,8 @@
 use loopmaster_audio_core::{
-    AudioFifo, EndpointId, MixerPlan, RouteGraph, SendSpec, SinkId, SinkSpec, SourceId, SourceKind,
-    SourceSpec,
+    AudioFifo, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot, SendSpec, SinkId, SinkSpec,
+    SourceId, SourceKind, SourceSpec,
 };
-use loopmaster_audio_windows::{EndpointInfo, WindowsAudioBackend};
+use loopmaster_audio_windows::{AudioEngine, AudioEngineConfig, EndpointInfo, WindowsAudioBackend};
 use std::env;
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,13 @@ fn main() {
     };
 
     let args: Vec<String> = env::args().collect();
-    if args.len() >= 3 {
+    if args.get(1).map(String::as_str) == Some("--engine") && args.len() >= 4 {
+        let seconds = args
+            .get(4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_engine_test(&args[2], &args[3], seconds);
+    } else if args.len() >= 3 {
         let capture_id = &args[1];
         let render_id = &args[2];
         let seconds = args
@@ -33,6 +39,62 @@ fn main() {
     for (index, endpoint) in endpoints.iter().enumerate() {
         print_endpoint(index + 1, endpoint);
     }
+}
+
+fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
+    let graph = RouteGraph {
+        sources: vec![SourceSpec {
+            id: SourceId("capture".to_owned()),
+            kind: SourceKind::DeviceCapture,
+            endpoint_id: Some(EndpointId(capture_id.to_owned())),
+            process_id: None,
+            display_name: "capture".to_owned(),
+        }],
+        sinks: vec![SinkSpec {
+            id: SinkId("render".to_owned()),
+            endpoint_id: EndpointId(render_id.to_owned()),
+            display_name: "render".to_owned(),
+        }],
+        sends: vec![SendSpec {
+            source_id: SourceId("capture".to_owned()),
+            sink_id: SinkId("render".to_owned()),
+            gain_db: 0.0,
+            muted: false,
+            channel_map: Vec::new(),
+        }],
+    };
+    let snapshot = RouteGraphSnapshot::new(graph).expect("引擎验收路由图有效");
+    let mut engine = AudioEngine::new(AudioEngineConfig::new(snapshot)).expect("引擎验收配置有效");
+    if let Err(error) = engine.start() {
+        eprintln!("启动正式音频引擎失败: {error}");
+        std::process::exit(1);
+    }
+    let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
+    while Instant::now() < deadline && !engine.status().failed {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let status = engine.status();
+    let _ = engine.stop();
+    println!("LoopMaster 正式音频引擎验收");
+    println!("运行时间: {} 秒", seconds.max(1));
+    println!("capture packet: {}", status.stats.capture_packets);
+    println!("capture frames: {}", status.stats.captured_frames);
+    println!("render writes: {}", status.stats.render_writes);
+    println!("render frames: {}", status.stats.rendered_frames);
+    println!("FIFO overflow events: {}", status.stats.fifo_overflows);
+    println!("FIFO underflow events: {}", status.stats.fifo_underflows);
+    println!("data discontinuity: {}", status.stats.discontinuities);
+    println!("timestamp errors: {}", status.stats.timestamp_errors);
+    if let Some(error) = status.last_error {
+        eprintln!("引擎错误: {error}");
+    }
+    std::process::exit(
+        if !status.failed && status.stats.capture_packets > 0 && status.stats.rendered_frames > 0 {
+            0
+        } else {
+            2
+        },
+    );
 }
 
 fn run_capture_render_test(
