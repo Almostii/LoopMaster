@@ -7,12 +7,14 @@ use thiserror::Error;
 
 mod fifo;
 mod mixer;
+mod resampler;
 
 pub use fifo::{
     AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
     UnalignedSamples,
 };
 pub use mixer::{MixerError, MixerPlan};
+pub use resampler::{FixedOutputResampler, ResamplerConfigError, ResamplerProcessError};
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;

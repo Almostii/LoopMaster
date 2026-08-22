@@ -7,5 +7,6 @@ publish.workspace = true
 
 [dependencies]
 rtrb = "0.4"
+rubato = { version = "0.16.2", default-features = false }
 serde.workspace = true
 thiserror.workspace = true
