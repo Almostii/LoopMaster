@@ -8,6 +8,7 @@ use thiserror::Error;
 mod fifo;
 mod mixer;
 mod resampler;
+mod route_snapshot;
 
 pub use fifo::{
     AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
@@ -17,6 +18,7 @@ pub use mixer::{MixerError, MixerPlan};
 pub use resampler::{
     FixedInputResampler, FixedOutputResampler, ResamplerConfigError, ResamplerProcessError,
 };
+pub use route_snapshot::RouteGraphSnapshot;
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
@@ -76,7 +78,7 @@ pub struct SendSpec {
     pub channel_map: Vec<(u16, u16)>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RouteGraph {
     pub sources: Vec<SourceSpec>,
     pub sinks: Vec<SinkSpec>,
@@ -85,6 +87,14 @@ pub struct RouteGraph {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum RouteGraphError {
+    #[error("source ID 重复: {0}")]
+    DuplicateSource(String),
+    #[error("sink ID 重复: {0}")]
+    DuplicateSink(String),
+    #[error("source endpoint ID 重复: {0}")]
+    DuplicateSourceEndpoint(String),
+    #[error("sink endpoint ID 重复: {0}")]
+    DuplicateSinkEndpoint(String),
     #[error("source 不存在: {0}")]
     MissingSource(String),
     #[error("sink 不存在: {0}")]
@@ -95,6 +105,32 @@ pub enum RouteGraphError {
 
 impl RouteGraph {
     pub fn validate(&self) -> Result<(), RouteGraphError> {
+        let mut source_ids = std::collections::HashSet::new();
+        let mut source_endpoints = std::collections::HashSet::new();
+        for source in &self.sources {
+            if !source_ids.insert(source.id.clone()) {
+                return Err(RouteGraphError::DuplicateSource(source.id.0.clone()));
+            }
+            if let Some(endpoint_id) = &source.endpoint_id {
+                if !source_endpoints.insert(endpoint_id.clone()) {
+                    return Err(RouteGraphError::DuplicateSourceEndpoint(
+                        endpoint_id.0.clone(),
+                    ));
+                }
+            }
+        }
+        let mut sink_ids = std::collections::HashSet::new();
+        let mut sink_endpoints = std::collections::HashSet::new();
+        for sink in &self.sinks {
+            if !sink_ids.insert(sink.id.clone()) {
+                return Err(RouteGraphError::DuplicateSink(sink.id.0.clone()));
+            }
+            if !sink_endpoints.insert(sink.endpoint_id.clone()) {
+                return Err(RouteGraphError::DuplicateSinkEndpoint(
+                    sink.endpoint_id.0.clone(),
+                ));
+            }
+        }
         for send in &self.sends {
             if !self.sources.iter().any(|s| s.id == send.source_id) {
                 return Err(RouteGraphError::MissingSource(send.source_id.0.clone()));
@@ -107,5 +143,49 @@ impl RouteGraph {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod route_graph_tests {
+    use super::*;
+
+    fn source(id: &str, endpoint: Option<&str>) -> SourceSpec {
+        SourceSpec {
+            id: SourceId(id.into()),
+            kind: SourceKind::DeviceCapture,
+            endpoint_id: endpoint.map(|value| EndpointId(value.into())),
+            process_id: None,
+            display_name: id.into(),
+        }
+    }
+
+    fn sink(id: &str, endpoint: &str) -> SinkSpec {
+        SinkSpec {
+            id: SinkId(id.into()),
+            endpoint_id: EndpointId(endpoint.into()),
+            display_name: id.into(),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_graph_ids_and_endpoints() {
+        let duplicate_source = RouteGraph {
+            sources: vec![source("a", None), source("a", None)],
+            ..RouteGraph::default()
+        };
+        assert_eq!(
+            duplicate_source.validate().unwrap_err(),
+            RouteGraphError::DuplicateSource("a".into())
+        );
+
+        let duplicate_sink_endpoint = RouteGraph {
+            sinks: vec![sink("a", "endpoint"), sink("b", "endpoint")],
+            ..RouteGraph::default()
+        };
+        assert_eq!(
+            duplicate_sink_endpoint.validate().unwrap_err(),
+            RouteGraphError::DuplicateSinkEndpoint("endpoint".into())
+        );
     }
 }
