@@ -5,6 +5,13 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod fifo;
+
+pub use fifo::{
+    AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
+    UnalignedSamples,
+};
+
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
 pub const DEFAULT_BLOCK_FRAMES: usize = 480;
@@ -96,4 +103,3 @@ impl RouteGraph {
         Ok(())
     }
 }
-

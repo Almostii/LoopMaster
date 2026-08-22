@@ -2,6 +2,9 @@
 /Library/
 /Doc/old
 
+# 本地依赖核对和临时验证目录
+/.tmp-*/
+
 # Rust 构建产物
 **/target/
 

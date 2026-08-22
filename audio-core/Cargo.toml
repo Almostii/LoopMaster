@@ -6,6 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+rtrb = "0.4"
 serde.workspace = true
 thiserror.workspace = true
-
