@@ -11,7 +11,7 @@ use loopmaster_audio_core::{
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
 
 const STATE_STOPPED: u8 = 0;
@@ -427,9 +427,6 @@ fn mixer_worker(
     let block_period = Duration::from_secs_f64(
         block_frames as f64 / loopmaster_audio_core::INTERNAL_SAMPLE_RATE as f64,
     );
-    let mut next_deadline = Instant::now();
-    let mut starvation_since = None;
-    let mut starvation_reported = false;
     while !stop.load(Ordering::Acquire) {
         while let Ok(next) = graph_rx.try_recv() {
             match MixerPlan::new(
@@ -448,30 +445,13 @@ fn mixer_worker(
                 }
             }
         }
-        if consumer.available_frames() < block_frames {
-            let started = starvation_since.get_or_insert_with(Instant::now);
-            if !starvation_reported && started.elapsed() >= block_period {
-                counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
-                starvation_reported = true;
-            }
-            thread::sleep(Duration::from_millis(1));
-            continue;
-        }
-        starvation_since = None;
-        starvation_reported = false;
         source_block.fill(0.0);
         let read = consumer
             .pop_interleaved(&mut source_block)
             .map(|r| r.frames())
             .unwrap_or(0);
-        if read != block_frames {
-            fail(
-                &state,
-                &stop,
-                &error,
-                "source FIFO 在完整 block 检查后仍未提供完整数据".to_owned(),
-            );
-            return Err(());
+        if read < block_frames {
+            counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
         }
         let source_refs = [source_block.as_slice()];
         let mut sink_refs = [sink_block.as_mut_slice()];
@@ -486,13 +466,7 @@ fn mixer_worker(
         if written < block_frames {
             counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
         }
-        next_deadline += block_period;
-        let now = Instant::now();
-        if next_deadline > now {
-            thread::sleep(next_deadline - now);
-        } else {
-            next_deadline = now;
-        }
+        thread::sleep(block_period);
     }
     Ok(())
 }
@@ -514,40 +488,20 @@ fn render_worker(
         .map_err(|e| {
             fail(&state, &stop, &error, e.to_string());
         })?;
+    let silence = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
     let mut block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
     let mut pending = false;
-    let mut starvation_since = None;
-    let mut starvation_reported = false;
-    let block_period = Duration::from_secs_f64(
-        block_frames as f64 / loopmaster_audio_core::INTERNAL_SAMPLE_RATE as f64,
-    );
-    let mut next_deadline = Instant::now();
     while !stop.load(Ordering::Acquire) {
         if !pending {
-            if consumer.available_frames() < block_frames {
-                let started = starvation_since.get_or_insert_with(Instant::now);
-                if !starvation_reported && started.elapsed() >= block_period {
-                    counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
-                    starvation_reported = true;
-                }
-                thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            starvation_since = None;
-            starvation_reported = false;
             block.fill(0.0);
             let read = consumer
                 .pop_interleaved(&mut block)
                 .map(|r| r.frames())
                 .unwrap_or(0);
-            if read != block_frames {
-                fail(
-                    &state,
-                    &stop,
-                    &error,
-                    "render FIFO 在完整 block 检查后仍未提供完整数据".to_owned(),
-                );
-                return Err(());
+            if read < block_frames {
+                counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
+                let written_samples = read * INTERNAL_CHANNELS;
+                block[written_samples..].copy_from_slice(&silence[written_samples..]);
             }
             pending = true;
         }
@@ -560,13 +514,6 @@ fn render_worker(
                 counters
                     .rendered_frames
                     .fetch_add(u64::from(frames), Ordering::Relaxed);
-                next_deadline += block_period;
-                let now = Instant::now();
-                if next_deadline > now {
-                    thread::sleep(next_deadline - now);
-                } else {
-                    next_deadline = now;
-                }
             }
             Ok(crate::RenderWriteResult::NoSpace) => {
                 counters.render_no_space.fetch_add(1, Ordering::Relaxed);
