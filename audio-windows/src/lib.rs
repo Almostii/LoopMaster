@@ -103,6 +103,58 @@ pub enum WindowsAudioError {
         reason: String,
         endpoint_id: Option<String>,
     },
+    #[error("render endpoint 格式不满足 MVP 要求（48 kHz、32-bit IEEE float、2 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
+    RenderFormatUnsupported {
+        endpoint_id: String,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        channels: u16,
+    },
+    #[error("render block frame 数无效: {frames}")]
+    RenderBlockFramesInvalid { frames: usize },
+    #[error("render 输入样本数 {samples} 不能按 {channels} 声道对齐")]
+    RenderInputUnaligned { samples: usize, channels: usize },
+    #[error("render 输入 block 为 {actual} frame，超过计划的 {expected} frame")]
+    RenderBlockTooLarge { expected: usize, actual: usize },
+    #[error("render endpoint 缓冲区状态无效: {reason}, endpoint={endpoint_id}")]
+    RenderState {
+        reason: &'static str,
+        endpoint_id: String,
+    },
+}
+
+/// WASAPI shared-mode render 写入结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderWriteResult {
+    /// 已写入指定 frame；当设备可用空间少于 block 时可能小于计划 block。
+    Written { frames: u32 },
+    /// 当前 padding 已占满设备缓冲区，本次没有阻塞等待或写入。
+    NoSpace,
+}
+
+/// WASAPI shared-mode render sink。
+///
+/// 该类型只在 Windows 上持有 COM 接口；非 Windows 平台仍可引用公开 API，
+/// 但构造和写入会返回 [`WindowsAudioError::UnsupportedPlatform`]。
+pub struct WasapiRenderSink {
+    #[cfg(windows)]
+    _com: ComGuard,
+    #[cfg(windows)]
+    client: windows::Win32::Media::Audio::IAudioClient,
+    #[cfg(windows)]
+    render_client: windows::Win32::Media::Audio::IAudioRenderClient,
+    endpoint_id: EndpointId,
+    format: EndpointFormat,
+    buffer_frames: u32,
+    block_frames: usize,
+}
+
+#[cfg(windows)]
+impl Drop for WasapiRenderSink {
+    fn drop(&mut self) {
+        // Drop 不能向调用方返回 HRESULT；尽力停止流后由 COM 释放接口。
+        let _ = unsafe { self.client.Stop() };
+    }
 }
 
 impl WindowsAudioError {
@@ -119,6 +171,8 @@ impl WindowsAudioError {
             Self::HResult { endpoint_id, .. } | Self::InvalidFormat { endpoint_id, .. } => {
                 endpoint_id.as_deref()
             }
+            Self::RenderFormatUnsupported { endpoint_id, .. }
+            | Self::RenderState { endpoint_id, .. } => Some(endpoint_id),
             _ => None,
         }
     }
@@ -248,6 +302,346 @@ impl WindowsAudioBackend {
             Ok(endpoints)
         }
     }
+
+    /// 打开指定 render endpoint，初始化 WASAPI shared-mode client，并启动流。
+    ///
+    /// 当前实现要求 endpoint 的 `GetMixFormat` 为 32-bit IEEE float，因而实时写入
+    /// 可以直接复制 `f32`。`block_frames` 只用于限制单次写入；设备缓冲区实际可用
+    /// frame 数仍由 `GetCurrentPadding` 决定。
+    pub fn open_render_sink(
+        &self,
+        endpoint_id: &EndpointId,
+        block_frames: usize,
+    ) -> Result<WasapiRenderSink, WindowsAudioError> {
+        #[cfg(not(windows))]
+        {
+            let _ = (self, endpoint_id, block_frames);
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            open_render_sink(endpoint_id, block_frames)
+        }
+    }
+}
+
+impl WasapiRenderSink {
+    /// endpoint ID。
+    pub fn endpoint_id(&self) -> &EndpointId {
+        &self.endpoint_id
+    }
+
+    /// endpoint 的 f32 mix format。
+    pub const fn format(&self) -> EndpointFormat {
+        self.format
+    }
+
+    /// 设备实际 render buffer 的 frame 容量。
+    pub const fn buffer_frames(&self) -> u32 {
+        self.buffer_frames
+    }
+
+    /// 本 sink 单次允许写入的最大 frame 数。
+    pub const fn block_frames(&self) -> usize {
+        self.block_frames
+    }
+
+    /// 将一个 interleaved f32 block 非阻塞写入设备。
+    ///
+    /// 输入不足一个计划 block 时，剩余部分写入静音；输入超过计划 block 或
+    /// 不能按 endpoint 声道数对齐时返回错误。设备当前没有空间时返回 `NoSpace`。
+    /// 该函数不分配、不加锁、不等待。
+    pub fn write_f32_block(&self, samples: &[f32]) -> Result<RenderWriteResult, WindowsAudioError> {
+        #[cfg(not(windows))]
+        {
+            let _ = samples;
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            write_render_block(self, samples)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_render_sink(
+    endpoint_id: &EndpointId,
+    block_frames: usize,
+) -> Result<WasapiRenderSink, WindowsAudioError> {
+    use windows::Win32::Media::Audio::{
+        IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+        AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, DEVICE_STATE_ACTIVE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let com_result = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
+    let com_hresult = com_result.0;
+    if com_hresult < 0 && com_hresult as u32 != 0x80010106 {
+        return Err(WindowsAudioError::ComInitialization {
+            hresult: com_hresult,
+        });
+    }
+    let com = ComGuard {
+        should_uninitialize: com_hresult == 0 || com_hresult == 1,
+    };
+
+    if block_frames == 0 || block_frames > u32::MAX as usize {
+        return Err(WindowsAudioError::RenderBlockFramesInvalid {
+            frames: block_frames,
+        });
+    }
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|error| {
+            hresult_error(
+                "CoCreateInstance(MMDeviceEnumerator)",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+    let wide_id: Vec<u16> = endpoint_id
+        .0
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let device = unsafe { enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr())) }.map_err(
+        |error| {
+            hresult_error(
+                "IMMDeviceEnumerator::GetDevice",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        },
+    )?;
+    let state = unsafe { device.GetState() }.map_err(|error| {
+        hresult_error("IMMDevice::GetState", Some(endpoint_id.0.clone()), error)
+    })?;
+    if state != DEVICE_STATE_ACTIVE {
+        return Err(WindowsAudioError::RenderState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+
+    let client: IAudioClient = unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) }
+        .map_err(|error| {
+            hresult_error(
+                "IMMDevice::Activate(IAudioClient)",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+    let format_ptr = unsafe { client.GetMixFormat() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetMixFormat",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if format_ptr.is_null() {
+        return Err(invalid_format(
+            "IAudioClient::GetMixFormat 返回空指针",
+            Some(endpoint_id.0.clone()),
+        ));
+    }
+
+    let format_result = unsafe { inspect_render_mix_format(format_ptr, endpoint_id) };
+    let format = match format_result {
+        Ok(format) => format,
+        Err(error) => {
+            unsafe {
+                windows::Win32::System::Com::CoTaskMemFree(Some(
+                    format_ptr as *const core::ffi::c_void,
+                ))
+            };
+            return Err(error);
+        }
+    };
+    let initialize_result = unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            0,
+            0,
+            format_ptr,
+            None,
+        )
+    };
+    unsafe {
+        windows::Win32::System::Com::CoTaskMemFree(Some(format_ptr as *const core::ffi::c_void))
+    };
+    initialize_result.map_err(|error| {
+        hresult_error(
+            "IAudioClient::Initialize(shared)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+
+    let buffer_frames = unsafe { client.GetBufferSize() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetBufferSize",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if buffer_frames == 0 {
+        return Err(WindowsAudioError::RenderState {
+            reason: "IAudioClient::GetBufferSize 返回 0",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+    let render_client: IAudioRenderClient = unsafe { client.GetService() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetService(IAudioRenderClient)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    unsafe { client.Start() }.map_err(|error| {
+        hresult_error("IAudioClient::Start", Some(endpoint_id.0.clone()), error)
+    })?;
+
+    Ok(WasapiRenderSink {
+        _com: com,
+        client,
+        render_client,
+        endpoint_id: endpoint_id.clone(),
+        format,
+        buffer_frames,
+        block_frames,
+    })
+}
+
+#[cfg(windows)]
+unsafe fn inspect_render_mix_format(
+    format_ptr: *mut windows::Win32::Media::Audio::WAVEFORMATEX,
+    endpoint_id: &EndpointId,
+) -> Result<EndpointFormat, WindowsAudioError> {
+    let raw = format_ptr as *const u8;
+    let cb_size = std::ptr::read_unaligned(raw.add(16) as *const u16) as usize;
+    if cb_size > 4096 {
+        return Err(invalid_format(
+            "GetMixFormat 返回的 cbSize 过大",
+            Some(endpoint_id.0.clone()),
+        ));
+    }
+    let length = 18usize + cb_size;
+    let bytes = std::slice::from_raw_parts(raw, length);
+    let format = decode_mix_format(bytes).map_err(|error| match error {
+        WindowsAudioError::InvalidFormat { reason, .. } => {
+            invalid_format(&reason, Some(endpoint_id.0.clone()))
+        }
+        other => other,
+    })?;
+    let format_tag = std::ptr::read_unaligned(raw as *const u16);
+    let bits = std::ptr::read_unaligned(raw.add(14) as *const u16);
+    let is_float = if format_tag == 3 {
+        true
+    } else if format_tag == 0xFFFE && cb_size >= 22 && length >= 40 {
+        let sub_format = std::ptr::read_unaligned(raw.add(24) as *const windows::core::GUID);
+        sub_format == windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71)
+    } else {
+        false
+    };
+    if bits != 32 || !is_float {
+        return Err(WindowsAudioError::RenderFormatUnsupported {
+            endpoint_id: endpoint_id.0.clone(),
+            sample_rate: format.sample_rate,
+            bits_per_sample: bits,
+            channels: format.channels,
+        });
+    }
+    if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE {
+        return Err(WindowsAudioError::RenderFormatUnsupported {
+            endpoint_id: endpoint_id.0.clone(),
+            sample_rate: format.sample_rate,
+            bits_per_sample: bits,
+            channels: format.channels,
+        });
+    }
+    Ok(format)
+}
+
+#[cfg(windows)]
+fn write_render_block(
+    sink: &WasapiRenderSink,
+    samples: &[f32],
+) -> Result<RenderWriteResult, WindowsAudioError> {
+    let channels = usize::from(sink.format.channels);
+    if !samples.len().is_multiple_of(channels) {
+        return Err(WindowsAudioError::RenderInputUnaligned {
+            samples: samples.len(),
+            channels,
+        });
+    }
+    let input_frames = samples.len() / channels;
+    if input_frames > sink.block_frames {
+        return Err(WindowsAudioError::RenderBlockTooLarge {
+            expected: sink.block_frames,
+            actual: input_frames,
+        });
+    }
+
+    let padding = unsafe { sink.client.GetCurrentPadding() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetCurrentPadding",
+            Some(sink.endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if padding > sink.buffer_frames {
+        return Err(WindowsAudioError::RenderState {
+            reason: "GetCurrentPadding 超过设备 buffer frame 数",
+            endpoint_id: sink.endpoint_id.0.clone(),
+        });
+    }
+    let available = sink.buffer_frames - padding;
+    if available == 0 {
+        return Ok(RenderWriteResult::NoSpace);
+    }
+    let frames_to_write = available.min(sink.block_frames as u32);
+    let frame_samples = frames_to_write as usize * channels;
+    let buffer = unsafe { sink.render_client.GetBuffer(frames_to_write) }.map_err(|error| {
+        hresult_error(
+            "IAudioRenderClient::GetBuffer",
+            Some(sink.endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if buffer.is_null() {
+        return Err(WindowsAudioError::RenderState {
+            reason: "IAudioRenderClient::GetBuffer 返回空指针",
+            endpoint_id: sink.endpoint_id.0.clone(),
+        });
+    }
+    let input_samples = samples.len().min(frame_samples);
+    unsafe {
+        std::ptr::copy_nonoverlapping(samples.as_ptr(), buffer as *mut f32, input_samples);
+        if input_samples < frame_samples {
+            std::ptr::write_bytes(
+                (buffer as *mut f32).add(input_samples),
+                0,
+                frame_samples - input_samples,
+            );
+        }
+    }
+    unsafe { sink.render_client.ReleaseBuffer(frames_to_write, 0) }.map_err(|error| {
+        hresult_error(
+            "IAudioRenderClient::ReleaseBuffer",
+            Some(sink.endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    Ok(RenderWriteResult::Written {
+        frames: frames_to_write,
+    })
 }
 
 #[cfg(windows)]
@@ -431,11 +825,34 @@ mod tests {
         assert_eq!(e.endpoint_id(), Some("endpoint-id"));
     }
 
+    #[test]
+    fn render_errors_expose_endpoint_context() {
+        let error = WindowsAudioError::RenderFormatUnsupported {
+            endpoint_id: "render-id".to_owned(),
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            channels: 2,
+        };
+        assert_eq!(error.hresult(), None);
+        assert_eq!(error.endpoint_id(), Some("render-id"));
+        assert!(error.to_string().contains("32-bit IEEE float"));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn backend_is_explicitly_unsupported_off_windows() {
         assert!(matches!(
             WindowsAudioBackend::new(),
+            Err(WindowsAudioError::UnsupportedPlatform)
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn render_open_is_explicitly_unsupported_off_windows() {
+        let backend = WindowsAudioBackend::new();
+        assert!(matches!(
+            backend,
             Err(WindowsAudioError::UnsupportedPlatform)
         ));
     }
