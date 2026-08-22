@@ -121,6 +121,18 @@ pub enum WindowsAudioError {
         reason: &'static str,
         endpoint_id: String,
     },
+    #[error("capture endpoint 格式不满足 MVP 要求（48 kHz、32-bit IEEE float、2 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
+    CaptureFormatUnsupported {
+        endpoint_id: String,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        channels: u16,
+    },
+    #[error("capture endpoint 缓冲区状态无效: {reason}, endpoint={endpoint_id}")]
+    CaptureState {
+        reason: &'static str,
+        endpoint_id: String,
+    },
 }
 
 /// WASAPI shared-mode render 写入结果。
@@ -149,10 +161,51 @@ pub struct WasapiRenderSink {
     block_frames: usize,
 }
 
+/// 一次 WASAPI capture packet 的元数据。
+///
+/// `data` 仅在 `WasapiCaptureSource::drain_packets` 的回调期间有效；`silent`
+/// 为真时没有有效样本数据，调用方必须自行写入对应长度的静音帧。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturePacket {
+    pub frames: u32,
+    pub silent: bool,
+    pub discontinuity: bool,
+    pub timestamp_error: bool,
+}
+
+/// 一次非阻塞 capture 排空的统计结果。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CaptureDrainResult {
+    pub packets: u64,
+    pub frames: u64,
+    pub silent_packets: u64,
+    pub discontinuities: u64,
+    pub timestamp_errors: u64,
+}
+
+/// WASAPI shared-mode 普通 capture source。
+pub struct WasapiCaptureSource {
+    #[cfg(windows)]
+    _com: ComGuard,
+    #[cfg(windows)]
+    client: windows::Win32::Media::Audio::IAudioClient,
+    #[cfg(windows)]
+    capture_client: windows::Win32::Media::Audio::IAudioCaptureClient,
+    endpoint_id: EndpointId,
+    format: EndpointFormat,
+}
+
 #[cfg(windows)]
 impl Drop for WasapiRenderSink {
     fn drop(&mut self) {
         // Drop 不能向调用方返回 HRESULT；尽力停止流后由 COM 释放接口。
+        let _ = unsafe { self.client.Stop() };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WasapiCaptureSource {
+    fn drop(&mut self) {
         let _ = unsafe { self.client.Stop() };
     }
 }
@@ -173,6 +226,8 @@ impl WindowsAudioError {
             }
             Self::RenderFormatUnsupported { endpoint_id, .. }
             | Self::RenderState { endpoint_id, .. } => Some(endpoint_id),
+            Self::CaptureFormatUnsupported { endpoint_id, .. }
+            | Self::CaptureState { endpoint_id, .. } => Some(endpoint_id),
             _ => None,
         }
     }
@@ -323,6 +378,22 @@ impl WindowsAudioBackend {
             open_render_sink(endpoint_id, block_frames)
         }
     }
+
+    /// 打开指定普通 capture endpoint，并启动 shared-mode 流。
+    pub fn open_capture_source(
+        &self,
+        endpoint_id: &EndpointId,
+    ) -> Result<WasapiCaptureSource, WindowsAudioError> {
+        #[cfg(not(windows))]
+        {
+            let _ = (self, endpoint_id);
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            open_capture_source(endpoint_id)
+        }
+    }
 }
 
 impl WasapiRenderSink {
@@ -364,14 +435,48 @@ impl WasapiRenderSink {
     }
 }
 
+impl WasapiCaptureSource {
+    pub fn endpoint_id(&self) -> &EndpointId {
+        &self.endpoint_id
+    }
+
+    pub const fn format(&self) -> EndpointFormat {
+        self.format
+    }
+
+    /// 读取当前全部可用 packet，并在 buffer 有效期内同步调用 `on_packet`。
+    ///
+    /// 此函数不等待、不分配；回调不可保留 `data`，应直接写入 source FIFO。
+    /// `data` 在 silent packet 时为 `None`，否则是 interleaved `f32` 样本。
+    pub fn drain_packets<F>(
+        &mut self,
+        mut on_packet: F,
+    ) -> Result<CaptureDrainResult, WindowsAudioError>
+    where
+        F: FnMut(CapturePacket, Option<&[f32]>),
+    {
+        #[cfg(not(windows))]
+        {
+            let _ = &mut on_packet;
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            drain_capture_packets(self, &mut on_packet)
+        }
+    }
+}
+
 #[cfg(windows)]
 fn open_render_sink(
     endpoint_id: &EndpointId,
     block_frames: usize,
 ) -> Result<WasapiRenderSink, WindowsAudioError> {
+    use windows::core::Interface;
     use windows::Win32::Media::Audio::{
-        IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-        AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, DEVICE_STATE_ACTIVE,
+        eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, IMMEndpoint,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+        DEVICE_STATE_ACTIVE,
     };
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 
@@ -425,6 +530,26 @@ fn open_render_sink(
     if state != DEVICE_STATE_ACTIVE {
         return Err(WindowsAudioError::RenderState {
             reason: "endpoint 不是 active 状态",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+    let endpoint = device.cast::<IMMEndpoint>().map_err(|error| {
+        hresult_error(
+            "IMMDevice::QueryInterface(IMMEndpoint)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let flow = unsafe { endpoint.GetDataFlow() }.map_err(|error| {
+        hresult_error(
+            "IMMEndpoint::GetDataFlow",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if flow != eRender {
+        return Err(WindowsAudioError::RenderState {
+            reason: "指定 endpoint 不是 render endpoint",
             endpoint_id: endpoint_id.0.clone(),
         });
     }
@@ -558,7 +683,9 @@ unsafe fn inspect_render_mix_format(
             channels: format.channels,
         });
     }
-    if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE {
+    if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE
+        || usize::from(format.channels) != loopmaster_audio_core::INTERNAL_CHANNELS
+    {
         return Err(WindowsAudioError::RenderFormatUnsupported {
             endpoint_id: endpoint_id.0.clone(),
             sample_rate: format.sample_rate,
@@ -642,6 +769,283 @@ fn write_render_block(
     Ok(RenderWriteResult::Written {
         frames: frames_to_write,
     })
+}
+
+#[cfg(windows)]
+fn open_capture_source(endpoint_id: &EndpointId) -> Result<WasapiCaptureSource, WindowsAudioError> {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eCapture, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, IMMEndpoint,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let com_result = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
+    let com_hresult = com_result.0;
+    if com_hresult < 0 && com_hresult as u32 != 0x80010106 {
+        return Err(WindowsAudioError::ComInitialization {
+            hresult: com_hresult,
+        });
+    }
+    let com = ComGuard {
+        should_uninitialize: com_hresult == 0 || com_hresult == 1,
+    };
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|error| {
+            hresult_error(
+                "CoCreateInstance(MMDeviceEnumerator)",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+    let wide_id: Vec<u16> = endpoint_id
+        .0
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let device = unsafe { enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr())) }.map_err(
+        |error| {
+            hresult_error(
+                "IMMDeviceEnumerator::GetDevice",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        },
+    )?;
+    let state = unsafe { device.GetState() }.map_err(|error| {
+        hresult_error("IMMDevice::GetState", Some(endpoint_id.0.clone()), error)
+    })?;
+    if state != DEVICE_STATE_ACTIVE {
+        return Err(WindowsAudioError::CaptureState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+    let endpoint = device.cast::<IMMEndpoint>().map_err(|error| {
+        hresult_error(
+            "IMMDevice::QueryInterface(IMMEndpoint)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let flow = unsafe { endpoint.GetDataFlow() }.map_err(|error| {
+        hresult_error(
+            "IMMEndpoint::GetDataFlow",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if flow != eCapture {
+        return Err(WindowsAudioError::CaptureState {
+            reason: "指定 endpoint 不是 capture endpoint",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+    let client: IAudioClient = unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) }
+        .map_err(|error| {
+            hresult_error(
+                "IMMDevice::Activate(IAudioClient)",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+    let format_ptr = unsafe { client.GetMixFormat() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetMixFormat",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if format_ptr.is_null() {
+        return Err(invalid_format(
+            "IAudioClient::GetMixFormat 返回空指针",
+            Some(endpoint_id.0.clone()),
+        ));
+    }
+    let format_result = unsafe { inspect_capture_mix_format(format_ptr, endpoint_id) };
+    let format = match format_result {
+        Ok(format) => format,
+        Err(error) => {
+            unsafe {
+                windows::Win32::System::Com::CoTaskMemFree(Some(
+                    format_ptr as *const core::ffi::c_void,
+                ))
+            };
+            return Err(error);
+        }
+    };
+    let initialize_result =
+        unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 0, 0, format_ptr, None) };
+    unsafe {
+        windows::Win32::System::Com::CoTaskMemFree(Some(format_ptr as *const core::ffi::c_void))
+    };
+    initialize_result.map_err(|error| {
+        hresult_error(
+            "IAudioClient::Initialize(shared)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let capture_client: IAudioCaptureClient = unsafe { client.GetService() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetService(IAudioCaptureClient)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    unsafe { client.Start() }.map_err(|error| {
+        hresult_error("IAudioClient::Start", Some(endpoint_id.0.clone()), error)
+    })?;
+    Ok(WasapiCaptureSource {
+        _com: com,
+        client,
+        capture_client,
+        endpoint_id: endpoint_id.clone(),
+        format,
+    })
+}
+
+#[cfg(windows)]
+unsafe fn inspect_capture_mix_format(
+    format_ptr: *mut windows::Win32::Media::Audio::WAVEFORMATEX,
+    endpoint_id: &EndpointId,
+) -> Result<EndpointFormat, WindowsAudioError> {
+    let raw = format_ptr.cast::<u8>();
+    let cb_size = std::ptr::read_unaligned(raw.add(16).cast::<u16>()) as usize;
+    if cb_size > 4096 {
+        return Err(invalid_format(
+            "GetMixFormat 返回的 cbSize 过大",
+            Some(endpoint_id.0.clone()),
+        ));
+    }
+    let length = 18usize + cb_size;
+    let bytes = std::slice::from_raw_parts(raw, length);
+    let format = decode_mix_format(bytes).map_err(|error| match error {
+        WindowsAudioError::InvalidFormat { reason, .. } => {
+            invalid_format(&reason, Some(endpoint_id.0.clone()))
+        }
+        other => other,
+    })?;
+    let format_tag = std::ptr::read_unaligned(raw.cast::<u16>());
+    let bits = std::ptr::read_unaligned(raw.add(14).cast::<u16>());
+    let is_float = if format_tag == 3 {
+        true
+    } else if format_tag == 0xFFFE && cb_size >= 22 && length >= 40 {
+        let sub_format = std::ptr::read_unaligned(raw.add(24).cast::<windows::core::GUID>());
+        sub_format == windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71)
+    } else {
+        false
+    };
+    if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE
+        || format.channels != loopmaster_audio_core::INTERNAL_CHANNELS as u16
+        || bits != 32
+        || !is_float
+    {
+        return Err(WindowsAudioError::CaptureFormatUnsupported {
+            endpoint_id: endpoint_id.0.clone(),
+            sample_rate: format.sample_rate,
+            bits_per_sample: bits,
+            channels: format.channels,
+        });
+    }
+    Ok(format)
+}
+
+#[cfg(windows)]
+fn drain_capture_packets<F>(
+    source: &mut WasapiCaptureSource,
+    on_packet: &mut F,
+) -> Result<CaptureDrainResult, WindowsAudioError>
+where
+    F: FnMut(CapturePacket, Option<&[f32]>),
+{
+    use windows::Win32::Media::Audio::{
+        AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
+        AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
+    };
+
+    let mut result = CaptureDrainResult::default();
+    loop {
+        let packet_frames =
+            unsafe { source.capture_client.GetNextPacketSize() }.map_err(|error| {
+                hresult_error(
+                    "IAudioCaptureClient::GetNextPacketSize",
+                    Some(source.endpoint_id.0.clone()),
+                    error,
+                )
+            })?;
+        if packet_frames == 0 {
+            return Ok(result);
+        }
+        let mut data = std::ptr::null_mut();
+        let mut frames = 0;
+        let mut flags = 0;
+        unsafe {
+            source
+                .capture_client
+                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+        }
+        .map_err(|error| {
+            hresult_error(
+                "IAudioCaptureClient::GetBuffer",
+                Some(source.endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+        if frames == 0 {
+            unsafe { source.capture_client.ReleaseBuffer(0) }.map_err(|error| {
+                hresult_error(
+                    "IAudioCaptureClient::ReleaseBuffer",
+                    Some(source.endpoint_id.0.clone()),
+                    error,
+                )
+            })?;
+            return Err(WindowsAudioError::CaptureState {
+                reason: "GetBuffer 返回 0 frame",
+                endpoint_id: source.endpoint_id.0.clone(),
+            });
+        }
+        let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
+        let discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0;
+        let timestamp_error = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32) != 0;
+        let packet = CapturePacket {
+            frames,
+            silent,
+            discontinuity,
+            timestamp_error,
+        };
+        if silent {
+            on_packet(packet, None);
+        } else if data.is_null() {
+            let release = unsafe { source.capture_client.ReleaseBuffer(frames) };
+            let _ = release;
+            return Err(WindowsAudioError::CaptureState {
+                reason: "非静音 packet 的 GetBuffer 返回空指针",
+                endpoint_id: source.endpoint_id.0.clone(),
+            });
+        } else {
+            let sample_count = frames as usize * usize::from(source.format.channels);
+            let samples = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), sample_count) };
+            on_packet(packet, Some(samples));
+        }
+        unsafe { source.capture_client.ReleaseBuffer(frames) }.map_err(|error| {
+            hresult_error(
+                "IAudioCaptureClient::ReleaseBuffer",
+                Some(source.endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+        result.packets += 1;
+        result.frames += u64::from(frames);
+        result.silent_packets += u64::from(silent);
+        result.discontinuities += u64::from(discontinuity);
+        result.timestamp_errors += u64::from(timestamp_error);
+    }
 }
 
 #[cfg(windows)]
@@ -836,6 +1240,16 @@ mod tests {
         assert_eq!(error.hresult(), None);
         assert_eq!(error.endpoint_id(), Some("render-id"));
         assert!(error.to_string().contains("32-bit IEEE float"));
+    }
+
+    #[test]
+    fn capture_errors_expose_endpoint_context() {
+        let error = WindowsAudioError::CaptureState {
+            reason: "test",
+            endpoint_id: "capture-id".to_owned(),
+        };
+        assert_eq!(error.hresult(), None);
+        assert_eq!(error.endpoint_id(), Some("capture-id"));
     }
 
     #[cfg(not(windows))]
