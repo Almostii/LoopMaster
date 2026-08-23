@@ -4,9 +4,10 @@
 //! worker 之间只通过固定容量 SPSC FIFO 交换 interleaved `f32` block；配置更新
 //! 通过控制通道发送，由 mixer 在 block 边界应用。
 
-use crate::{WindowsAudioBackend, WindowsAudioError};
+use crate::{ProcessLoopbackSource, WasapiCaptureSource, WindowsAudioBackend, WindowsAudioError};
 use loopmaster_audio_core::{
-    AudioFifo, MixerPlan, RouteGraphSnapshot, SourceKind, DEFAULT_BLOCK_FRAMES, INTERNAL_CHANNELS,
+    AudioFifo, MixerPlan, RouteGraphSnapshot, SourceKind, SourceSpec, DEFAULT_BLOCK_FRAMES,
+    INTERNAL_CHANNELS,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -106,6 +107,8 @@ pub enum AudioEngineError {
     UnsupportedSourceKind,
     #[error("source 未配置 endpoint ID")]
     MissingSourceEndpoint,
+    #[error("Process Loopback source 未配置有效 process ID")]
+    MissingProcessId,
     #[error("运行中的引擎不支持更换 endpoint；必须停止后重新启动")]
     EndpointChangeRequiresRestart,
     #[error("WASAPI worker 错误: {0}")]
@@ -329,11 +332,15 @@ fn validate_config(config: &AudioEngineConfig) -> Result<(), AudioEngineError> {
     if graph.sources.len() != 1 || graph.sinks.len() != 1 || graph.sends.len() != 1 {
         return Err(AudioEngineError::UnsupportedTopology);
     }
-    if graph.sources[0].kind != SourceKind::DeviceCapture {
-        return Err(AudioEngineError::UnsupportedSourceKind);
-    }
-    if graph.sources[0].endpoint_id.is_none() {
-        return Err(AudioEngineError::MissingSourceEndpoint);
+    match graph.sources[0].kind {
+        SourceKind::DeviceCapture if graph.sources[0].endpoint_id.is_none() => {
+            return Err(AudioEngineError::MissingSourceEndpoint);
+        }
+        SourceKind::ProcessLoopback if graph.sources[0].process_id.unwrap_or(0) == 0 => {
+            return Err(AudioEngineError::MissingProcessId);
+        }
+        SourceKind::DeviceCapture | SourceKind::ProcessLoopback => {}
+        SourceKind::DeviceLoopback => return Err(AudioEngineError::UnsupportedSourceKind),
     }
     Ok(())
 }
@@ -403,8 +410,9 @@ fn supervisor_worker(
             }
         }
         let graph = graph_config.lock().expect("路由快照锁未中毒").clone();
-        if attempt > 0 {
-            let source_endpoint = match graph.graph().sources[0].endpoint_id.clone() {
+        if attempt > 0 && graph.graph().sources[0].kind == SourceKind::DeviceCapture {
+            let source = graph.graph().sources[0].clone();
+            let source_endpoint = match source.endpoint_id {
                 Some(endpoint) => endpoint,
                 None => {
                     fail(
@@ -460,22 +468,11 @@ fn supervisor_worker(
         };
         let (session_graph_tx, graph_rx) = mpsc::channel();
         *graph_tx_slot.lock().expect("路由通道锁未中毒") = Some(session_graph_tx);
-        let source_endpoint = match graph.graph().sources[0].endpoint_id.clone() {
-            Some(endpoint) => endpoint,
-            None => {
-                fail(
-                    &state,
-                    &engine_stop,
-                    &error,
-                    "source 未配置 endpoint ID".into(),
-                );
-                break;
-            }
-        };
+        let source = graph.graph().sources[0].clone();
         let sink_endpoint = graph_snapshot_sink_endpoint(&graph);
         let mut workers = Vec::with_capacity(3);
         let capture = spawn_capture_worker(
-            source_endpoint,
+            source,
             Arc::clone(&session_stop),
             Arc::clone(&state),
             Arc::clone(&error),
@@ -544,7 +541,7 @@ fn mark_reconnect_exhausted(
 }
 
 fn spawn_capture_worker(
-    endpoint: loopmaster_audio_core::EndpointId,
+    source: SourceSpec,
     stop: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
     error: Arc<Mutex<Option<String>>>,
@@ -554,7 +551,7 @@ fn spawn_capture_worker(
     thread::Builder::new()
         .name("loopmaster-capture".into())
         .spawn(move || {
-            let _ = capture_worker(endpoint, stop, state, error, counters, producer);
+            let _ = capture_worker(source, stop, state, error, counters, producer);
         })
         .expect("创建 capture worker 失败")
 }
@@ -614,20 +611,73 @@ fn spawn_render_worker(
         .expect("创建 render worker 失败")
 }
 
+enum CaptureSource {
+    Device(WasapiCaptureSource),
+    Process(ProcessLoopbackSource),
+}
+
+impl CaptureSource {
+    fn drain_packets<F>(
+        &mut self,
+        on_packet: F,
+    ) -> Result<crate::CaptureDrainResult, WindowsAudioError>
+    where
+        F: FnMut(crate::CapturePacket, Option<&[f32]>),
+    {
+        match self {
+            Self::Device(source) => source.drain_packets(on_packet),
+            Self::Process(source) => source.drain_packets(on_packet),
+        }
+    }
+}
+
 fn capture_worker(
-    endpoint: loopmaster_audio_core::EndpointId,
+    source_spec: SourceSpec,
     stop: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
     error: Arc<Mutex<Option<String>>>,
     counters: Arc<Counters>,
     mut producer: loopmaster_audio_core::AudioFifoProducer,
 ) -> Result<(), ()> {
-    let backend = WindowsAudioBackend::new().map_err(|e| {
-        fail_windows(&state, &stop, &error, &e);
-    })?;
-    let mut source = backend.open_capture_source(&endpoint).map_err(|e| {
-        fail_windows(&state, &stop, &error, &e);
-    })?;
+    let mut source = match source_spec.kind {
+        SourceKind::DeviceCapture => {
+            let endpoint = source_spec.endpoint_id.ok_or(()).map_err(|_| {
+                fail(&state, &stop, &error, "source 未配置 endpoint ID".into());
+            })?;
+            let backend = WindowsAudioBackend::new().map_err(|e| {
+                fail_windows(&state, &stop, &error, &e);
+            })?;
+            CaptureSource::Device(backend.open_capture_source(&endpoint).map_err(|e| {
+                fail_windows(&state, &stop, &error, &e);
+            })?)
+        }
+        SourceKind::ProcessLoopback => {
+            let pid = source_spec
+                .process_id
+                .filter(|pid| *pid != 0)
+                .ok_or(())
+                .map_err(|_| {
+                    fail(
+                        &state,
+                        &stop,
+                        &error,
+                        "Process Loopback source 未配置有效 process ID".into(),
+                    );
+                })?;
+            CaptureSource::Process(ProcessLoopbackSource::open(pid).map_err(|e| {
+                fail_windows(&state, &stop, &error, &e);
+            })?)
+        }
+        SourceKind::DeviceLoopback => {
+            fail(
+                &state,
+                &stop,
+                &error,
+                "当前运行时不支持 Device Loopback source".into(),
+            );
+            return Err(());
+        }
+    };
     let silence = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
     let mut first_packet = true;
     while !stop.load(Ordering::Acquire) {
@@ -967,6 +1017,59 @@ mod tests {
         assert!(matches!(
             AudioEngine::new(config(SourceKind::DeviceCapture, 2)),
             Err(AudioEngineError::UnsupportedTopology)
+        ));
+
+        let mut process_config = config(SourceKind::ProcessLoopback, 1);
+        process_config.graph = RouteGraphSnapshot::new(RouteGraph {
+            sources: vec![SourceSpec {
+                id: SourceId("source-0".into()),
+                kind: SourceKind::ProcessLoopback,
+                endpoint_id: None,
+                process_id: Some(1234),
+                display_name: "process".into(),
+            }],
+            sinks: vec![SinkSpec {
+                id: SinkId("sink".into()),
+                endpoint_id: EndpointId("render".into()),
+                display_name: "Render".into(),
+            }],
+            sends: vec![SendSpec {
+                source_id: SourceId("source-0".into()),
+                sink_id: SinkId("sink".into()),
+                gain_db: 0.0,
+                muted: false,
+                channel_map: Vec::new(),
+            }],
+        })
+        .unwrap();
+        assert!(AudioEngine::new(process_config).is_ok());
+
+        let mut missing_pid = config(SourceKind::ProcessLoopback, 1);
+        missing_pid.graph = RouteGraphSnapshot::new(RouteGraph {
+            sources: vec![SourceSpec {
+                id: SourceId("source-0".into()),
+                kind: SourceKind::ProcessLoopback,
+                endpoint_id: None,
+                process_id: None,
+                display_name: "process".into(),
+            }],
+            sinks: vec![SinkSpec {
+                id: SinkId("sink".into()),
+                endpoint_id: EndpointId("render".into()),
+                display_name: "Render".into(),
+            }],
+            sends: vec![SendSpec {
+                source_id: SourceId("source-0".into()),
+                sink_id: SinkId("sink".into()),
+                gain_db: 0.0,
+                muted: false,
+                channel_map: Vec::new(),
+            }],
+        })
+        .unwrap();
+        assert!(matches!(
+            AudioEngine::new(missing_pid),
+            Err(AudioEngineError::MissingProcessId)
         ));
     }
 

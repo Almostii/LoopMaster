@@ -70,6 +70,13 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(10);
         run_engine_test(&args[2], &args[3], seconds);
+    } else if args.get(1).map(String::as_str) == Some("--process-engine") && args.len() >= 4 {
+        let pid = args[2].parse().unwrap_or(0);
+        let seconds = args
+            .get(4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_process_engine_test(pid, &args[3], seconds);
     } else if args.len() >= 3 {
         let capture_id = &args[1];
         let render_id = &args[2];
@@ -109,6 +116,39 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
             channel_map: Vec::new(),
         }],
     };
+    run_engine_graph_test(graph, seconds)
+}
+
+fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
+    if pid == 0 {
+        eprintln!("Process Loopback 需要有效的进程 PID");
+        std::process::exit(1);
+    }
+    let graph = RouteGraph {
+        sources: vec![SourceSpec {
+            id: SourceId("process".to_owned()),
+            kind: SourceKind::ProcessLoopback,
+            endpoint_id: None,
+            process_id: Some(pid),
+            display_name: format!("process:{pid}"),
+        }],
+        sinks: vec![SinkSpec {
+            id: SinkId("render".to_owned()),
+            endpoint_id: EndpointId(render_id.to_owned()),
+            display_name: "render".to_owned(),
+        }],
+        sends: vec![SendSpec {
+            source_id: SourceId("process".to_owned()),
+            sink_id: SinkId("render".to_owned()),
+            gain_db: 0.0,
+            muted: false,
+            channel_map: Vec::new(),
+        }],
+    };
+    run_engine_graph_test(graph, seconds)
+}
+
+fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
     let snapshot = RouteGraphSnapshot::new(graph).expect("引擎验收路由图有效");
     let mut engine = AudioEngine::new(AudioEngineConfig::new(snapshot)).expect("引擎验收配置有效");
     if let Err(error) = engine.start() {
