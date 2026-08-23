@@ -3,7 +3,8 @@ use loopmaster_audio_core::{
     SourceId, SourceKind, SourceSpec,
 };
 use loopmaster_audio_windows::{
-    AudioEngine, AudioEngineConfig, AudioEngineState, EndpointInfo, WindowsAudioBackend,
+    AudioEngine, AudioEngineConfig, AudioEngineState, EndpointFlow, EndpointFormat, EndpointInfo,
+    WindowsAudioBackend,
 };
 use std::env;
 use std::time::{Duration, Instant};
@@ -420,12 +421,38 @@ fn print_endpoint(index: usize, endpoint: &EndpointInfo) {
     match endpoint.endpoint_format() {
         Some(format) => {
             println!(
-                "  Mix format: {} Hz, {} bit, {} channels",
-                format.sample_rate, format.bits_per_sample, format.channels
+                "  Mix format: {} Hz, {} bit, {} channels{}",
+                format.sample_rate,
+                format.bits_per_sample,
+                format.channels,
+                if format.is_float { ", float" } else { "" }
             );
             println!("  Channel mask: 0x{:08X}", format.channel_mask);
+            println!("  可用性: {}", availability_label(endpoint.flow, format));
         }
-        None => println!("  Mix format: unavailable"),
+        None => {
+            println!("  Mix format: unavailable");
+            println!("  可用性: 未知（无法读取格式）");
+        }
+    }
+}
+
+fn availability_label(flow: EndpointFlow, format: EndpointFormat) -> &'static str {
+    match flow {
+        EndpointFlow::Capture => {
+            if format.capture_compatible() {
+                "可作为 capture source（48 kHz / 32-bit float / 2 声道）"
+            } else {
+                "不满足 capture 契约（需 48 kHz / 32-bit float / 2 声道）"
+            }
+        }
+        EndpointFlow::Render => {
+            if format.render_compatible() {
+                "可作为 render sink（32-bit float / 2 声道，采样率自动重采样）"
+            } else {
+                "不满足 render 契约（需 32-bit float / 2 声道）"
+            }
+        }
     }
 }
 
