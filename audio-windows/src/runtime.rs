@@ -673,6 +673,16 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_a_buffer_large_enough_for_startup_prefill() {
+        let config = config(SourceKind::DeviceCapture, 1);
+        assert_eq!(
+            config.fifo_capacity_frames,
+            config.block_frames * DEFAULT_FIFO_CAPACITY_BLOCKS
+        );
+        assert!(config.fifo_capacity_frames >= config.block_frames * STARTUP_PREFILL_BLOCKS);
+    }
+
+    #[test]
     fn preserves_available_audio_when_render_fifo_underflows() {
         let mut block = vec![1.0, -1.0, 0.0, 0.0];
         let silence = [0.0; 4];
