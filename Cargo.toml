@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "app",
+    "app-service",
     "audio-core",
     "audio-windows",
     "diagnostics",

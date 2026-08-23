@@ -68,15 +68,12 @@ impl EndpointFormat {
 
     /// 该格式能否作为 LoopMaster 的普通 capture source。
     ///
-    /// 普通 WASAPI capture 严格要求 48 kHz、32-bit IEEE float、双声道，
-    /// 与 [`super::open_capture_source`] 的格式校验保持一致。不满足的
-    /// endpoint 会在打开时返回 `CaptureFormatUnsupported`，这里提前暴露
-    /// 相同的判断，供诊断和 UI 标注可用性。
+    /// 要求 32-bit IEEE float、双声道；采样率与内部 48 kHz 不一致时由
+    /// CaptureResampler 在捕获边界转换（阶段 B.5），因此不要求采样率。
+    /// 不满足的 endpoint 会在打开时返回 `CaptureFormatUnsupported`，这里
+    /// 提前暴露相同的判断，供诊断和 UI 标注可用性。
     pub const fn capture_compatible(self) -> bool {
-        self.is_float
-            && self.bits_per_sample == 32
-            && self.channels == INTERNAL_CHANNELS as u16
-            && self.sample_rate == INTERNAL_SAMPLE_RATE
+        self.is_float && self.bits_per_sample == 32 && self.channels == INTERNAL_CHANNELS as u16
     }
 
     /// 该格式能否作为 LoopMaster 的 render sink。
@@ -1876,16 +1873,17 @@ mod tests {
 
     #[test]
     fn distinguishes_capture_and_render_contracts() {
-        // 44.1 kHz、32-bit float、双声道：可作 render（重采样），不可作 capture。
-        let render_only = EndpointFormat {
+        // 44.1 kHz、32-bit float、双声道：capture 与 render 均可（采样率
+        // 分别由 CaptureResampler / FixedInputResampler 转换，阶段 B.5）。
+        let resampled = EndpointFormat {
             sample_rate: 44_100,
             bits_per_sample: 32,
             channels: 2,
             channel_mask: 0x3,
             is_float: true,
         };
-        assert!(render_only.render_compatible());
-        assert!(!render_only.capture_compatible());
+        assert!(resampled.render_compatible());
+        assert!(resampled.capture_compatible());
 
         // 48 kHz、16-bit 整数、双声道：既不满足 capture 也不满足 render。
         let pcm_16 = EndpointFormat {
