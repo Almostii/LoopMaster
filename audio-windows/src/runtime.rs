@@ -16,7 +16,9 @@ use thiserror::Error;
 
 const STATE_STOPPED: u8 = 0;
 const STATE_RUNNING: u8 = 1;
-const STATE_FAILED: u8 = 2;
+const STATE_DEGRADED: u8 = 2;
+const STATE_RECONNECTING: u8 = 3;
+const STATE_FAILED: u8 = 4;
 // 设备启动和共享模式调度在最初几个周期内存在抖动。让管线先积累
 // 两个 block，再开始计入运行期欠载，避免把启动窗口误当作稳定性故障。
 const STARTUP_PREFILL_BLOCKS: usize = 2;
@@ -27,6 +29,32 @@ pub struct AudioEngineConfig {
     pub graph: RouteGraphSnapshot,
     pub block_frames: usize,
     pub fifo_capacity_frames: usize,
+}
+
+/// 音频引擎的运行状态。
+///
+/// `Degraded` 表示 worker 因设备失效退出，错误具备重连条件；
+/// `Reconnecting` 为后续自动重建 stream 预留，当前版本只提供状态模型，
+/// 不会假装已经完成真实设备拔插恢复。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioEngineState {
+    Stopped,
+    Running,
+    Degraded,
+    Reconnecting,
+    Failed,
+}
+
+impl AudioEngineState {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            STATE_RUNNING => Self::Running,
+            STATE_DEGRADED => Self::Degraded,
+            STATE_RECONNECTING => Self::Reconnecting,
+            STATE_FAILED => Self::Failed,
+            _ => Self::Stopped,
+        }
+    }
 }
 
 impl AudioEngineConfig {
@@ -85,6 +113,7 @@ pub struct AudioEngineStats {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioEngineStatus {
+    pub state: AudioEngineState,
     pub running: bool,
     pub failed: bool,
     pub last_error: Option<String>,
@@ -192,11 +221,10 @@ impl AudioEngine {
         let capture_state = Arc::clone(&state);
         let capture_error = Arc::clone(&last_error);
         let capture_counters = Arc::clone(&counters);
-        let capture_final_state = Arc::clone(&state);
         let capture_worker = thread::Builder::new()
             .name("loopmaster-capture".into())
             .spawn(move || {
-                let result = capture_worker(
+                let _result = capture_worker(
                     source_endpoint,
                     capture_stop,
                     capture_state.clone(),
@@ -204,9 +232,6 @@ impl AudioEngine {
                     capture_counters,
                     source_tx,
                 );
-                if result.is_err() {
-                    capture_final_state.store(STATE_FAILED, Ordering::Release);
-                }
             })
             .expect("创建 capture worker 失败");
 
@@ -214,11 +239,10 @@ impl AudioEngine {
         let mixer_state = Arc::clone(&state);
         let mixer_error = Arc::clone(&last_error);
         let mixer_counters = Arc::clone(&counters);
-        let mixer_final_state = Arc::clone(&state);
         let mixer_worker = thread::Builder::new()
             .name("loopmaster-mixer".into())
             .spawn(move || {
-                let result = mixer_worker(
+                let _result = mixer_worker(
                     graph,
                     graph_rx,
                     block_frames,
@@ -229,9 +253,6 @@ impl AudioEngine {
                     mixer_rx,
                     mixer_tx,
                 );
-                if result.is_err() {
-                    mixer_final_state.store(STATE_FAILED, Ordering::Release);
-                }
             })
             .expect("创建 mixer worker 失败");
 
@@ -240,11 +261,10 @@ impl AudioEngine {
         let render_state = Arc::clone(&state);
         let render_error = Arc::clone(&last_error);
         let render_counters = Arc::clone(&counters);
-        let render_final_state = Arc::clone(&state);
         let render_worker = thread::Builder::new()
             .name("loopmaster-render".into())
             .spawn(move || {
-                let result = render_worker(
+                let _result = render_worker(
                     sink_endpoint,
                     block_frames,
                     render_stop,
@@ -253,9 +273,6 @@ impl AudioEngine {
                     render_counters,
                     render_rx,
                 );
-                if result.is_err() {
-                    render_final_state.store(STATE_FAILED, Ordering::Release);
-                }
             })
             .expect("创建 render worker 失败");
         self.graph_tx = Some(graph_tx);
@@ -298,9 +315,11 @@ impl AudioEngine {
 
     pub fn status(&self) -> AudioEngineStatus {
         let state = self.state.load(Ordering::Acquire);
+        let state = AudioEngineState::from_raw(state);
         AudioEngineStatus {
-            running: state == STATE_RUNNING,
-            failed: state == STATE_FAILED,
+            state,
+            running: state == AudioEngineState::Running,
+            failed: state == AudioEngineState::Failed,
             last_error: self.last_error.lock().expect("状态锁未中毒").clone(),
             stats: self.counters.snapshot(),
         }
@@ -345,6 +364,22 @@ fn fail(state: &AtomicU8, stop: &AtomicBool, error: &Mutex<Option<String>>, valu
     stop.store(true, Ordering::Release);
 }
 
+fn fail_windows(
+    state: &AtomicU8,
+    stop: &AtomicBool,
+    error: &Mutex<Option<String>>,
+    value: &WindowsAudioError,
+) {
+    *error.lock().expect("状态锁未中毒") = Some(value.to_string());
+    let next_state = if value.is_device_failure() {
+        STATE_DEGRADED
+    } else {
+        STATE_FAILED
+    };
+    state.store(next_state, Ordering::Release);
+    stop.store(true, Ordering::Release);
+}
+
 fn capture_worker(
     endpoint: loopmaster_audio_core::EndpointId,
     stop: Arc<AtomicBool>,
@@ -354,10 +389,10 @@ fn capture_worker(
     mut producer: loopmaster_audio_core::AudioFifoProducer,
 ) -> Result<(), ()> {
     let backend = WindowsAudioBackend::new().map_err(|e| {
-        fail(&state, &stop, &error, e.to_string());
+        fail_windows(&state, &stop, &error, &e);
     })?;
     let mut source = backend.open_capture_source(&endpoint).map_err(|e| {
-        fail(&state, &stop, &error, e.to_string());
+        fail_windows(&state, &stop, &error, &e);
     })?;
     let silence = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
     let mut first_packet = true;
@@ -405,7 +440,7 @@ fn capture_worker(
             Ok(stats) if stats.packets == 0 => thread::sleep(Duration::from_millis(1)),
             Ok(_) => {}
             Err(e) => {
-                fail(&state, &stop, &error, e.to_string());
+                fail_windows(&state, &stop, &error, &e);
                 return Err(());
             }
         }
@@ -554,12 +589,12 @@ fn render_worker(
     mut consumer: loopmaster_audio_core::AudioFifoConsumer,
 ) -> Result<(), ()> {
     let backend = WindowsAudioBackend::new().map_err(|e| {
-        fail(&state, &stop, &error, e.to_string());
+        fail_windows(&state, &stop, &error, &e);
     })?;
     let mut sink = backend
         .open_render_sink(&endpoint, block_frames)
         .map_err(|e| {
-            fail(&state, &stop, &error, e.to_string());
+            fail_windows(&state, &stop, &error, &e);
         })?;
     let mut block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
     let mut pending = false;
@@ -630,7 +665,7 @@ fn render_worker(
                 thread::sleep(Duration::from_millis(1));
             }
             Err(e) => {
-                fail(&state, &stop, &error, e.to_string());
+                fail_windows(&state, &stop, &error, &e);
                 return Err(());
             }
         }
@@ -641,6 +676,7 @@ fn render_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AUDCLNT_E_DEVICE_INVALIDATED;
     use loopmaster_audio_core::{
         EndpointId, RouteGraph, SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec,
     };
@@ -677,6 +713,7 @@ mod tests {
     fn validates_minimum_runtime_topology() {
         let engine = AudioEngine::new(config(SourceKind::DeviceCapture, 1)).unwrap();
         assert!(!engine.status().running);
+        assert_eq!(engine.status().state, AudioEngineState::Stopped);
 
         assert!(matches!(
             AudioEngine::new(config(SourceKind::DeviceLoopback, 1)),
@@ -686,6 +723,62 @@ mod tests {
             AudioEngine::new(config(SourceKind::DeviceCapture, 2)),
             Err(AudioEngineError::UnsupportedTopology)
         ));
+    }
+
+    #[test]
+    fn publishes_degraded_for_device_failure_and_failed_for_other_errors() {
+        let state = AtomicU8::new(STATE_RUNNING);
+        let stop = AtomicBool::new(false);
+        let error = Mutex::new(None);
+        let device_error = WindowsAudioError::HResult {
+            operation: "IAudioClient::Start",
+            hresult: AUDCLNT_E_DEVICE_INVALIDATED,
+            endpoint_id: Some("capture-id".into()),
+        };
+        fail_windows(&state, &stop, &error, &device_error);
+        assert_eq!(
+            AudioEngineState::from_raw(state.load(Ordering::Acquire)),
+            AudioEngineState::Degraded
+        );
+        assert!(stop.load(Ordering::Acquire));
+        assert!(error.lock().unwrap().is_some());
+
+        state.store(STATE_RUNNING, Ordering::Release);
+        stop.store(false, Ordering::Release);
+        let ordinary_error = WindowsAudioError::HResult {
+            operation: "IAudioClient::Initialize",
+            hresult: -2,
+            endpoint_id: Some("capture-id".into()),
+        };
+        fail_windows(&state, &stop, &error, &ordinary_error);
+        assert_eq!(
+            AudioEngineState::from_raw(state.load(Ordering::Acquire)),
+            AudioEngineState::Failed
+        );
+    }
+
+    #[test]
+    fn exposes_all_recovery_states() {
+        assert_eq!(
+            AudioEngineState::from_raw(STATE_RUNNING),
+            AudioEngineState::Running
+        );
+        assert_eq!(
+            AudioEngineState::from_raw(STATE_DEGRADED),
+            AudioEngineState::Degraded
+        );
+        assert_eq!(
+            AudioEngineState::from_raw(STATE_RECONNECTING),
+            AudioEngineState::Reconnecting
+        );
+        assert_eq!(
+            AudioEngineState::from_raw(STATE_FAILED),
+            AudioEngineState::Failed
+        );
+        assert_eq!(
+            AudioEngineState::from_raw(STATE_STOPPED),
+            AudioEngineState::Stopped
+        );
     }
 
     #[test]
