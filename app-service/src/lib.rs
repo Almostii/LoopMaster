@@ -26,7 +26,7 @@ use thiserror::Error;
 /// 服务层错误：包装引擎/后端错误并附加用户可读恢复建议。
 #[derive(Debug, Error)]
 pub enum ServiceError {
-    #[error("{source}")]
+    #[error("{source}；建议：{hint}")]
     Windows {
         source: WindowsAudioError,
         /// 面向用户的中文恢复建议。
@@ -279,6 +279,7 @@ impl RouteEditor {
 
     /// 应用一次原子编辑；非法编辑立即返回错误且 draft 不变。
     pub fn apply(&mut self, edit: RouteEdit) -> Result<(), RouteGraphError> {
+        let previous = self.draft.clone();
         match edit {
             RouteEdit::AddSource(source) => self.draft.sources.push(source),
             RouteEdit::RemoveSource(id) => {
@@ -360,7 +361,10 @@ impl RouteEditor {
                 send.channel_map = channel_map;
             }
         }
-        self.draft.validate()?;
+        if let Err(error) = self.draft.validate() {
+            self.draft = previous;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -509,6 +513,14 @@ mod tests {
     }
 
     #[test]
+    fn invalid_edit_does_not_mutate_draft() {
+        let mut editor = editor();
+        let before = editor.draft().clone();
+        assert!(editor.apply(RouteEdit::AddSource(source("a"))).is_err());
+        assert_eq!(editor.draft(), &before);
+    }
+
+    #[test]
     fn device_projection_marks_capture_ready() {
         let info = EndpointInfo {
             id: EndpointId("cap".into()),
@@ -525,6 +537,16 @@ mod tests {
         let model = DeviceModel::from_endpoint(&info);
         assert_eq!(model.compatibility, DeviceCompatibility::CaptureReady);
         assert_eq!(model.status, DeviceStatus::Active);
+    }
+
+    #[test]
+    fn windows_error_includes_recovery_hint() {
+        let error = ServiceError::from(WindowsAudioError::HResult {
+            operation: "test",
+            hresult: -1,
+            endpoint_id: Some("endpoint".into()),
+        });
+        assert!(error.to_string().contains("建议："));
     }
 
     #[test]

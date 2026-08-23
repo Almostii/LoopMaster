@@ -311,18 +311,7 @@ impl AudioEngine {
         let next = graph.graph();
         // 运行中只允许 send 级变更（增益/静音/通道映射/启停）。source/sink 的
         // 数量或端点集合变化需要重建 worker 组，必须显式重启（阶段 B.2 语义）。
-        let topology_changed = previous.sources.len() != next.sources.len()
-            || previous.sinks.len() != next.sinks.len()
-            || previous
-                .sources
-                .iter()
-                .zip(&next.sources)
-                .any(|(a, b)| a.endpoint_id != b.endpoint_id)
-            || previous
-                .sinks
-                .iter()
-                .zip(&next.sinks)
-                .any(|(a, b)| a.endpoint_id != b.endpoint_id);
+        let topology_changed = topology_changed(previous, next);
         if topology_changed {
             return Err(AudioEngineError::EndpointChangeRequiresRestart);
         }
@@ -363,6 +352,27 @@ impl AudioEngine {
             stats: self.counters.snapshot(),
         }
     }
+}
+
+/// 判断运行中是否发生了需要重建 worker 的 source/sink 拓扑变化。
+/// send 的增益、静音和通道映射变化不属于拓扑变化，可以交给 mixer 热更新。
+fn topology_changed(
+    previous: &loopmaster_audio_core::RouteGraph,
+    next: &loopmaster_audio_core::RouteGraph,
+) -> bool {
+    previous.sources.len() != next.sources.len()
+        || previous.sinks.len() != next.sinks.len()
+        || previous.sources.iter().zip(&next.sources).any(|(a, b)| {
+            a.id != b.id
+                || a.kind != b.kind
+                || a.endpoint_id != b.endpoint_id
+                || a.process_id != b.process_id
+        })
+        || previous
+            .sinks
+            .iter()
+            .zip(&next.sinks)
+            .any(|(a, b)| a.id != b.id || a.endpoint_id != b.endpoint_id)
 }
 
 impl Drop for AudioEngine {
@@ -1328,6 +1338,34 @@ mod tests {
             AudioEngine::new(missing_pid),
             Err(AudioEngineError::MissingProcessId)
         ));
+    }
+
+    #[test]
+    fn treats_process_pid_change_as_topology_change() {
+        let previous = loopmaster_audio_core::RouteGraph {
+            sources: vec![SourceSpec {
+                id: SourceId("source-0".into()),
+                kind: SourceKind::ProcessLoopback,
+                endpoint_id: None,
+                process_id: Some(1234),
+                display_name: "process-1".into(),
+            }],
+            sinks: vec![SinkSpec {
+                id: SinkId("sink".into()),
+                endpoint_id: EndpointId("render".into()),
+                display_name: "Render".into(),
+            }],
+            sends: vec![SendSpec {
+                source_id: SourceId("source-0".into()),
+                sink_id: SinkId("sink".into()),
+                gain_db: 0.0,
+                muted: false,
+                channel_map: Vec::new(),
+            }],
+        };
+        let mut next = previous.clone();
+        next.sources[0].process_id = Some(5678);
+        assert!(topology_changed(&previous, &next));
     }
 
     #[test]
