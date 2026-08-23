@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 loopmaster-audio-core = { path = "../audio-core" }
 loopmaster-audio-windows = { path = "../audio-windows" }
+loopmaster-app-service = { path = "../app-service" }
 slint = "1.13"
 
 [build-dependencies]

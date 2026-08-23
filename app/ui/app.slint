@@ -1,39 +1,131 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button, ComboBox, Slider, VerticalBox, HorizontalBox, CheckBox } from "std-widgets.slint";
 
 export component MainWindow inherits Window {
     title: "LoopMaster";
-    min-width: 720px;
-    min-height: 480px;
+    min-width: 900px;
+    min-height: 640px;
+
+    // Rust 侧填充的属性
+    in-out property <[string]> process-model: [];
+    in-out property <[string]> sink-model: [];
+    in-out property <int> process-index: -1;
+    in-out property <int> sink-index: -1;
+    in-out property <float> gain: 0;
+    in-out property <bool> muted: false;
+    in-out property <string> engine-state: "Stopped";
+    in-out property <bool> running: false;
+    in-out property <string> stats-text: "";
+
+    // Rust 侧处理的事件
+    callback refresh();
+    callback start();
+    callback stop();
+    callback apply-gain(float);
+    callback toggle-mute(bool);
 
     VerticalBox {
-        padding: 24px;
-        spacing: 16px;
+        padding: 16px;
+        spacing: 12px;
 
-        Text {
-            text: "LoopMaster";
-            font-size: 28px;
-        }
-
-        Text {
-            text: "Windows 音频路由器";
-            color: #60646f;
-        }
-
-        Rectangle {
-            border-width: 1px;
-            border-color: #d7d9df;
-            background: #f7f8fa;
-            VerticalBox {
-                padding: 16px;
-                Text { text: "项目骨架已创建"; font-size: 18px; }
-                Text { text: "音频设备枚举和路由引擎尚未实现。"; color: #60646f; }
+        // 顶部：标题 + 状态 + 操作
+        HorizontalBox {
+            spacing: 12px;
+            Rectangle {
+                height: 44px;
+                border-radius: 6px;
+                background: root.running ? #e8f5e9 : #fbe9e7;
+                HorizontalBox {
+                    padding: 10px;
+                    Text {
+                        text: "引擎状态: " + root.engine-state;
+                        font-weight: 700;
+                    }
+                }
+            }
+            Button {
+                text: "刷新设备/进程";
+                clicked => { root.refresh(); }
+            }
+            Button {
+                text: root.running ? "停止" : "启动";
+                primary: true;
+                clicked => {
+                    if (root.running) {
+                        root.stop();
+                    } else {
+                        root.start();
+                    }
+                }
             }
         }
 
-        Button {
-            text: "退出";
-            clicked => { root.close(); }
+        // 路由配置
+        Rectangle {
+            border-width: 1px;
+            border-color: #d7d9df;
+            border-radius: 6px;
+            background: #f7f8fa;
+            VerticalBox {
+                padding: 14px;
+                spacing: 10px;
+
+                Text { text: "路由配置"; font-size: 16px; font-weight: 700; }
+
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "音频来源（进程）: "; vertical-alignment: center; }
+                    ComboBox {
+                        model: root.process-model;
+                        current-index: root.process-index;
+                    }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "输出目标（设备）: "; vertical-alignment: center; }
+                    ComboBox {
+                        model: root.sink-model;
+                        current-index: root.sink-index;
+                    }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "增益: "; vertical-alignment: center; }
+                    Slider {
+                        minimum: -60;
+                        maximum: 12;
+                        value: root.gain;
+                        changed(value) => {
+                            root.gain = value;
+                            root.apply-gain(value);
+                        }
+                    }
+                    Text { text: root.gain + " dB"; vertical-alignment: center; }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "静音: "; vertical-alignment: center; }
+                    CheckBox {
+                        checked: root.muted;
+                        toggled => {
+                            root.muted = self.checked;
+                            root.toggle-mute(self.checked);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 统计区
+        Rectangle {
+            border-width: 1px;
+            border-color: #d7d9df;
+            border-radius: 6px;
+            background: #f7f8fa;
+            VerticalBox {
+                padding: 12px;
+                Text { text: "引擎统计"; font-size: 16px; font-weight: 700; }
+                Text { text: root.stats-text; color: #40444f; }
+            }
         }
     }
 }
-
