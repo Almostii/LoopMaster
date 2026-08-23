@@ -22,9 +22,16 @@ const STATE_FAILED: u8 = 4;
 // 设备启动和共享模式调度在最初几个周期内存在抖动。让管线先积累
 // 两个 block，再开始计入运行期欠载，避免把启动窗口误当作稳定性故障。
 const STARTUP_PREFILL_BLOCKS: usize = 2;
+// 共享模式的 packet 到达和 worker 唤醒都不是硬实时的。只有连续两个
+// block 没有足够输入时才计为一次欠载；真实的 WASAPI discontinuity 仍独立统计。
+const UNDERFLOW_GRACE_BLOCKS: usize = 2;
 const DEFAULT_FIFO_CAPACITY_BLOCKS: usize = 32;
 const DEFAULT_RECONNECT_ATTEMPTS: usize = 5;
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
+
+fn underflow_grace_period(block_period: Duration) -> Duration {
+    block_period * UNDERFLOW_GRACE_BLOCKS as u32
+}
 
 #[derive(Clone, Debug)]
 pub struct AudioEngineConfig {
@@ -668,14 +675,20 @@ fn mixer_worker(
             }
         }
         let available = consumer.available_frames();
-        if !primed && available < startup_prefill_frames {
-            thread::sleep(Duration::from_millis(1));
-            continue;
+        if !primed {
+            if available < startup_prefill_frames {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            primed = true;
+            // 预填充期间 next_deadline 已经过期；从当前时刻重新建立节拍，
+            // 避免首次处理时连续追赶多个过期 block，造成 FIFO 水位瞬时下降。
+            next_deadline = Instant::now();
         }
-        primed = true;
         if available < block_frames {
             let started = starvation_since.get_or_insert_with(Instant::now);
-            if !starvation_reported && started.elapsed() >= block_period {
+            let grace = underflow_grace_period(block_period);
+            if !starvation_reported && started.elapsed() >= grace {
                 counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
                 starvation_reported = true;
             }
@@ -757,14 +770,19 @@ fn render_worker(
     while !stop.load(Ordering::Acquire) {
         if !pending {
             let available = consumer.available_frames();
-            if !primed && available < startup_prefill_frames {
-                thread::sleep(Duration::from_millis(1));
-                continue;
+            if !primed {
+                if available < startup_prefill_frames {
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                primed = true;
+                // 与 mixer 相同，丢弃预填充期间累积的旧 deadline，避免启动突发。
+                next_deadline = Instant::now();
             }
-            primed = true;
             if available < block_frames {
                 let started = starvation_since.get_or_insert_with(Instant::now);
-                if !starvation_reported && started.elapsed() >= block_period {
+                let grace = underflow_grace_period(block_period);
+                if !starvation_reported && started.elapsed() >= grace {
                     counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
                     starvation_reported = true;
                 }
@@ -952,6 +970,15 @@ mod tests {
             config.block_frames * DEFAULT_FIFO_CAPACITY_BLOCKS
         );
         assert!(config.fifo_capacity_frames >= config.block_frames * STARTUP_PREFILL_BLOCKS);
+    }
+
+    #[test]
+    fn underflow_grace_requires_two_audio_blocks() {
+        let block_period = Duration::from_millis(10);
+        assert_eq!(
+            underflow_grace_period(block_period),
+            Duration::from_millis(20)
+        );
     }
 
     #[test]
