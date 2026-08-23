@@ -23,6 +23,8 @@ const STATE_FAILED: u8 = 4;
 // 两个 block，再开始计入运行期欠载，避免把启动窗口误当作稳定性故障。
 const STARTUP_PREFILL_BLOCKS: usize = 2;
 const DEFAULT_FIFO_CAPACITY_BLOCKS: usize = 32;
+const DEFAULT_RECONNECT_ATTEMPTS: usize = 5;
+const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 pub struct AudioEngineConfig {
@@ -162,7 +164,7 @@ pub struct AudioEngine {
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
     last_error: Arc<Mutex<Option<String>>>,
-    graph_tx: Option<mpsc::Sender<RouteGraphSnapshot>>,
+    graph_tx: Arc<Mutex<Option<mpsc::Sender<RouteGraphSnapshot>>>>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -189,7 +191,7 @@ impl AudioEngine {
                 graph_updates: AtomicU64::new(0),
             }),
             last_error: Arc::new(Mutex::new(None)),
-            graph_tx: None,
+            graph_tx: Arc::new(Mutex::new(None)),
             workers: Vec::new(),
         })
     }
@@ -201,82 +203,30 @@ impl AudioEngine {
         *self.last_error.lock().expect("状态锁未中毒") = None;
         self.stop.store(false, Ordering::Release);
         self.state.store(STATE_RUNNING, Ordering::Release);
-        let (source_tx, mixer_rx) =
-            AudioFifo::split(self.config.fifo_capacity_frames, INTERNAL_CHANNELS)?;
-        let (mixer_tx, render_rx) =
-            AudioFifo::split(self.config.fifo_capacity_frames, INTERNAL_CHANNELS)?;
-        let (graph_tx, graph_rx) = mpsc::channel();
         let graph = self.config.graph.clone();
         let block_frames = self.config.block_frames;
+        let fifo_capacity_frames = self.config.fifo_capacity_frames;
         let stop = Arc::clone(&self.stop);
         let state = Arc::clone(&self.state);
         let counters = Arc::clone(&self.counters);
         let last_error = Arc::clone(&self.last_error);
-        let source = graph.graph().sources[0].clone();
-        let source_endpoint = source
-            .endpoint_id
-            .clone()
-            .ok_or(AudioEngineError::MissingSourceEndpoint)?;
-        let capture_stop = Arc::clone(&stop);
-        let capture_state = Arc::clone(&state);
-        let capture_error = Arc::clone(&last_error);
-        let capture_counters = Arc::clone(&counters);
-        let capture_worker = thread::Builder::new()
-            .name("loopmaster-capture".into())
+        let graph_tx = Arc::clone(&self.graph_tx);
+        let supervisor = thread::Builder::new()
+            .name("loopmaster-audio-supervisor".into())
             .spawn(move || {
-                let _result = capture_worker(
-                    source_endpoint,
-                    capture_stop,
-                    capture_state.clone(),
-                    capture_error,
-                    capture_counters,
-                    source_tx,
-                );
-            })
-            .expect("创建 capture worker 失败");
-
-        let mixer_stop = Arc::clone(&stop);
-        let mixer_state = Arc::clone(&state);
-        let mixer_error = Arc::clone(&last_error);
-        let mixer_counters = Arc::clone(&counters);
-        let mixer_worker = thread::Builder::new()
-            .name("loopmaster-mixer".into())
-            .spawn(move || {
-                let _result = mixer_worker(
+                supervisor_worker(
                     graph,
-                    graph_rx,
                     block_frames,
-                    mixer_stop,
-                    mixer_state.clone(),
-                    mixer_error,
-                    mixer_counters,
-                    mixer_rx,
-                    mixer_tx,
+                    fifo_capacity_frames,
+                    stop,
+                    state,
+                    last_error,
+                    counters,
+                    graph_tx,
                 );
             })
-            .expect("创建 mixer worker 失败");
-
-        let sink_endpoint = graph_snapshot_sink_endpoint(&self.config.graph);
-        let render_stop = Arc::clone(&stop);
-        let render_state = Arc::clone(&state);
-        let render_error = Arc::clone(&last_error);
-        let render_counters = Arc::clone(&counters);
-        let render_worker = thread::Builder::new()
-            .name("loopmaster-render".into())
-            .spawn(move || {
-                let _result = render_worker(
-                    sink_endpoint,
-                    block_frames,
-                    render_stop,
-                    render_state.clone(),
-                    render_error,
-                    render_counters,
-                    render_rx,
-                );
-            })
-            .expect("创建 render worker 失败");
-        self.graph_tx = Some(graph_tx);
-        self.workers = vec![capture_worker, mixer_worker, render_worker];
+            .expect("创建音频 supervisor 失败");
+        self.workers = vec![supervisor];
         Ok(())
     }
 
@@ -293,7 +243,12 @@ impl AudioEngine {
         {
             return Err(AudioEngineError::EndpointChangeRequiresRestart);
         }
-        let tx = self.graph_tx.as_ref().ok_or(AudioEngineError::NotRunning)?;
+        let tx = self
+            .graph_tx
+            .lock()
+            .expect("路由通道锁未中毒")
+            .clone()
+            .ok_or(AudioEngineError::NotRunning)?;
         tx.send(graph.clone())
             .map_err(|_| AudioEngineError::NotRunning)?;
         self.config.graph = graph;
@@ -308,7 +263,7 @@ impl AudioEngine {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
-        self.graph_tx = None;
+        *self.graph_tx.lock().expect("路由通道锁未中毒") = None;
         self.state.store(STATE_STOPPED, Ordering::Release);
         Ok(())
     }
@@ -378,6 +333,188 @@ fn fail_windows(
     };
     state.store(next_state, Ordering::Release);
     stop.store(true, Ordering::Release);
+}
+
+/// 负责管线会话的生命周期。每次重试都重新创建 FIFO、WASAPI stream 和
+/// 重采样器；旧会话的 worker 必须先 join，避免两个会话同时驱动同一 endpoint。
+#[allow(clippy::too_many_arguments)]
+fn supervisor_worker(
+    graph: RouteGraphSnapshot,
+    block_frames: usize,
+    fifo_capacity_frames: usize,
+    engine_stop: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    error: Arc<Mutex<Option<String>>>,
+    counters: Arc<Counters>,
+    graph_tx_slot: Arc<Mutex<Option<mpsc::Sender<RouteGraphSnapshot>>>>,
+) {
+    for attempt in 0..=DEFAULT_RECONNECT_ATTEMPTS {
+        if engine_stop.load(Ordering::Acquire) {
+            break;
+        }
+        if attempt > 0 {
+            state.store(STATE_RECONNECTING, Ordering::Release);
+            thread::sleep(RECONNECT_DELAY);
+            if engine_stop.load(Ordering::Acquire) {
+                break;
+            }
+            state.store(STATE_RUNNING, Ordering::Release);
+        }
+        let session_stop = Arc::new(AtomicBool::new(false));
+        let (source_tx, mixer_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
+        {
+            Ok(value) => value,
+            Err(e) => {
+                fail(&state, &engine_stop, &error, e.to_string());
+                break;
+            }
+        };
+        let (mixer_tx, render_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
+        {
+            Ok(value) => value,
+            Err(e) => {
+                fail(&state, &engine_stop, &error, e.to_string());
+                break;
+            }
+        };
+        let (session_graph_tx, graph_rx) = mpsc::channel();
+        *graph_tx_slot.lock().expect("路由通道锁未中毒") = Some(session_graph_tx);
+        let source_endpoint = match graph.graph().sources[0].endpoint_id.clone() {
+            Some(endpoint) => endpoint,
+            None => {
+                fail(
+                    &state,
+                    &engine_stop,
+                    &error,
+                    "source 未配置 endpoint ID".into(),
+                );
+                break;
+            }
+        };
+        let sink_endpoint = graph_snapshot_sink_endpoint(&graph);
+        let mut workers = Vec::with_capacity(3);
+        let capture = spawn_capture_worker(
+            source_endpoint,
+            Arc::clone(&session_stop),
+            Arc::clone(&state),
+            Arc::clone(&error),
+            Arc::clone(&counters),
+            source_tx,
+        );
+        let mixer = spawn_mixer_worker(
+            graph.clone(),
+            graph_rx,
+            block_frames,
+            Arc::clone(&session_stop),
+            Arc::clone(&state),
+            Arc::clone(&error),
+            Arc::clone(&counters),
+            mixer_rx,
+            mixer_tx,
+        );
+        let render = spawn_render_worker(
+            sink_endpoint,
+            block_frames,
+            Arc::clone(&session_stop),
+            Arc::clone(&state),
+            Arc::clone(&error),
+            Arc::clone(&counters),
+            render_rx,
+        );
+        workers.push(capture);
+        workers.push(mixer);
+        workers.push(render);
+        while !engine_stop.load(Ordering::Acquire) && !session_stop.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        session_stop.store(true, Ordering::Release);
+        for worker in workers {
+            let _ = worker.join();
+        }
+        *graph_tx_slot.lock().expect("路由通道锁未中毒") = None;
+        if engine_stop.load(Ordering::Acquire) {
+            break;
+        }
+        if state.load(Ordering::Acquire) != STATE_DEGRADED {
+            break;
+        }
+        if attempt == DEFAULT_RECONNECT_ATTEMPTS {
+            *error.lock().expect("状态锁未中毒") = Some("设备重连重试次数耗尽".into());
+            state.store(STATE_FAILED, Ordering::Release);
+            engine_stop.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn spawn_capture_worker(
+    endpoint: loopmaster_audio_core::EndpointId,
+    stop: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    error: Arc<Mutex<Option<String>>>,
+    counters: Arc<Counters>,
+    producer: loopmaster_audio_core::AudioFifoProducer,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("loopmaster-capture".into())
+        .spawn(move || {
+            let _ = capture_worker(endpoint, stop, state, error, counters, producer);
+        })
+        .expect("创建 capture worker 失败")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_mixer_worker(
+    graph: RouteGraphSnapshot,
+    graph_rx: mpsc::Receiver<RouteGraphSnapshot>,
+    block_frames: usize,
+    stop: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    error: Arc<Mutex<Option<String>>>,
+    counters: Arc<Counters>,
+    consumer: loopmaster_audio_core::AudioFifoConsumer,
+    producer: loopmaster_audio_core::AudioFifoProducer,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("loopmaster-mixer".into())
+        .spawn(move || {
+            let _ = mixer_worker(
+                graph,
+                graph_rx,
+                block_frames,
+                stop,
+                state,
+                error,
+                counters,
+                consumer,
+                producer,
+            );
+        })
+        .expect("创建 mixer worker 失败")
+}
+
+fn spawn_render_worker(
+    endpoint: loopmaster_audio_core::EndpointId,
+    block_frames: usize,
+    stop: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
+    error: Arc<Mutex<Option<String>>>,
+    counters: Arc<Counters>,
+    consumer: loopmaster_audio_core::AudioFifoConsumer,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("loopmaster-render".into())
+        .spawn(move || {
+            let _ = render_worker(
+                endpoint,
+                block_frames,
+                stop,
+                state,
+                error,
+                counters,
+                consumer,
+            );
+        })
+        .expect("创建 render worker 失败")
 }
 
 fn capture_worker(
