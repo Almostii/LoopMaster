@@ -76,7 +76,7 @@ export component MainWindow inherits Window {
                     Text { text: "音频来源（进程）: "; vertical-alignment: center; }
                     ComboBox {
                         model: root.process-model;
-                        current-index: root.process-index;
+                        current-index <=> root.process-index;
                     }
                 }
                 HorizontalBox {
@@ -84,7 +84,7 @@ export component MainWindow inherits Window {
                     Text { text: "输出目标（设备）: "; vertical-alignment: center; }
                     ComboBox {
                         model: root.sink-model;
-                        current-index: root.sink-index;
+                        current-index <=> root.sink-index;
                     }
                 }
                 HorizontalBox {
