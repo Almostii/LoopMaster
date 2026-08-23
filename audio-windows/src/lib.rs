@@ -165,7 +165,7 @@ pub enum WindowsAudioError {
         reason: String,
         endpoint_id: Option<String>,
     },
-    #[error("render endpoint 格式不满足 MVP 要求（48 kHz、32-bit IEEE float、2 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
+    #[error("render endpoint 格式不满足 MVP 要求（32-bit IEEE float、2 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
     RenderFormatUnsupported {
         endpoint_id: String,
         sample_rate: u32,
