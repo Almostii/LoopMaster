@@ -427,6 +427,25 @@ impl WindowsAudioBackend {
         }
     }
 
+    /// 重新枚举并确认一对 endpoint 都处于 active 状态。
+    ///
+    /// 设备拔插期间，Windows 可能暂时保留旧 endpoint ID，但其状态仍为
+    /// `DEVICE_STATE_UNPLUGGED`/`DISABLED`。重连 supervisor 应在创建 WASAPI
+    /// stream 前轮询此结果，避免反复启动必然失败的 worker。
+    pub fn are_endpoints_active(
+        &self,
+        capture_id: &EndpointId,
+        render_id: &EndpointId,
+    ) -> Result<bool, WindowsAudioError> {
+        let endpoints = self.enumerate_endpoints()?;
+        Ok(endpoints
+            .iter()
+            .any(|endpoint| endpoint.flow == EndpointFlow::Capture && &endpoint.id == capture_id)
+            && endpoints
+                .iter()
+                .any(|endpoint| endpoint.flow == EndpointFlow::Render && &endpoint.id == render_id))
+    }
+
     /// 打开指定 render endpoint，初始化 WASAPI shared-mode client，并启动流。
     ///
     /// 当前实现要求 endpoint 的 `GetMixFormat` 为 32-bit IEEE float，因而实时写入
