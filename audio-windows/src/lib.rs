@@ -1572,6 +1572,18 @@ mod tests {
         assert_eq!(EndpointFlow::Capture.as_str(), "capture");
         assert_eq!(EndpointFlow::Render.display_name(), "Render");
     }
+
+    #[test]
+    fn process_info_model_preserves_pid_and_optional_path() {
+        let process = ProcessInfo {
+            pid: 1234,
+            name: "player.exe".to_owned(),
+            executable_path: Some(r"C:\Player\player.exe".to_owned()),
+        };
+        assert_eq!(process.pid, 1234);
+        assert_eq!(process.name, "player.exe");
+        assert!(process.executable_path.is_some());
+    }
     #[test]
     fn decodes_waveformat_extensible() {
         let mut raw = vec![0u8; 40];
