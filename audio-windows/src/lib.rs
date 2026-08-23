@@ -658,19 +658,19 @@ impl WindowsAudioBackend {
         }
     }
 
-    /// 重新枚举并确认一对 endpoint 都处于 active 状态。
+    /// 重新枚举并确认一个 endpoint 处于 active 状态且流向匹配。
     ///
     /// 设备拔插期间，Windows 可能暂时保留旧 endpoint ID，但其状态仍为
     /// `DEVICE_STATE_UNPLUGGED`/`DISABLED`。重连 supervisor 应在创建 WASAPI
     /// stream 前轮询此结果，避免反复启动必然失败的 worker。
-    pub fn are_endpoints_active(
+    pub fn is_endpoint_active(
         &self,
-        capture_id: &EndpointId,
-        render_id: &EndpointId,
+        endpoint_id: &EndpointId,
+        expected_flow: EndpointFlow,
     ) -> Result<bool, WindowsAudioError> {
         #[cfg(not(windows))]
         {
-            let _ = (self, capture_id, render_id);
+            let _ = (self, endpoint_id, expected_flow);
             Err(WindowsAudioError::UnsupportedPlatform)
         }
         #[cfg(windows)]
@@ -686,43 +686,59 @@ impl WindowsAudioBackend {
                 unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(
                     |error| hresult_error("CoCreateInstance(MMDeviceEnumerator)", None, error),
                 )?;
-
-            let check = |id: &EndpointId, expected_flow| -> Result<bool, WindowsAudioError> {
-                let wide_id: Vec<u16> = id.0.encode_utf16().chain(std::iter::once(0)).collect();
-                let device = match unsafe {
-                    enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr()))
-                } {
+            let expected = match expected_flow {
+                EndpointFlow::Capture => eCapture,
+                EndpointFlow::Render => eRender,
+            };
+            let wide_id: Vec<u16> = endpoint_id
+                .0
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let device =
+                match unsafe { enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr())) } {
                     Ok(device) => device,
                     Err(error) if is_device_not_ready_hresult(error.code().0) => return Ok(false),
                     Err(error) => {
                         return Err(hresult_error(
                             "IMMDeviceEnumerator::GetDevice",
-                            Some(id.0.clone()),
+                            Some(endpoint_id.0.clone()),
                             error,
                         ));
                     }
                 };
-                let state = unsafe { device.GetState() }.map_err(|error| {
-                    hresult_error("IMMDevice::GetState", Some(id.0.clone()), error)
-                })?;
-                if state != DEVICE_STATE_ACTIVE {
-                    return Ok(false);
-                }
-                let endpoint = device.cast::<IMMEndpoint>().map_err(|error| {
-                    hresult_error(
-                        "IMMDevice::QueryInterface(IMMEndpoint)",
-                        Some(id.0.clone()),
-                        error,
-                    )
-                })?;
-                let flow = unsafe { endpoint.GetDataFlow() }.map_err(|error| {
-                    hresult_error("IMMEndpoint::GetDataFlow", Some(id.0.clone()), error)
-                })?;
-                Ok(flow == expected_flow)
-            };
-
-            Ok(check(capture_id, eCapture)? && check(render_id, eRender)?)
+            let state = unsafe { device.GetState() }.map_err(|error| {
+                hresult_error("IMMDevice::GetState", Some(endpoint_id.0.clone()), error)
+            })?;
+            if state != DEVICE_STATE_ACTIVE {
+                return Ok(false);
+            }
+            let endpoint = device.cast::<IMMEndpoint>().map_err(|error| {
+                hresult_error(
+                    "IMMDevice::QueryInterface(IMMEndpoint)",
+                    Some(endpoint_id.0.clone()),
+                    error,
+                )
+            })?;
+            let flow = unsafe { endpoint.GetDataFlow() }.map_err(|error| {
+                hresult_error(
+                    "IMMEndpoint::GetDataFlow",
+                    Some(endpoint_id.0.clone()),
+                    error,
+                )
+            })?;
+            Ok(flow == expected)
         }
+    }
+
+    /// 重新枚举并确认一对 endpoint 都处于 active 状态（兼容旧签名）。
+    pub fn are_endpoints_active(
+        &self,
+        capture_id: &EndpointId,
+        render_id: &EndpointId,
+    ) -> Result<bool, WindowsAudioError> {
+        Ok(self.is_endpoint_active(capture_id, EndpointFlow::Capture)?
+            && self.is_endpoint_active(render_id, EndpointFlow::Render)?)
     }
 
     /// 打开指定 render endpoint，初始化 WASAPI shared-mode client，并启动流。
