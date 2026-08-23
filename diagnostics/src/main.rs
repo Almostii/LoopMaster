@@ -180,29 +180,6 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
     );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_observation_counts_only_state_changes() {
-        let mut observation = StateObservation::new(AudioEngineState::Running);
-        observation.observe(AudioEngineState::Running);
-        observation.observe(AudioEngineState::Degraded);
-        observation.observe(AudioEngineState::Reconnecting);
-        observation.observe(AudioEngineState::Running);
-        observation.observe(AudioEngineState::Failed);
-        observation.observe(AudioEngineState::Failed);
-
-        assert_eq!(observation.first, Some(AudioEngineState::Running));
-        assert_eq!(observation.last, Some(AudioEngineState::Failed));
-        assert_eq!(observation.transition_count(AudioEngineState::Running), 1);
-        assert_eq!(observation.transition_count(AudioEngineState::Degraded), 1);
-        assert_eq!(observation.transition_count(AudioEngineState::Reconnecting), 1);
-        assert_eq!(observation.transition_count(AudioEngineState::Failed), 1);
-    }
-}
-
 fn run_capture_render_test(
     backend: &WindowsAudioBackend,
     capture_id: &str,
@@ -363,4 +340,30 @@ fn exit_with_error(context: &str, error: loopmaster_audio_windows::WindowsAudioE
         eprintln!("Endpoint ID: {endpoint_id}");
     }
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_observation_counts_only_state_changes() {
+        let mut observation = StateObservation::new(AudioEngineState::Running);
+        observation.observe(AudioEngineState::Running);
+        observation.observe(AudioEngineState::Degraded);
+        observation.observe(AudioEngineState::Reconnecting);
+        observation.observe(AudioEngineState::Running);
+        observation.observe(AudioEngineState::Failed);
+        observation.observe(AudioEngineState::Failed);
+
+        assert_eq!(observation.first, Some(AudioEngineState::Running));
+        assert_eq!(observation.last, Some(AudioEngineState::Failed));
+        assert_eq!(observation.transition_count(AudioEngineState::Running), 1);
+        assert_eq!(observation.transition_count(AudioEngineState::Degraded), 1);
+        assert_eq!(
+            observation.transition_count(AudioEngineState::Reconnecting),
+            1
+        );
+        assert_eq!(observation.transition_count(AudioEngineState::Failed), 1);
+    }
 }
