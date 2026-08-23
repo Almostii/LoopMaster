@@ -72,8 +72,12 @@ pub struct AudioEngineStats {
     pub rendered_frames: u64,
     pub render_writes: u64,
     pub fifo_overflows: u64,
+    /// 因 FIFO 满而丢弃的音频 frame 数；事件数见 [`fifo_overflows`]。
+    pub fifo_dropped_frames: u64,
     pub fifo_underflows: u64,
     pub discontinuities: u64,
+    pub startup_discontinuities: u64,
+    pub runtime_discontinuities: u64,
     pub timestamp_errors: u64,
     pub render_no_space: u64,
     pub graph_updates: u64,
@@ -93,8 +97,11 @@ struct Counters {
     rendered_frames: AtomicU64,
     render_writes: AtomicU64,
     fifo_overflows: AtomicU64,
+    fifo_dropped_frames: AtomicU64,
     fifo_underflows: AtomicU64,
     discontinuities: AtomicU64,
+    startup_discontinuities: AtomicU64,
+    runtime_discontinuities: AtomicU64,
     timestamp_errors: AtomicU64,
     render_no_space: AtomicU64,
     graph_updates: AtomicU64,
@@ -108,8 +115,11 @@ impl Counters {
             rendered_frames: self.rendered_frames.load(Ordering::Relaxed),
             render_writes: self.render_writes.load(Ordering::Relaxed),
             fifo_overflows: self.fifo_overflows.load(Ordering::Relaxed),
+            fifo_dropped_frames: self.fifo_dropped_frames.load(Ordering::Relaxed),
             fifo_underflows: self.fifo_underflows.load(Ordering::Relaxed),
             discontinuities: self.discontinuities.load(Ordering::Relaxed),
+            startup_discontinuities: self.startup_discontinuities.load(Ordering::Relaxed),
+            runtime_discontinuities: self.runtime_discontinuities.load(Ordering::Relaxed),
             timestamp_errors: self.timestamp_errors.load(Ordering::Relaxed),
             render_no_space: self.render_no_space.load(Ordering::Relaxed),
             graph_updates: self.graph_updates.load(Ordering::Relaxed),
@@ -140,8 +150,11 @@ impl AudioEngine {
                 rendered_frames: AtomicU64::new(0),
                 render_writes: AtomicU64::new(0),
                 fifo_overflows: AtomicU64::new(0),
+                fifo_dropped_frames: AtomicU64::new(0),
                 fifo_underflows: AtomicU64::new(0),
                 discontinuities: AtomicU64::new(0),
+                startup_discontinuities: AtomicU64::new(0),
+                runtime_discontinuities: AtomicU64::new(0),
                 timestamp_errors: AtomicU64::new(0),
                 render_no_space: AtomicU64::new(0),
                 graph_updates: AtomicU64::new(0),
@@ -347,30 +360,46 @@ fn capture_worker(
         fail(&state, &stop, &error, e.to_string());
     })?;
     let silence = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
+    let mut first_packet = true;
     while !stop.load(Ordering::Acquire) {
         let result = source.drain_packets(|packet, data| {
             counters.capture_packets.fetch_add(1, Ordering::Relaxed);
             counters
                 .captured_frames
                 .fetch_add(u64::from(packet.frames), Ordering::Relaxed);
-            counters
-                .discontinuities
-                .fetch_add(u64::from(packet.discontinuity), Ordering::Relaxed);
+            if packet.discontinuity {
+                counters.discontinuities.fetch_add(1, Ordering::Relaxed);
+                if first_packet {
+                    counters
+                        .startup_discontinuities
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    counters
+                        .runtime_discontinuities
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
             counters
                 .timestamp_errors
                 .fetch_add(u64::from(packet.timestamp_error), Ordering::Relaxed);
-            if packet.silent {
-                push_silence(&mut producer, packet.frames as usize, &silence, &counters);
+            let written_frames = if packet.silent {
+                push_silence(&mut producer, packet.frames as usize, &silence)
             } else if let Some(samples) = data {
-                if producer
+                producer
                     .push_interleaved(samples)
-                    .map(|r| r.frames())
+                    .map(|result| result.frames())
                     .unwrap_or(0)
-                    < packet.frames as usize
-                {
-                    counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
-                }
+            } else {
+                0
+            };
+            let dropped_frames = (packet.frames as usize).saturating_sub(written_frames);
+            if dropped_frames > 0 {
+                counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .fifo_dropped_frames
+                    .fetch_add(dropped_frames as u64, Ordering::Relaxed);
             }
+            first_packet = false;
         });
         match result {
             Ok(stats) if stats.packets == 0 => thread::sleep(Duration::from_millis(1)),
@@ -388,9 +417,9 @@ fn push_silence(
     producer: &mut loopmaster_audio_core::AudioFifoProducer,
     frames: usize,
     silence: &[f32],
-    counters: &Counters,
-) {
+) -> usize {
     let mut remaining = frames * INTERNAL_CHANNELS;
+    let mut written_samples = 0;
     while remaining > 0 {
         let count = remaining.min(silence.len());
         let written = producer
@@ -398,11 +427,12 @@ fn push_silence(
             .map(|r| r.frames() * INTERNAL_CHANNELS)
             .unwrap_or(0);
         remaining -= written;
+        written_samples += written;
         if written == 0 {
-            counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
             break;
         }
     }
+    written_samples / INTERNAL_CHANNELS
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -499,6 +529,9 @@ fn mixer_worker(
             .unwrap_or(0);
         if written < block_frames {
             counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
+            counters
+                .fifo_dropped_frames
+                .fetch_add((block_frames - written) as u64, Ordering::Relaxed);
         }
         next_deadline += block_period;
         let now = Instant::now();
