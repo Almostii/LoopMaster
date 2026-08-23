@@ -1543,10 +1543,9 @@ unsafe fn inspect_capture_mix_format(
     } else {
         false
     };
-    if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE
-        || format.channels != loopmaster_audio_core::INTERNAL_CHANNELS as u16
-        || bits != 32
-        || !is_float
+    // 采样率不限：非 48 kHz 设备（如 44.1 kHz 虚拟声卡）由 capture worker
+    // 的 FixedOutputResampler 重采样到内部 48 kHz（阶段 B.5）。
+    if format.channels != loopmaster_audio_core::INTERNAL_CHANNELS as u16 || bits != 32 || !is_float
     {
         return Err(WindowsAudioError::CaptureFormatUnsupported {
             endpoint_id: endpoint_id.0.clone(),
