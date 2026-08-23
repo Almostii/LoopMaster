@@ -271,6 +271,18 @@ impl WindowsAudioError {
 
     /// 判断错误是否属于设备暂时不可用，可进入自动恢复流程。
     pub fn failure_kind(&self) -> WindowsAudioFailureKind {
+        if matches!(
+            self,
+            Self::CaptureState {
+                reason: "endpoint 不是 active 状态",
+                ..
+            } | Self::RenderState {
+                reason: "endpoint 不是 active 状态",
+                ..
+            }
+        ) {
+            return WindowsAudioFailureKind::DeviceUnavailable;
+        }
         match self.hresult() {
             Some(
                 AUDCLNT_E_DEVICE_INVALIDATED
@@ -1366,6 +1378,35 @@ mod tests {
         };
         assert_eq!(error.failure_kind(), WindowsAudioFailureKind::Other);
         assert!(!error.is_device_failure());
+    }
+
+    #[test]
+    fn classifies_inactive_endpoint_state_as_device_failure() {
+        let capture = WindowsAudioError::CaptureState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: "capture-id".into(),
+        };
+        let render = WindowsAudioError::RenderState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: "render-id".into(),
+        };
+        assert_eq!(
+            capture.failure_kind(),
+            WindowsAudioFailureKind::DeviceUnavailable
+        );
+        assert_eq!(
+            render.failure_kind(),
+            WindowsAudioFailureKind::DeviceUnavailable
+        );
+    }
+
+    #[test]
+    fn keeps_other_capture_state_errors_non_recoverable() {
+        let error = WindowsAudioError::CaptureState {
+            reason: "GetBuffer 返回 0 frame",
+            endpoint_id: "capture-id".into(),
+        };
+        assert_eq!(error.failure_kind(), WindowsAudioFailureKind::Other);
     }
 
     #[test]
