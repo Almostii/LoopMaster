@@ -235,6 +235,7 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
         bits_per_sample: 32,
         channels: loopmaster_audio_core::INTERNAL_CHANNELS as u16,
         channel_mask: 0,
+        is_float: true,
     };
     let wave_format = windows::Win32::Media::Audio::WAVEFORMATEX {
         wFormatTag: 3,
