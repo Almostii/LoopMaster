@@ -19,11 +19,13 @@ pub struct ProcessLoopbackSource {
     endpoint_id: String,
     format: EndpointFormat,
     #[cfg(windows)]
-    _com: ComGuard,
-    #[cfg(windows)]
     client: windows::Win32::Media::Audio::IAudioClient,
     #[cfg(windows)]
     capture_client: windows::Win32::Media::Audio::IAudioCaptureClient,
+    // COM must remain initialized until all interface fields have released.
+    // Rust drops fields in declaration order, so this guard deliberately comes last.
+    #[cfg(windows)]
+    _com: ComGuard,
 }
 
 impl ProcessLoopbackSource {
@@ -92,7 +94,7 @@ impl Drop for ComGuard {
 
 #[cfg(windows)]
 fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use windows::core::Interface;
     use windows::Win32::Foundation::WAIT_OBJECT_0;
     use windows::Win32::Media::Audio::{
@@ -124,14 +126,23 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
         )
     })?;
     let event = Arc::new(HandleGuard(event));
-    let shared = Arc::new(Mutex::new(ActivationResult::default()));
-
+    // Keep the handler and its COM operation alive until ActivateCompleted has
+    // returned. The activation event is signaled from inside the callback, so
+    // waking the waiter alone is not a callback-lifetime barrier.
+    let callback_done = unsafe { CreateEventW(None, true, false, None) }.map_err(|error| {
+        hresult_error(
+            "CreateEventW(ProcessLoopback callback)",
+            Some(endpoint_id.clone()),
+            error,
+        )
+    })?;
+    let callback_done = Arc::new(HandleGuard(callback_done));
     let payload = Arc::new(ActivationPayload::new(pid));
 
     #[windows_core::implement(IActivateAudioInterfaceCompletionHandler)]
     struct CompletionHandler {
         event: Arc<HandleGuard>,
-        result: Arc<Mutex<ActivationResult>>,
+        callback_done: Arc<HandleGuard>,
         // ActivateAudioInterfaceAsync may retain PROPVARIANT until its callback.
         // Keep both the blob and its pointed-to params alive across that boundary.
         _payload: Arc<ActivationPayload>,
@@ -141,38 +152,23 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
     {
         fn ActivateCompleted(
             &self,
-            operation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
+            _operation: windows::core::Ref<'_, IActivateAudioInterfaceAsyncOperation>,
         ) -> windows::core::Result<()> {
-            let mut result = self
-                .result
-                .lock()
-                .expect("activation result mutex poisoned");
-            let callback_result = (|| {
-                let operation = operation.ok()?;
-                let mut activate_hresult = windows::core::HRESULT(0);
-                let mut activated: Option<windows::core::IUnknown> = None;
-                unsafe { operation.GetActivateResult(&mut activate_hresult, &mut activated)? };
-                result.hresult = activate_hresult.0;
-                if activate_hresult.0 >= 0 {
-                    result.client = activated
-                        .and_then(|unknown| unknown.cast::<IAudioClient>().ok())
-                        .and_then(|client| windows_core::AgileReference::new(&client).ok());
-                    if result.client.is_none() {
-                        result.hresult = 0x80004005u32 as i32;
-                    }
-                }
-                Ok(())
-            })();
-            // Always wake the waiting thread, including GetActivateResult failures.
+            // Keep the callback limited to signaling. GetActivateResult returns an interface
+            // pointer owned by the caller and is therefore consumed on this MTA thread after
+            // the wait; doing COM result extraction and AgileReference creation in the callback
+            // needlessly crosses the async COM completion boundary.
             let signal_result =
                 unsafe { windows::Win32::System::Threading::SetEvent(self.event.0) };
-            callback_result.and(signal_result)
+            let done_result =
+                unsafe { windows::Win32::System::Threading::SetEvent(self.callback_done.0) };
+            signal_result.and(done_result)
         }
     }
 
     let handler_object = windows::core::ComObject::new(CompletionHandler {
         event: Arc::clone(&event),
-        result: Arc::clone(&shared),
+        callback_done: Arc::clone(&callback_done),
         _payload: Arc::clone(&payload),
     });
     let handler: IActivateAudioInterfaceCompletionHandler = handler_object.to_interface();
@@ -199,30 +195,41 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
             endpoint_id: Some(endpoint_id),
         });
     }
-    let mut result = shared.lock().expect("activation result mutex poisoned");
-    if result.hresult < 0 {
+    let mut activate_hresult = windows::core::HRESULT(0);
+    let mut activated: Option<windows::core::IUnknown> = None;
+    unsafe {
+        operation
+            .GetActivateResult(&mut activate_hresult, &mut activated)
+            .map_err(|error| {
+                hresult_error(
+                    "IActivateAudioInterfaceAsyncOperation::GetActivateResult",
+                    Some(endpoint_id.clone()),
+                    error,
+                )
+            })?
+    };
+    if activate_hresult.0 < 0 {
         return Err(WindowsAudioError::HResult {
             operation: "IActivateAudioInterfaceAsyncOperation::GetActivateResult",
-            hresult: result.hresult,
+            hresult: activate_hresult.0,
             endpoint_id: Some(endpoint_id),
         });
     }
-    let client = result
-        .client
-        .take()
+    let client = activated
+        .and_then(|unknown| unknown.cast::<IAudioClient>().ok())
         .ok_or_else(|| WindowsAudioError::HResult {
             operation: "IActivateAudioInterfaceAsyncOperation::GetActivateResult",
             hresult: 0x80004005u32 as i32,
             endpoint_id: Some(endpoint_id.clone()),
         })?;
-    drop(result);
-    let client = client.resolve().map_err(|error| {
-        hresult_error(
-            "AgileReference::resolve(ProcessLoopback)",
-            Some(endpoint_id.clone()),
-            error,
-        )
-    })?;
+    let callback_wait = unsafe { WaitForSingleObject(callback_done.0, 30_000) };
+    if callback_wait != WAIT_OBJECT_0 {
+        return Err(WindowsAudioError::HResult {
+            operation: "ActivateAudioInterfaceAsync(ProcessLoopback) 回调返回等待",
+            hresult: 0x800705B4u32 as i32,
+            endpoint_id: Some(endpoint_id),
+        });
+    }
     drop(operation);
     drop(handler);
     drop(handler_object);
@@ -351,13 +358,6 @@ impl ActivationPayload {
             blob,
         }
     }
-}
-
-#[cfg(windows)]
-#[derive(Default)]
-struct ActivationResult {
-    hresult: i32,
-    client: Option<windows_core::AgileReference<windows::Win32::Media::Audio::IAudioClient>>,
 }
 
 #[cfg(windows)]
