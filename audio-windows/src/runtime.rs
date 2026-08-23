@@ -9,8 +9,8 @@ use crate::{
     WindowsAudioError,
 };
 use loopmaster_audio_core::{
-    AudioFifo, AudioFifoConsumer, MixerPlan, RouteGraphSnapshot, SourceKind, SourceSpec,
-    DEFAULT_BLOCK_FRAMES, INTERNAL_CHANNELS,
+    AudioFifo, AudioFifoConsumer, FixedOutputResampler, MixerPlan, RouteGraphSnapshot, SourceKind,
+    SourceSpec, DEFAULT_BLOCK_FRAMES, INTERNAL_CHANNELS,
 };
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -746,6 +746,49 @@ impl CaptureSource {
             Self::Process(source) => source.drain_packets(on_packet),
         }
     }
+
+    /// 原生捕获格式；`None` 表示内部格式（Process Loopback 固定 48 kHz），
+    /// 不需要重采样。
+    fn source_format(&self) -> Option<crate::EndpointFormat> {
+        match self {
+            Self::Device(source) | Self::Loopback(source) => Some(source.format()),
+            Self::Process(_) => None,
+        }
+    }
+}
+
+/// 非 48 kHz capture source 的输入重采样状态（阶段 B.5）。
+struct CaptureResampler {
+    /// 原生采样率 == 内部 48 kHz 时为 `None`（透传）。
+    resampler: Option<FixedOutputResampler>,
+    /// 累积的原生交错样本，等待凑齐 `resampler.input_frames()`。
+    input_buffer: Vec<f32>,
+    /// 复用的内部 48 kHz 输出 block。
+    output_block: Vec<f32>,
+}
+
+impl CaptureResampler {
+    fn new(
+        source_format: Option<crate::EndpointFormat>,
+        block_frames: usize,
+    ) -> Result<Self, loopmaster_audio_core::ResamplerConfigError> {
+        let resampler = match source_format {
+            Some(format) if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE => {
+                Some(FixedOutputResampler::new(
+                    format.sample_rate,
+                    loopmaster_audio_core::INTERNAL_SAMPLE_RATE,
+                    format.channels as usize,
+                    block_frames,
+                )?)
+            }
+            _ => None,
+        };
+        Ok(Self {
+            resampler,
+            input_buffer: Vec::new(),
+            output_block: vec![0.0f32; block_frames * INTERNAL_CHANNELS],
+        })
+    }
 }
 
 fn capture_worker(
@@ -800,6 +843,10 @@ fn capture_worker(
         }
     };
     let silence = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
+    let mut capture_resampler = CaptureResampler::new(source.source_format(), DEFAULT_BLOCK_FRAMES)
+        .map_err(|e| {
+            fail(&state, &stop, &error, e.to_string());
+        })?;
     let mut first_packet = true;
     while !stop.load(Ordering::Acquire) {
         let result = source.drain_packets(|packet, data| {
@@ -822,13 +869,81 @@ fn capture_worker(
             counters
                 .timestamp_errors
                 .fetch_add(u64::from(packet.timestamp_error), Ordering::Relaxed);
-            // 峰值统计：区分"有 packet"与"有有效音频"。静音 packet 峰值按 0 计，
-            // 真实样本取最大绝对值；全局峰值用 fetch_max 按正数 bit 序比较更新。
-            let peak = if packet.silent {
-                0.0
+            // 数据路径与峰值统计：非 48 kHz source 先经 FixedOutputResampler
+            // 重采样到内部 48 kHz（阶段 B.5），再计算峰值并写入 FIFO。
+            let peak;
+            if let Some(resampler) = capture_resampler.resampler.as_mut() {
+                let frames = packet.frames as usize;
+                if packet.silent {
+                    capture_resampler.input_buffer.resize(
+                        capture_resampler.input_buffer.len() + frames * INTERNAL_CHANNELS,
+                        0.0,
+                    );
+                } else if let Some(samples) = data {
+                    capture_resampler.input_buffer.extend_from_slice(samples);
+                } else {
+                    capture_resampler.input_buffer.resize(
+                        capture_resampler.input_buffer.len() + frames * INTERNAL_CHANNELS,
+                        0.0,
+                    );
+                }
+                let mut cursor = 0usize;
+                let mut written = 0usize;
+                let mut expected_output = 0usize;
+                let mut block_peak = 0.0f32;
+                while capture_resampler.input_buffer.len() - cursor
+                    >= resampler.input_frames() * INTERNAL_CHANNELS
+                {
+                    let needed = resampler.input_frames() * INTERNAL_CHANNELS;
+                    let input = &capture_resampler.input_buffer[cursor..cursor + needed];
+                    if let Err(e) =
+                        resampler.process_interleaved(input, &mut capture_resampler.output_block)
+                    {
+                        fail(&state, &stop, &error, e.to_string());
+                        break;
+                    }
+                    expected_output += capture_resampler.output_block.len() / INTERNAL_CHANNELS;
+                    block_peak = block_peak.max(packet_peak(&capture_resampler.output_block));
+                    let pushed = producer
+                        .push_interleaved(&capture_resampler.output_block)
+                        .map(|result| result.frames())
+                        .unwrap_or(0);
+                    written += pushed;
+                    cursor += needed;
+                }
+                capture_resampler.input_buffer.drain(..cursor);
+                let dropped_output = expected_output.saturating_sub(written);
+                if dropped_output > 0 {
+                    counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
+                    counters
+                        .fifo_dropped_frames
+                        .fetch_add(dropped_output as u64, Ordering::Relaxed);
+                }
+                peak = block_peak;
             } else {
-                data.map(packet_peak).unwrap_or(0.0)
-            };
+                peak = if packet.silent {
+                    0.0
+                } else {
+                    data.map(packet_peak).unwrap_or(0.0)
+                };
+                let written_frames = if packet.silent {
+                    push_silence(&mut producer, packet.frames as usize, &silence)
+                } else if let Some(samples) = data {
+                    producer
+                        .push_interleaved(samples)
+                        .map(|result| result.frames())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let dropped_frames = (packet.frames as usize).saturating_sub(written_frames);
+                if dropped_frames > 0 {
+                    counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
+                    counters
+                        .fifo_dropped_frames
+                        .fetch_add(dropped_frames as u64, Ordering::Relaxed);
+                }
+            }
             if peak.is_finite() && peak > 0.0 {
                 counters
                     .captured_peak
@@ -836,23 +951,6 @@ fn capture_worker(
             }
             if is_non_silent(peak) {
                 counters.non_silent_packets.fetch_add(1, Ordering::Relaxed);
-            }
-            let written_frames = if packet.silent {
-                push_silence(&mut producer, packet.frames as usize, &silence)
-            } else if let Some(samples) = data {
-                producer
-                    .push_interleaved(samples)
-                    .map(|result| result.frames())
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let dropped_frames = (packet.frames as usize).saturating_sub(written_frames);
-            if dropped_frames > 0 {
-                counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
-                counters
-                    .fifo_dropped_frames
-                    .fetch_add(dropped_frames as u64, Ordering::Relaxed);
             }
             first_packet = false;
         });
