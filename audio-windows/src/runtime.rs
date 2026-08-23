@@ -358,7 +358,6 @@ fn supervisor_worker(
             if engine_stop.load(Ordering::Acquire) {
                 break;
             }
-            state.store(STATE_RUNNING, Ordering::Release);
         }
         let session_stop = Arc::new(AtomicBool::new(false));
         let (source_tx, mixer_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
@@ -424,6 +423,12 @@ fn supervisor_worker(
         workers.push(capture);
         workers.push(mixer);
         workers.push(render);
+        // 给三个 worker 一个有界启动窗口；设备在打开阶段失效时，
+        // session_stop 会先置位，避免把尚未建立的会话报告为 Running。
+        thread::sleep(Duration::from_millis(50));
+        if !session_stop.load(Ordering::Acquire) {
+            state.store(STATE_RUNNING, Ordering::Release);
+        }
         while !engine_stop.load(Ordering::Acquire) && !session_stop.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(10));
         }
