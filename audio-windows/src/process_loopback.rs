@@ -4,10 +4,7 @@
 //! endpoint，也不改变系统默认设备。Process Loopback 通过系统的虚拟 endpoint
 //! `VAD\\Process_Loopback` 激活，最终仍使用普通 `IAudioClient` 捕获接口。
 
-use super::{
-    hresult_error, invalid_format, CaptureDrainResult, CapturePacket, EndpointFormat,
-    WindowsAudioError,
-};
+use super::{hresult_error, CaptureDrainResult, CapturePacket, EndpointFormat, WindowsAudioError};
 
 /// 捕获指定进程树音频的 WASAPI source。
 ///
@@ -230,44 +227,35 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
             endpoint_id: Some(endpoint_id),
         });
     }
-    drop(operation);
-    drop(handler);
-    drop(handler_object);
-
-    let format_ptr = unsafe { client.GetMixFormat() }.map_err(|error| {
-        hresult_error(
-            "IAudioClient::GetMixFormat(ProcessLoopback)",
-            Some(endpoint_id.clone()),
-            error,
-        )
-    })?;
-    if format_ptr.is_null() {
-        return Err(invalid_format(
-            "Process Loopback GetMixFormat 返回空指针",
-            Some(endpoint_id),
-        ));
-    }
-    let format_result = unsafe {
-        super::inspect_capture_mix_format(format_ptr, &super::EndpointId(endpoint_id.clone()))
+    // Process Loopback is a virtual endpoint and GetMixFormat is not required for
+    // activation. Use the format consumed by the engine explicitly; this also
+    // avoids retaining a CoTaskMem buffer across the activation COM lifetime.
+    let format = EndpointFormat {
+        sample_rate: loopmaster_audio_core::INTERNAL_SAMPLE_RATE,
+        bits_per_sample: 32,
+        channels: loopmaster_audio_core::INTERNAL_CHANNELS as u16,
+        channel_mask: 0,
     };
-    let format = match format_result {
-        Ok(format) => format,
-        Err(error) => {
-            unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(format_ptr as *const _)) };
-            return Err(error);
-        }
+    let wave_format = windows::Win32::Media::Audio::WAVEFORMATEX {
+        wFormatTag: 3,
+        nChannels: format.channels,
+        nSamplesPerSec: format.sample_rate,
+        nAvgBytesPerSec: format.sample_rate * u32::from(format.channels) * 4,
+        nBlockAlign: format.channels * 4,
+        wBitsPerSample: 32,
+        cbSize: 0,
     };
     let initialize = unsafe {
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                | windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_LOOPBACK,
             0,
             0,
-            format_ptr,
+            &wave_format,
             None,
         )
     };
-    unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(format_ptr as *const _)) };
     initialize.map_err(|error| {
         hresult_error(
             "IAudioClient::Initialize(ProcessLoopback)",
@@ -289,6 +277,10 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
             error,
         )
     })?;
+    drop(operation);
+    drop(handler);
+    drop(handler_object);
+    drop(payload);
 
     Ok(ProcessLoopbackSource {
         pid,
@@ -302,7 +294,10 @@ fn open_windows(pid: u32) -> Result<ProcessLoopbackSource, WindowsAudioError> {
 
 #[cfg(windows)]
 struct ActivationPayload {
-    _params: Box<windows::Win32::Media::Audio::AUDIOCLIENT_ACTIVATION_PARAMS>,
+    // PROPVARIANT's Drop calls PropVariantClear, which releases VT_BLOB data
+    // with the COM task allocator. Keep the raw pointer only as an address;
+    // PROPVARIANT owns the allocation and performs the single free.
+    _params: *mut windows::Win32::Media::Audio::AUDIOCLIENT_ACTIVATION_PARAMS,
     blob: windows::Win32::System::Com::StructuredStorage::PROPVARIANT,
 }
 
@@ -328,15 +323,22 @@ impl ActivationPayload {
         use windows::Win32::System::Com::BLOB;
         use windows::Win32::System::Variant::VT_BLOB;
 
-        let params = Box::new(AUDIOCLIENT_ACTIVATION_PARAMS {
-            ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-            Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
-                ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-                    TargetProcessId: pid,
-                    ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+        let params = unsafe {
+            windows::Win32::System::Com::CoTaskMemAlloc(size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>())
+                as *mut AUDIOCLIENT_ACTIVATION_PARAMS
+        };
+        assert!(!params.is_null(), "CoTaskMemAlloc activation params failed");
+        unsafe {
+            params.write(AUDIOCLIENT_ACTIVATION_PARAMS {
+                ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+                Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
+                    ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                        TargetProcessId: pid,
+                        ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                    },
                 },
-            },
-        });
+            });
+        }
         let blob = PROPVARIANT {
             Anonymous: PROPVARIANT_0 {
                 Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
@@ -347,7 +349,7 @@ impl ActivationPayload {
                     Anonymous: PROPVARIANT_0_0_0 {
                         blob: BLOB {
                             cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                            pBlobData: params.as_ref() as *const _ as *mut _,
+                            pBlobData: params.cast(),
                         },
                     },
                 }),
