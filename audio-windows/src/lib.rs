@@ -166,6 +166,8 @@ pub const AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY: i32 = 0x8889_0005u32 as i32;
 pub const AUDCLNT_E_ENDPOINT_CREATE_FAILED: i32 = 0x8889_000Fu32 as i32;
 /// Win32 `ERROR_DEVICE_NOT_CONNECTED` 的 HRESULT 形式。
 pub const HRESULT_ERROR_DEVICE_NOT_CONNECTED: i32 = 0x8007_048Fu32 as i32;
+/// Win32 `ERROR_NOT_FOUND` 的 HRESULT 形式，常见于设备已被拔出后按旧 ID 获取。
+pub const HRESULT_ERROR_NOT_FOUND: i32 = 0x8007_0490u32 as i32;
 
 /// WASAPI shared-mode render 写入结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,7 +277,8 @@ impl WindowsAudioError {
                 | AUDCLNT_E_SERVICE_NOT_RUNNING
                 | AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY
                 | AUDCLNT_E_ENDPOINT_CREATE_FAILED
-                | HRESULT_ERROR_DEVICE_NOT_CONNECTED,
+                | HRESULT_ERROR_DEVICE_NOT_CONNECTED
+                | HRESULT_ERROR_NOT_FOUND,
             ) => WindowsAudioFailureKind::DeviceUnavailable,
             _ => WindowsAudioFailureKind::Other,
         }
@@ -1338,6 +1341,7 @@ mod tests {
             AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY,
             AUDCLNT_E_ENDPOINT_CREATE_FAILED,
             HRESULT_ERROR_DEVICE_NOT_CONNECTED,
+            HRESULT_ERROR_NOT_FOUND,
         ] {
             let error = WindowsAudioError::HResult {
                 operation: "test",
