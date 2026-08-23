@@ -51,6 +51,10 @@ pub struct EndpointFormat {
     pub channels: u16,
     /// `WAVEFORMATEXTENSIBLE.dwChannelMask`；普通 `WAVEFORMATEX` 为 0。
     pub channel_mask: u32,
+    /// 样本是否为 IEEE 32-bit float（`WAVE_FORMAT_IEEE_FLOAT` 或其
+    /// extensible subformat）。这是 LoopMaster 内部格式契约的一部分，
+    /// 用于在打开设备前判断该 endpoint 能否作为 source 或 sink。
+    pub is_float: bool,
 }
 
 impl EndpointFormat {
@@ -60,6 +64,27 @@ impl EndpointFormat {
             sample_rate: self.sample_rate,
             channels: self.channels,
         }
+    }
+
+    /// 该格式能否作为 LoopMaster 的普通 capture source。
+    ///
+    /// 普通 WASAPI capture 严格要求 48 kHz、32-bit IEEE float、双声道，
+    /// 与 [`super::open_capture_source`] 的格式校验保持一致。不满足的
+    /// endpoint 会在打开时返回 `CaptureFormatUnsupported`，这里提前暴露
+    /// 相同的判断，供诊断和 UI 标注可用性。
+    pub const fn capture_compatible(self) -> bool {
+        self.is_float
+            && self.bits_per_sample == 32
+            && self.channels == INTERNAL_CHANNELS as u16
+            && self.sample_rate == INTERNAL_SAMPLE_RATE
+    }
+
+    /// 该格式能否作为 LoopMaster 的 render sink。
+    ///
+    /// render sink 要求 32-bit IEEE float、双声道；采样率与内部 48 kHz 不一致时
+    /// 由 [`FixedInputResampler`] 在写入边界转换，因此这里不要求采样率。
+    pub const fn render_compatible(self) -> bool {
+        self.is_float && self.bits_per_sample == 32 && self.channels == INTERNAL_CHANNELS as u16
     }
 }
 
@@ -78,6 +103,8 @@ pub struct EndpointInfo {
     pub bits_per_sample: Option<u16>,
     /// channel mask；读取格式失败时为 `None`。
     pub channel_mask: Option<u32>,
+    /// 样本是否为 IEEE float；读取格式失败时为 `None`。
+    pub is_float: Option<bool>,
 }
 
 /// 当前存在播放音频会话的进程，可直接作为 Process Loopback 的目标。
@@ -98,13 +125,21 @@ pub struct ProcessInfo {
 impl EndpointInfo {
     /// 在格式字段完整时返回一个便于输出的格式摘要。
     pub fn endpoint_format(&self) -> Option<EndpointFormat> {
-        match (self.format, self.bits_per_sample, self.channel_mask) {
-            (Some(format), Some(bits_per_sample), Some(channel_mask)) => Some(EndpointFormat {
-                sample_rate: format.sample_rate,
-                bits_per_sample,
-                channels: format.channels,
-                channel_mask,
-            }),
+        match (
+            self.format,
+            self.bits_per_sample,
+            self.channel_mask,
+            self.is_float,
+        ) {
+            (Some(format), Some(bits_per_sample), Some(channel_mask), Some(is_float)) => {
+                Some(EndpointFormat {
+                    sample_rate: format.sample_rate,
+                    bits_per_sample,
+                    channels: format.channels,
+                    channel_mask,
+                    is_float,
+                })
+            }
             _ => None,
         }
     }
@@ -350,11 +385,28 @@ pub fn decode_mix_format(raw: &[u8]) -> Result<EndpointFormat, WindowsAudioError
     } else {
         0
     };
+    // `WAVE_FORMAT_IEEE_FLOAT` (0x0003) 直接表示 32-bit float；extensible 格式
+    // 需要读取 subformat GUID 与 `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT` 比较。
+    // 该结果供调用方在打开设备前判断格式契约，不参与原始字段解码之外的任何操作。
+    // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT 的 GUID 为
+    // 00000003-0000-0010-8000-00AA00389B71，按其 Windows GUID 内存布局展开。
+    const IEEE_FLOAT_SUBFORMAT: [u8; 16] = [
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+    let is_float = if format_tag == 3 {
+        true
+    } else if format_tag == 0xFFFE && cb_size >= 22 && raw.len() >= 40 {
+        raw[24..40] == IEEE_FLOAT_SUBFORMAT
+    } else {
+        false
+    };
     Ok(EndpointFormat {
         sample_rate,
         bits_per_sample,
         channels,
         channel_mask,
+        is_float,
     })
 }
 
@@ -581,6 +633,7 @@ impl WindowsAudioBackend {
                         format: Some(format.audio_format()),
                         bits_per_sample: Some(format.bits_per_sample),
                         channel_mask: Some(format.channel_mask),
+                        is_float: Some(format.is_float),
                     });
                 }
             }
@@ -1598,6 +1651,65 @@ mod tests {
             (f.sample_rate, f.bits_per_sample, f.channels, f.channel_mask),
             (48_000, 32, 2, 3)
         );
+        // subformat 字节未被写入，不是 IEEE float。
+        assert!(!f.is_float);
+    }
+
+    #[test]
+    fn identifies_ieee_float_extensible_subformat() {
+        let mut raw = vec![0u8; 40];
+        raw[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        raw[2..4].copy_from_slice(&2u16.to_le_bytes());
+        raw[4..8].copy_from_slice(&48_000u32.to_le_bytes());
+        raw[14..16].copy_from_slice(&32u16.to_le_bytes());
+        raw[16..18].copy_from_slice(&22u16.to_le_bytes());
+        raw[20..24].copy_from_slice(&0x3u32.to_le_bytes());
+        // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: 00000003-0000-0010-8000-00AA00389B71
+        raw[24..40].copy_from_slice(&[
+            0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+        let f = decode_mix_format(&raw).unwrap();
+        assert!(f.is_float);
+        assert!(f.capture_compatible());
+        assert!(f.render_compatible());
+    }
+
+    #[test]
+    fn identifies_plain_ieee_float_tag() {
+        let mut raw = vec![0u8; 18];
+        raw[0..2].copy_from_slice(&3u16.to_le_bytes());
+        raw[2..4].copy_from_slice(&2u16.to_le_bytes());
+        raw[4..8].copy_from_slice(&48_000u32.to_le_bytes());
+        raw[14..16].copy_from_slice(&32u16.to_le_bytes());
+        let f = decode_mix_format(&raw).unwrap();
+        assert!(f.is_float);
+        assert!(f.capture_compatible());
+    }
+
+    #[test]
+    fn distinguishes_capture_and_render_contracts() {
+        // 44.1 kHz、32-bit float、双声道：可作 render（重采样），不可作 capture。
+        let render_only = EndpointFormat {
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            channels: 2,
+            channel_mask: 0x3,
+            is_float: true,
+        };
+        assert!(render_only.render_compatible());
+        assert!(!render_only.capture_compatible());
+
+        // 48 kHz、16-bit 整数、双声道：既不满足 capture 也不满足 render。
+        let pcm_16 = EndpointFormat {
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            channels: 2,
+            channel_mask: 0x3,
+            is_float: false,
+        };
+        assert!(!pcm_16.capture_compatible());
+        assert!(!pcm_16.render_compatible());
     }
     #[test]
     fn rejects_truncated_mix_format() {
