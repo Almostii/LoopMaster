@@ -340,9 +340,14 @@ fn graph_snapshot_sink_endpoint(graph: &RouteGraphSnapshot) -> loopmaster_audio_
 }
 
 fn fail(state: &AtomicU8, stop: &AtomicBool, error: &Mutex<Option<String>>, value: String) {
+    // 同一 session 可能有多个 worker 同时退出。设备失效先将 session
+    // 标记为 Degraded 后，其他 worker 的收尾错误不能把它覆盖成 Failed，
+    // 否则 supervisor 会跳过后续重连。
+    if stop.swap(true, Ordering::AcqRel) {
+        return;
+    }
     *error.lock().expect("状态锁未中毒") = Some(value);
     state.store(STATE_FAILED, Ordering::Release);
-    stop.store(true, Ordering::Release);
 }
 
 fn fail_windows(
@@ -351,14 +356,16 @@ fn fail_windows(
     error: &Mutex<Option<String>>,
     value: &WindowsAudioError,
 ) {
-    *error.lock().expect("状态锁未中毒") = Some(value.to_string());
     let next_state = if value.is_device_failure() {
         STATE_DEGRADED
     } else {
         STATE_FAILED
     };
+    if stop.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    *error.lock().expect("状态锁未中毒") = Some(value.to_string());
     state.store(next_state, Ordering::Release);
-    stop.store(true, Ordering::Release);
 }
 
 /// 负责管线会话的生命周期。每次重试都重新创建 FIFO、WASAPI stream 和
@@ -935,6 +942,33 @@ mod tests {
         assert_eq!(
             AudioEngineState::from_raw(state.load(Ordering::Acquire)),
             AudioEngineState::Failed
+        );
+    }
+
+    #[test]
+    fn keeps_degraded_when_another_worker_reports_after_device_failure() {
+        let state = AtomicU8::new(STATE_RUNNING);
+        let stop = AtomicBool::new(false);
+        let error = Mutex::new(None);
+        let device_error = WindowsAudioError::CaptureState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: "capture-id".into(),
+        };
+        let expected_error = device_error.to_string();
+        fail_windows(&state, &stop, &error, &device_error);
+        fail(
+            &state,
+            &stop,
+            &error,
+            "render worker 收尾时 FIFO 已停止".into(),
+        );
+        assert_eq!(
+            AudioEngineState::from_raw(state.load(Ordering::Acquire)),
+            AudioEngineState::Degraded
+        );
+        assert_eq!(
+            error.lock().unwrap().as_deref(),
+            Some(expected_error.as_str())
         );
     }
 
