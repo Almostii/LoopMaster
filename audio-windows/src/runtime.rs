@@ -160,6 +160,7 @@ impl Counters {
 
 pub struct AudioEngine {
     config: AudioEngineConfig,
+    graph_config: Arc<Mutex<RouteGraphSnapshot>>,
     state: Arc<AtomicU8>,
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
@@ -172,6 +173,7 @@ impl AudioEngine {
     pub fn new(config: AudioEngineConfig) -> Result<Self, AudioEngineError> {
         validate_config(&config)?;
         Ok(Self {
+            graph_config: Arc::new(Mutex::new(config.graph.clone())),
             config,
             state: Arc::new(AtomicU8::new(STATE_STOPPED)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -203,7 +205,7 @@ impl AudioEngine {
         *self.last_error.lock().expect("状态锁未中毒") = None;
         self.stop.store(false, Ordering::Release);
         self.state.store(STATE_RUNNING, Ordering::Release);
-        let graph = self.config.graph.clone();
+        let graph_config = Arc::clone(&self.graph_config);
         let block_frames = self.config.block_frames;
         let fifo_capacity_frames = self.config.fifo_capacity_frames;
         let stop = Arc::clone(&self.stop);
@@ -215,7 +217,7 @@ impl AudioEngine {
             .name("loopmaster-audio-supervisor".into())
             .spawn(move || {
                 supervisor_worker(
-                    graph,
+                    graph_config,
                     block_frames,
                     fifo_capacity_frames,
                     stop,
@@ -252,6 +254,7 @@ impl AudioEngine {
         tx.send(graph.clone())
             .map_err(|_| AudioEngineError::NotRunning)?;
         self.config.graph = graph;
+        *self.graph_config.lock().expect("路由快照锁未中毒") = self.config.graph.clone();
         Ok(())
     }
 
@@ -339,7 +342,7 @@ fn fail_windows(
 /// 重采样器；旧会话的 worker 必须先 join，避免两个会话同时驱动同一 endpoint。
 #[allow(clippy::too_many_arguments)]
 fn supervisor_worker(
-    graph: RouteGraphSnapshot,
+    graph_config: Arc<Mutex<RouteGraphSnapshot>>,
     block_frames: usize,
     fifo_capacity_frames: usize,
     engine_stop: Arc<AtomicBool>,
@@ -359,6 +362,7 @@ fn supervisor_worker(
                 break;
             }
         }
+        let graph = graph_config.lock().expect("路由快照锁未中毒").clone();
         let session_stop = Arc::new(AtomicBool::new(false));
         let (source_tx, mixer_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
         {
