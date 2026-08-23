@@ -26,7 +26,10 @@ const STARTUP_PREFILL_BLOCKS: usize = 2;
 // block 没有足够输入时才计为一次欠载；真实的 WASAPI discontinuity 仍独立统计。
 const UNDERFLOW_GRACE_BLOCKS: usize = 2;
 const DEFAULT_FIFO_CAPACITY_BLOCKS: usize = 32;
-const DEFAULT_RECONNECT_ATTEMPTS: usize = 5;
+// 设备拔插后，Windows 音频服务和驱动重新枚举 endpoint 通常需要数秒；
+// 2.5 秒（5 次重试）不足以覆盖这个窗口。保留有限上限，避免设备永久拔出
+// 时 supervisor 无止境占用线程，同时给系统约 30 秒完成重新枚举。
+const DEFAULT_RECONNECT_ATTEMPTS: usize = 60;
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 fn underflow_grace_period(block_period: Duration) -> Duration {
@@ -357,7 +360,13 @@ fn fail_windows(
     value: &WindowsAudioError,
 ) {
     let next_state = if value.is_device_failure() {
-        STATE_DEGRADED
+        // 首次 session 失效需要发布 Degraded；重连阶段的探测 session
+        // 失败仍停留在 Reconnecting，避免一次故障被统计为多次 Degraded。
+        if state.load(Ordering::Acquire) == STATE_RECONNECTING {
+            STATE_RECONNECTING
+        } else {
+            STATE_DEGRADED
+        }
     } else {
         STATE_FAILED
     };
@@ -394,6 +403,44 @@ fn supervisor_worker(
             }
         }
         let graph = graph_config.lock().expect("路由快照锁未中毒").clone();
+        if attempt > 0 {
+            let source_endpoint = match graph.graph().sources[0].endpoint_id.clone() {
+                Some(endpoint) => endpoint,
+                None => {
+                    fail(
+                        &state,
+                        &engine_stop,
+                        &error,
+                        "source 未配置 endpoint ID".into(),
+                    );
+                    break;
+                }
+            };
+            let sink_endpoint = graph_snapshot_sink_endpoint(&graph);
+            match WindowsAudioBackend::new()
+                .and_then(|backend| backend.are_endpoints_active(&source_endpoint, &sink_endpoint))
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    if attempt == DEFAULT_RECONNECT_ATTEMPTS {
+                        mark_reconnect_exhausted(&state, &engine_stop, &error);
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) if e.is_device_failure() => {
+                    if attempt == DEFAULT_RECONNECT_ATTEMPTS {
+                        mark_reconnect_exhausted(&state, &engine_stop, &error);
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    fail(&state, &engine_stop, &error, e.to_string());
+                    break;
+                }
+            }
+        }
         let session_stop = Arc::new(AtomicBool::new(false));
         let (source_tx, mixer_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
         {
@@ -475,15 +522,24 @@ fn supervisor_worker(
         if engine_stop.load(Ordering::Acquire) {
             break;
         }
-        if state.load(Ordering::Acquire) != STATE_DEGRADED {
+        let session_state = state.load(Ordering::Acquire);
+        if session_state != STATE_DEGRADED && session_state != STATE_RECONNECTING {
             break;
         }
         if attempt == DEFAULT_RECONNECT_ATTEMPTS {
-            *error.lock().expect("状态锁未中毒") = Some("设备重连重试次数耗尽".into());
-            state.store(STATE_FAILED, Ordering::Release);
-            engine_stop.store(true, Ordering::Release);
+            mark_reconnect_exhausted(&state, &engine_stop, &error);
         }
     }
+}
+
+fn mark_reconnect_exhausted(
+    state: &AtomicU8,
+    engine_stop: &AtomicBool,
+    error: &Mutex<Option<String>>,
+) {
+    *error.lock().expect("状态锁未中毒") = Some("设备重连等待窗口耗尽".into());
+    state.store(STATE_FAILED, Ordering::Release);
+    engine_stop.store(true, Ordering::Release);
 }
 
 fn spawn_capture_worker(
@@ -970,6 +1026,30 @@ mod tests {
             error.lock().unwrap().as_deref(),
             Some(expected_error.as_str())
         );
+    }
+
+    #[test]
+    fn keeps_reconnecting_when_probe_session_is_unavailable() {
+        let state = AtomicU8::new(STATE_RECONNECTING);
+        let stop = AtomicBool::new(false);
+        let error = Mutex::new(None);
+        let device_error = WindowsAudioError::CaptureState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: "capture-id".into(),
+        };
+        fail_windows(&state, &stop, &error, &device_error);
+        assert_eq!(
+            AudioEngineState::from_raw(state.load(Ordering::Acquire)),
+            AudioEngineState::Reconnecting
+        );
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn reconnect_window_covers_driver_reenumeration_delay() {
+        assert!(DEFAULT_RECONNECT_ATTEMPTS >= 60);
+        assert!(RECONNECT_DELAY >= Duration::from_millis(250));
+        assert!(RECONNECT_DELAY * DEFAULT_RECONNECT_ATTEMPTS as u32 >= Duration::from_secs(30));
     }
 
     #[test]
