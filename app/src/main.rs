@@ -87,16 +87,14 @@ fn main() -> Result<(), slint::PlatformError> {
     // 状态轮询（1 Hz）。
     let ui_weak = ui.as_weak();
     let state_rc = Rc::clone(&state);
-    let timer = slint::Timer::default();
-    timer.start(
+    let _timer = slint::Timer::default();
+    _timer.start(
         slint::TimerMode::Repeated,
         Duration::from_secs(1),
         move || {
             poll_status(&ui_weak, &state_rc);
         },
     );
-    let _ = timer;
-
     ui.run()
 }
 
@@ -105,25 +103,33 @@ fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
     let devices = DeviceRepository::new();
     let processes = ProcessRepository::new();
     let mut state_borrow = state.borrow_mut();
+    let mut errors = Vec::new();
 
     // 进程列表。
     let process_names: Vec<SharedString> = match processes {
-        Ok(repo) => repo
-            .list_audio_processes()
-            .map(|list| {
+        Ok(repo) => match repo.list_audio_processes() {
+            Ok(list) => {
                 state_borrow.process_pids = list.iter().map(|p| p.pid).collect();
                 list.iter()
                     .map(|p| SharedString::from(format!("{} (PID {})", p.name, p.pid)))
                     .collect()
-            })
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
+            }
+            Err(error) => {
+                state_borrow.process_pids.clear();
+                errors.push(format!("进程枚举失败: {error}"));
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            state_borrow.process_pids.clear();
+            errors.push(format!("进程枚举失败: {error}"));
+            Vec::new()
+        }
     };
     // sink 设备列表（render 且 RenderReady）。
     let sink_names: Vec<SharedString> = match devices {
-        Ok(repo) => repo
-            .list_devices()
-            .map(|list| {
+        Ok(repo) => match repo.list_devices() {
+            Ok(list) => {
                 state_borrow.sink_ids = list
                     .iter()
                     .filter(|d| {
@@ -139,29 +145,46 @@ fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
                     })
                     .map(|d| SharedString::from(d.name.clone()))
                     .collect()
-            })
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
+            }
+            Err(error) => {
+                state_borrow.sink_ids.clear();
+                errors.push(format!("输出设备枚举失败: {error}"));
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            state_borrow.sink_ids.clear();
+            errors.push(format!("输出设备枚举失败: {error}"));
+            Vec::new()
+        }
     };
 
     if let Some(ui) = ui.upgrade() {
         ui.set_process_model(Rc::new(VecModel::from(process_names)).into());
         ui.set_sink_model(Rc::new(VecModel::from(sink_names)).into());
-        // 默认选中第一项。
-        if ui.get_process_index() < 0 && !state_borrow.process_pids.is_empty() {
+        // 列表刷新后确保索引仍然有效；枚举失败时清除旧索引，避免使用陈旧 ID。
+        if state_borrow.process_pids.is_empty() {
+            ui.set_process_index(-1);
+        } else if ui.get_process_index() < 0
+            || ui.get_process_index() as usize >= state_borrow.process_pids.len()
+        {
             ui.set_process_index(0);
         }
-        if ui.get_sink_index() < 0 && !state_borrow.sink_ids.is_empty() {
+        if state_borrow.sink_ids.is_empty() {
+            ui.set_sink_index(-1);
+        } else if ui.get_sink_index() < 0
+            || ui.get_sink_index() as usize >= state_borrow.sink_ids.len()
+        {
             ui.set_sink_index(0);
+        }
+        if !errors.is_empty() {
+            ui.set_engine_state(SharedString::from(errors.join("；")));
         }
     }
 }
 
 /// 按当前 UI 选择构造路由图。
-fn build_graph(
-    state: &mut AppState,
-    ui: &MainWindow,
-) -> Result<RouteGraph, String> {
+fn build_graph(state: &mut AppState, ui: &MainWindow) -> Result<RouteGraph, String> {
     let pid = *state
         .process_pids
         .get(ui.get_process_index() as usize)
