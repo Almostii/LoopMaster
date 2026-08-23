@@ -9,6 +9,7 @@ use std::env;
 use std::time::{Duration, Instant};
 
 const ENGINE_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
+const ENGINE_LIVE_OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default)]
 struct StateObservation {
@@ -118,10 +119,42 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
     println!("提示：状态统计来自周期采样；持续时间短于采样间隔的状态可能不会被观察到。");
     let initial_status = engine.status();
     let mut state_observation = StateObservation::new(initial_status.state);
+    let mut last_live_state = initial_status.state;
+    let mut last_live_output = Instant::now();
+    println!(
+        "实时状态: {} | capture packet={} | render writes={} | reconnect attempts={}",
+        initial_status.state.as_str(),
+        initial_status.stats.capture_packets,
+        initial_status.stats.render_writes,
+        initial_status.stats.reconnect_attempts
+    );
     let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
     while Instant::now() < deadline {
         let status = engine.status();
         state_observation.observe(status.state);
+        if status.state != last_live_state {
+            println!(
+                "实时状态变化: {} -> {} | capture packet={} | render writes={} | reconnect attempts={}",
+                last_live_state.as_str(),
+                status.state.as_str(),
+                status.stats.capture_packets,
+                status.stats.render_writes,
+                status.stats.reconnect_attempts
+            );
+            last_live_state = status.state;
+            last_live_output = Instant::now();
+        } else if last_live_output.elapsed() >= ENGINE_LIVE_OUTPUT_INTERVAL {
+            println!(
+                "实时统计: state={} | capture packet={} | render writes={} | FIFO underflow={} | discontinuity={} | reconnect attempts={}",
+                status.state.as_str(),
+                status.stats.capture_packets,
+                status.stats.render_writes,
+                status.stats.fifo_underflows,
+                status.stats.discontinuities,
+                status.stats.reconnect_attempts
+            );
+            last_live_output = Instant::now();
+        }
         if status.failed {
             break;
         }
