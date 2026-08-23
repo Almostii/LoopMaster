@@ -437,13 +437,61 @@ impl WindowsAudioBackend {
         capture_id: &EndpointId,
         render_id: &EndpointId,
     ) -> Result<bool, WindowsAudioError> {
-        let endpoints = self.enumerate_endpoints()?;
-        Ok(endpoints
-            .iter()
-            .any(|endpoint| endpoint.flow == EndpointFlow::Capture && &endpoint.id == capture_id)
-            && endpoints
-                .iter()
-                .any(|endpoint| endpoint.flow == EndpointFlow::Render && &endpoint.id == render_id))
+        #[cfg(not(windows))]
+        {
+            let _ = (self, capture_id, render_id);
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            use windows::core::Interface;
+            use windows::Win32::Media::Audio::{
+                eCapture, eRender, IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator,
+                DEVICE_STATE_ACTIVE,
+            };
+            use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+            let enumerator: IMMDeviceEnumerator =
+                unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(
+                    |error| hresult_error("CoCreateInstance(MMDeviceEnumerator)", None, error),
+                )?;
+
+            let check = |id: &EndpointId, expected_flow| -> Result<bool, WindowsAudioError> {
+                let wide_id: Vec<u16> = id.0.encode_utf16().chain(std::iter::once(0)).collect();
+                let device = match unsafe {
+                    enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr()))
+                } {
+                    Ok(device) => device,
+                    Err(error) if is_device_not_ready_hresult(error.code().0) => return Ok(false),
+                    Err(error) => {
+                        return Err(hresult_error(
+                            "IMMDeviceEnumerator::GetDevice",
+                            Some(id.0.clone()),
+                            error,
+                        ));
+                    }
+                };
+                let state = unsafe { device.GetState() }.map_err(|error| {
+                    hresult_error("IMMDevice::GetState", Some(id.0.clone()), error)
+                })?;
+                if state != DEVICE_STATE_ACTIVE {
+                    return Ok(false);
+                }
+                let endpoint = device.cast::<IMMEndpoint>().map_err(|error| {
+                    hresult_error(
+                        "IMMDevice::QueryInterface(IMMEndpoint)",
+                        Some(id.0.clone()),
+                        error,
+                    )
+                })?;
+                let flow = unsafe { endpoint.GetDataFlow() }.map_err(|error| {
+                    hresult_error("IMMEndpoint::GetDataFlow", Some(id.0.clone()), error)
+                })?;
+                Ok(flow == expected_flow)
+            };
+
+            Ok(check(capture_id, eCapture)? && check(render_id, eRender)?)
+        }
     }
 
     /// 打开指定 render endpoint，初始化 WASAPI shared-mode client，并启动流。
@@ -1207,6 +1255,19 @@ fn hresult_error(
         hresult: error.code().0,
         endpoint_id,
     }
+}
+
+#[cfg(windows)]
+fn is_device_not_ready_hresult(hresult: i32) -> bool {
+    matches!(
+        hresult,
+        HRESULT_ERROR_NOT_FOUND
+            | HRESULT_ERROR_DEVICE_NOT_CONNECTED
+            | AUDCLNT_E_DEVICE_INVALIDATED
+            | AUDCLNT_E_SERVICE_NOT_RUNNING
+            | AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY
+            | AUDCLNT_E_ENDPOINT_CREATE_FAILED
+    )
 }
 
 #[cfg(windows)]
