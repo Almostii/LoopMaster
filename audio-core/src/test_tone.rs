@@ -13,7 +13,7 @@ pub enum TestToneKind {
     Impulse,
     /// 全静音（基线/电平验证）。
     Silence,
-    /// 声道识别：左声道 440 Hz、右声道 880 Hz、其余声道 1320 Hz。
+    /// 声道识别：左声道 440 Hz、右声道 1300 Hz、其余声道 1760 Hz。
     ChannelId,
 }
 
@@ -21,7 +21,7 @@ pub enum TestToneKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TestToneConfig {
     pub kind: TestToneKind,
-    /// Sine/Impulse 的基频（Hz）；ChannelId 固定 440/880/1320。
+    /// Sine/Impulse 的基频（Hz）；ChannelId 固定 440/1300/1760。
     pub frequency_hz: f32,
     /// 幅度（0.0~1.0）。
     pub amplitude: f32,
@@ -77,8 +77,8 @@ pub fn fill_block(
                 TestToneKind::ChannelId => {
                     let frequency = match channel {
                         0 => 440.0,
-                        1 => 880.0,
-                        _ => 1320.0,
+                        1 => 1300.0,
+                        _ => 1760.0,
                     };
                     (2.0 * std::f64::consts::PI * frequency * n / sample_rate).sin() as f32
                         * config.amplitude
