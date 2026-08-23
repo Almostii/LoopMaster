@@ -17,6 +17,10 @@ use thiserror::Error;
 const STATE_STOPPED: u8 = 0;
 const STATE_RUNNING: u8 = 1;
 const STATE_FAILED: u8 = 2;
+// 设备启动和共享模式调度在最初几个周期内存在抖动。让管线先积累
+// 两个 block，再开始计入运行期欠载，避免把启动窗口误当作稳定性故障。
+const STARTUP_PREFILL_BLOCKS: usize = 2;
+const DEFAULT_FIFO_CAPACITY_BLOCKS: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct AudioEngineConfig {
@@ -30,7 +34,7 @@ impl AudioEngineConfig {
         Self {
             graph,
             block_frames: DEFAULT_BLOCK_FRAMES,
-            fifo_capacity_frames: DEFAULT_BLOCK_FRAMES * 10,
+            fifo_capacity_frames: DEFAULT_BLOCK_FRAMES * DEFAULT_FIFO_CAPACITY_BLOCKS,
         }
     }
 }
@@ -428,6 +432,10 @@ fn mixer_worker(
         block_frames as f64 / loopmaster_audio_core::INTERNAL_SAMPLE_RATE as f64,
     );
     let mut next_deadline = Instant::now();
+    let startup_prefill_frames = block_frames
+        .saturating_mul(STARTUP_PREFILL_BLOCKS)
+        .min(consumer.capacity_frames());
+    let mut primed = false;
     let mut starvation_since = None;
     let mut starvation_reported = false;
     while !stop.load(Ordering::Acquire) {
@@ -448,7 +456,13 @@ fn mixer_worker(
                 }
             }
         }
-        if consumer.available_frames() < block_frames {
+        let available = consumer.available_frames();
+        if !primed && available < startup_prefill_frames {
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        primed = true;
+        if available < block_frames {
             let started = starvation_since.get_or_insert_with(Instant::now);
             if !starvation_reported && started.elapsed() >= block_period {
                 counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
@@ -522,9 +536,19 @@ fn render_worker(
         block_frames as f64 / loopmaster_audio_core::INTERNAL_SAMPLE_RATE as f64,
     );
     let mut next_deadline = Instant::now();
+    let startup_prefill_frames = block_frames
+        .saturating_mul(STARTUP_PREFILL_BLOCKS)
+        .min(consumer.capacity_frames());
+    let mut primed = false;
     while !stop.load(Ordering::Acquire) {
         if !pending {
-            if consumer.available_frames() < block_frames {
+            let available = consumer.available_frames();
+            if !primed && available < startup_prefill_frames {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            primed = true;
+            if available < block_frames {
                 let started = starvation_since.get_or_insert_with(Instant::now);
                 if !starvation_reported && started.elapsed() >= block_period {
                     counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
