@@ -7,8 +7,10 @@ use loopmaster_audio_core::{
 };
 use thiserror::Error;
 
+mod process_loopback;
 mod runtime;
 
+pub use process_loopback::ProcessLoopbackSource;
 pub use runtime::{
     AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineState, AudioEngineStats,
     AudioEngineStatus,
@@ -98,6 +100,8 @@ impl EndpointInfo {
 pub enum WindowsAudioError {
     #[error("Windows 音频 endpoint 仅支持 Windows 平台")]
     UnsupportedPlatform,
+    #[error("Process Loopback 进程 ID 无效: {pid}")]
+    ProcessLoopbackInvalidPid { pid: u32 },
     #[error("COM 初始化失败: HRESULT=0x{hresult:08X}")]
     ComInitialization { hresult: i32 },
     #[error("WASAPI 操作 {operation} 失败: HRESULT=0x{hresult:08X}, endpoint={endpoint_id:?}")]
