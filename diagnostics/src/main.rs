@@ -2,9 +2,54 @@ use loopmaster_audio_core::{
     AudioFifo, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot, SendSpec, SinkId, SinkSpec,
     SourceId, SourceKind, SourceSpec,
 };
-use loopmaster_audio_windows::{AudioEngine, AudioEngineConfig, EndpointInfo, WindowsAudioBackend};
+use loopmaster_audio_windows::{
+    AudioEngine, AudioEngineConfig, AudioEngineState, EndpointInfo, WindowsAudioBackend,
+};
 use std::env;
 use std::time::{Duration, Instant};
+
+const ENGINE_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
+
+#[derive(Debug, Default)]
+struct StateObservation {
+    first: Option<AudioEngineState>,
+    last: Option<AudioEngineState>,
+    transitions: [u64; 5],
+}
+
+impl StateObservation {
+    fn new(initial: AudioEngineState) -> Self {
+        let mut observation = Self::default();
+        observation.observe(initial);
+        observation
+    }
+
+    fn observe(&mut self, state: AudioEngineState) {
+        if self.first.is_none() {
+            self.first = Some(state);
+        }
+        if self.last != Some(state) {
+            if self.last.is_some() {
+                self.transitions[state_index(state)] += 1;
+            }
+            self.last = Some(state);
+        }
+    }
+
+    fn transition_count(&self, state: AudioEngineState) -> u64 {
+        self.transitions[state_index(state)]
+    }
+}
+
+fn state_index(state: AudioEngineState) -> usize {
+    match state {
+        AudioEngineState::Stopped => 0,
+        AudioEngineState::Running => 1,
+        AudioEngineState::Degraded => 2,
+        AudioEngineState::Reconnecting => 3,
+        AudioEngineState::Failed => 4,
+    }
+}
 
 fn main() {
     let backend = match WindowsAudioBackend::new() {
@@ -69,11 +114,21 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
         eprintln!("启动正式音频引擎失败: {error}");
         std::process::exit(1);
     }
+    println!("提示：请在本命令运行期间拔出并重新插入声卡或 VB-CABLE，以验证自动恢复。");
+    println!("提示：状态统计来自周期采样；持续时间短于采样间隔的状态可能不会被观察到。");
+    let initial_status = engine.status();
+    let mut state_observation = StateObservation::new(initial_status.state);
     let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
-    while Instant::now() < deadline && !engine.status().failed {
-        std::thread::sleep(Duration::from_millis(100));
+    while Instant::now() < deadline {
+        let status = engine.status();
+        state_observation.observe(status.state);
+        if status.failed {
+            break;
+        }
+        std::thread::sleep(ENGINE_STATUS_SAMPLE_INTERVAL);
     }
     let status = engine.status();
+    state_observation.observe(status.state);
     let _ = engine.stop();
     println!("LoopMaster 正式音频引擎验收");
     println!("运行时间: {} 秒", seconds.max(1));
@@ -94,6 +149,25 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
         status.stats.runtime_discontinuities
     );
     println!("timestamp errors: {}", status.stats.timestamp_errors);
+    println!("reconnect attempts: {}", status.stats.reconnect_attempts);
+    println!(
+        "状态首次/最后: {}/{}",
+        state_observation
+            .first
+            .map(AudioEngineState::as_str)
+            .unwrap_or("Unknown"),
+        state_observation
+            .last
+            .map(AudioEngineState::as_str)
+            .unwrap_or("Unknown")
+    );
+    println!(
+        "状态转移次数（观测到进入该状态）: Running={}, Degraded={}, Reconnecting={}, Failed={}",
+        state_observation.transition_count(AudioEngineState::Running),
+        state_observation.transition_count(AudioEngineState::Degraded),
+        state_observation.transition_count(AudioEngineState::Reconnecting),
+        state_observation.transition_count(AudioEngineState::Failed),
+    );
     if let Some(error) = status.last_error {
         eprintln!("引擎错误: {error}");
     }
@@ -104,6 +178,29 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
             2
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_observation_counts_only_state_changes() {
+        let mut observation = StateObservation::new(AudioEngineState::Running);
+        observation.observe(AudioEngineState::Running);
+        observation.observe(AudioEngineState::Degraded);
+        observation.observe(AudioEngineState::Reconnecting);
+        observation.observe(AudioEngineState::Running);
+        observation.observe(AudioEngineState::Failed);
+        observation.observe(AudioEngineState::Failed);
+
+        assert_eq!(observation.first, Some(AudioEngineState::Running));
+        assert_eq!(observation.last, Some(AudioEngineState::Failed));
+        assert_eq!(observation.transition_count(AudioEngineState::Running), 1);
+        assert_eq!(observation.transition_count(AudioEngineState::Degraded), 1);
+        assert_eq!(observation.transition_count(AudioEngineState::Reconnecting), 1);
+        assert_eq!(observation.transition_count(AudioEngineState::Failed), 1);
+    }
 }
 
 fn run_capture_render_test(
