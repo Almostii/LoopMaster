@@ -64,6 +64,17 @@ impl AudioEngineState {
             _ => Self::Stopped,
         }
     }
+
+    /// 返回稳定的中文状态标签，供诊断工具和日志使用。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "Stopped",
+            Self::Running => "Running",
+            Self::Degraded => "Degraded",
+            Self::Reconnecting => "Reconnecting",
+            Self::Failed => "Failed",
+        }
+    }
 }
 
 impl AudioEngineConfig {
@@ -118,6 +129,8 @@ pub struct AudioEngineStats {
     pub timestamp_errors: u64,
     pub render_no_space: u64,
     pub graph_updates: u64,
+    /// supervisor 因设备失效启动的重连尝试次数；初次启动不计入。
+    pub reconnect_attempts: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +156,7 @@ struct Counters {
     timestamp_errors: AtomicU64,
     render_no_space: AtomicU64,
     graph_updates: AtomicU64,
+    reconnect_attempts: AtomicU64,
 }
 
 impl Counters {
@@ -161,6 +175,7 @@ impl Counters {
             timestamp_errors: self.timestamp_errors.load(Ordering::Relaxed),
             render_no_space: self.render_no_space.load(Ordering::Relaxed),
             graph_updates: self.graph_updates.load(Ordering::Relaxed),
+            reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
         }
     }
 }
@@ -198,6 +213,7 @@ impl AudioEngine {
                 timestamp_errors: AtomicU64::new(0),
                 render_no_space: AtomicU64::new(0),
                 graph_updates: AtomicU64::new(0),
+                reconnect_attempts: AtomicU64::new(0),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
@@ -363,6 +379,7 @@ fn supervisor_worker(
             break;
         }
         if attempt > 0 {
+            counters.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
             state.store(STATE_RECONNECTING, Ordering::Release);
             thread::sleep(RECONNECT_DELAY);
             if engine_stop.load(Ordering::Acquire) {
