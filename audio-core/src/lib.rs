@@ -101,6 +101,8 @@ pub enum RouteGraphError {
     MissingSource(String),
     #[error("sink 不存在: {0}")]
     MissingSink(String),
+    #[error("send 不存在: {0}")]
+    MissingSend(String),
     #[error("增益超出范围: {0} dB")]
     InvalidGain(f32),
 }

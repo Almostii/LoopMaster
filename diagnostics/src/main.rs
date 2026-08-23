@@ -829,9 +829,9 @@ fn availability_label(flow: EndpointFlow, format: EndpointFormat) -> &'static st
     match flow {
         EndpointFlow::Capture => {
             if format.capture_compatible() {
-                "可作为 capture source（48 kHz / 32-bit float / 2 声道）"
+                "可作为 capture source（32-bit float / 2 声道，采样率自动重采样）"
             } else {
-                "不满足 capture 契约（需 48 kHz / 32-bit float / 2 声道）"
+                "不满足 capture 契约（需 32-bit float / 2 声道）"
             }
         }
         EndpointFlow::Render => {
