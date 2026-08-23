@@ -80,6 +80,21 @@ pub struct EndpointInfo {
     pub channel_mask: Option<u32>,
 }
 
+/// 当前存在播放音频会话的进程，可直接作为 Process Loopback 的目标。
+///
+/// 该列表来自 WASAPI `IAudioSessionManager2`，不是所有进程的快照；因此没有
+/// 音频会话的进程不会出现在列表中。进程可能在枚举和读取名称之间退出，调用方
+/// 必须在创建 source 时再次处理 PID 无效错误。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessInfo {
+    /// Windows 进程 ID。
+    pub pid: u32,
+    /// 进程可读名称。无法读取名称时包含 PID 和原因，但 PID 仍可用于重试。
+    pub name: String,
+    /// 进程可执行文件的完整路径；权限不足时为 `None`。
+    pub executable_path: Option<String>,
+}
+
 impl EndpointInfo {
     /// 在格式字段完整时返回一个便于输出的格式摘要。
     pub fn endpoint_format(&self) -> Option<EndpointFormat> {
@@ -350,6 +365,148 @@ fn invalid_format(reason: &str, endpoint_id: Option<String>) -> WindowsAudioErro
     }
 }
 
+#[cfg(windows)]
+fn enumerate_processes_windows() -> Result<Vec<ProcessInfo>, WindowsAudioError> {
+    use std::collections::BTreeMap;
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+        MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .map_err(|error| hresult_error("CoCreateInstance(MMDeviceEnumerator)", None, error))?;
+    let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }
+        .map_err(|error| hresult_error("IMMDeviceEnumerator::EnumAudioEndpoints", None, error))?;
+    let count = unsafe { collection.GetCount() }
+        .map_err(|error| hresult_error("IMMDeviceCollection::GetCount", None, error))?;
+    let mut processes = BTreeMap::new();
+
+    for index in 0..count {
+        let device = unsafe { collection.Item(index) }
+            .map_err(|error| hresult_error("IMMDeviceCollection::Item", None, error))?;
+        let endpoint_id = unsafe { get_endpoint_id(&device) }?;
+        let manager: IAudioSessionManager2 =
+            unsafe { device.Activate(CLSCTX_ALL, None) }.map_err(|error| {
+                hresult_error(
+                    "IMMDevice::Activate(IAudioSessionManager2)",
+                    Some(endpoint_id.clone()),
+                    error,
+                )
+            })?;
+        let sessions = unsafe { manager.GetSessionEnumerator() }.map_err(|error| {
+            hresult_error(
+                "IAudioSessionManager2::GetSessionEnumerator",
+                Some(endpoint_id.clone()),
+                error,
+            )
+        })?;
+        let session_count = unsafe { sessions.GetCount() }.map_err(|error| {
+            hresult_error(
+                "IAudioSessionEnumerator::GetCount",
+                Some(endpoint_id.clone()),
+                error,
+            )
+        })?;
+        for session_index in 0..session_count {
+            let control = match unsafe { sessions.GetSession(session_index) } {
+                Ok(control) => control,
+                // Session lists are mutable. A session can disappear between GetCount
+                // and GetSession; ignore that transient race and continue enumeration.
+                Err(_) => continue,
+            };
+            let control = match control.cast::<IAudioSessionControl2>() {
+                Ok(control) => control,
+                Err(_) => continue,
+            };
+            let pid = match unsafe { control.GetProcessId() } {
+                Ok(pid) if pid != 0 => pid,
+                // PID 0 is the system-sounds session and cannot be a Process Loopback
+                // target. Other failures commonly mean that the session just exited.
+                _ => continue,
+            };
+            if processes.contains_key(&pid) {
+                continue;
+            }
+            if let Some(info) = process_info(pid) {
+                processes.insert(pid, info);
+            }
+        }
+    }
+    Ok(processes.into_values().collect())
+}
+
+#[cfg(windows)]
+fn process_info(pid: u32) -> Option<ProcessInfo> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(process) => process,
+        Err(error) => {
+            let code = error.code().0 as u32;
+            // ERROR_INVALID_PARAMETER / ERROR_NOT_FOUND indicates that the process
+            // exited during enumeration. Access denied is retained with a fallback name.
+            if matches!(code, 0x8007_0057 | 0x8007_0490 | 0x8007_0002) {
+                return None;
+            }
+            return Some(ProcessInfo {
+                pid,
+                name: format!("PID {pid}（无法读取名称：权限不足）"),
+                executable_path: None,
+            });
+        }
+    };
+    let mut buffer = vec![0u16; 32_768];
+    let mut length = buffer.len() as u32;
+    let path = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    let path = match path {
+        Ok(()) if length > 0 => String::from_utf16_lossy(&buffer[..length as usize]),
+        Err(error) => {
+            let code = error.code().0 as u32;
+            if matches!(code, 0x8007_0057 | 0x8007_0490 | 0x8007_0002) {
+                return None;
+            }
+            return Some(ProcessInfo {
+                pid,
+                name: format!("PID {pid}（无法读取名称：权限不足）"),
+                executable_path: None,
+            });
+        }
+        _ => {
+            return Some(ProcessInfo {
+                pid,
+                name: format!("PID {pid}（无法读取名称）"),
+                executable_path: None,
+            });
+        }
+    };
+    let name = path
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&path)
+        .to_owned();
+    Some(ProcessInfo {
+        pid,
+        name,
+        executable_path: Some(path),
+    })
+}
+
 /// Windows 音频后端；当前仅提供 endpoint 静态诊断。
 pub struct WindowsAudioBackend {
     #[cfg(windows)]
@@ -428,6 +585,23 @@ impl WindowsAudioBackend {
                 }
             }
             Ok(endpoints)
+        }
+    }
+
+    /// 枚举当前具有活动播放会话的进程。
+    ///
+    /// 每个进程只返回一次，即使它同时向多个 render endpoint 播放。读取进程
+    /// 路径需要 `PROCESS_QUERY_LIMITED_INFORMATION`：权限不足时保留该 PID，
+    /// 并返回可识别的占位名称；进程在枚举期间退出则忽略该会话的瞬时竞态。
+    pub fn enumerate_processes(&self) -> Result<Vec<ProcessInfo>, WindowsAudioError> {
+        #[cfg(not(windows))]
+        {
+            let _ = self;
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            enumerate_processes_windows()
         }
     }
 
