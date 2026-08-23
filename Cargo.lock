@@ -2705,6 +2705,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "loopmaster-app-service"
+version = "0.1.0"
+dependencies = [
+ "loopmaster-audio-core",
+ "loopmaster-audio-windows",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "loopmaster-audio-core"
 version = "0.1.0"
 dependencies = [
