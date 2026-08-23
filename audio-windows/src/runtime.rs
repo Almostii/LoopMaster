@@ -375,14 +375,17 @@ fn validate_config(config: &AudioEngineConfig) -> Result<(), AudioEngineError> {
     }
     for source in &graph.sources {
         match source.kind {
-            SourceKind::DeviceCapture if source.endpoint_id.is_none() => {
+            SourceKind::DeviceCapture | SourceKind::DeviceLoopback
+                if source.endpoint_id.is_none() =>
+            {
                 return Err(AudioEngineError::MissingSourceEndpoint);
             }
             SourceKind::ProcessLoopback if source.process_id.unwrap_or(0) == 0 => {
                 return Err(AudioEngineError::MissingProcessId);
             }
-            SourceKind::DeviceCapture | SourceKind::ProcessLoopback => {}
-            SourceKind::DeviceLoopback => return Err(AudioEngineError::UnsupportedSourceKind),
+            SourceKind::DeviceCapture
+            | SourceKind::DeviceLoopback
+            | SourceKind::ProcessLoopback => {}
         }
     }
     Ok(())
@@ -397,29 +400,42 @@ fn graph_sink_endpoints(graph: &RouteGraphSnapshot) -> Vec<loopmaster_audio_core
         .collect()
 }
 
-/// 路由图中是否存在需要按端点 active 检查的普通设备捕获 source。
+/// 路由图中是否存在需要按端点 active 检查的普通设备捕获/回环 source。
 fn endpoints_need_check(graph: &RouteGraphSnapshot) -> bool {
-    graph
-        .graph()
-        .sources
-        .iter()
-        .any(|source| source.kind == SourceKind::DeviceCapture)
+    graph.graph().sources.iter().any(|source| {
+        matches!(
+            source.kind,
+            SourceKind::DeviceCapture | SourceKind::DeviceLoopback
+        )
+    })
 }
 
-/// 重连前确认图中所有 DeviceCapture source 的 endpoint 与所有 sink endpoint 均 active。
+/// 重连前确认图中所有 DeviceCapture/DeviceLoopback source 的 endpoint 与所有
+/// sink endpoint 均 active。
 ///
 /// 任一 endpoint 失效返回 `Ok(false)`；设备类错误由调用方按重试处理。
 fn all_endpoints_active(graph: &RouteGraphSnapshot) -> Result<bool, WindowsAudioError> {
     let backend = WindowsAudioBackend::new()?;
     for source in &graph.graph().sources {
-        if source.kind == SourceKind::DeviceCapture {
-            let Some(endpoint) = &source.endpoint_id else {
-                // validate_config 保证 DeviceCapture 必带 endpoint；防御性视为不可用。
-                return Ok(false);
-            };
-            if !backend.is_endpoint_active(endpoint, EndpointFlow::Capture)? {
-                return Ok(false);
+        match source.kind {
+            SourceKind::DeviceCapture => {
+                let Some(endpoint) = &source.endpoint_id else {
+                    // validate_config 保证必带 endpoint；防御性视为不可用。
+                    return Ok(false);
+                };
+                if !backend.is_endpoint_active(endpoint, EndpointFlow::Capture)? {
+                    return Ok(false);
+                }
             }
+            SourceKind::DeviceLoopback => {
+                let Some(endpoint) = &source.endpoint_id else {
+                    return Ok(false);
+                };
+                if !backend.is_endpoint_active(endpoint, EndpointFlow::Render)? {
+                    return Ok(false);
+                }
+            }
+            SourceKind::ProcessLoopback => {}
         }
     }
     for sink in &graph.graph().sinks {
@@ -702,6 +718,7 @@ fn spawn_render_worker(
 
 enum CaptureSource {
     Device(WasapiCaptureSource),
+    Loopback(WasapiCaptureSource),
     Process(ProcessLoopbackSource),
 }
 
@@ -714,7 +731,7 @@ impl CaptureSource {
         F: FnMut(crate::CapturePacket, Option<&[f32]>),
     {
         match self {
-            Self::Device(source) => source.drain_packets(on_packet),
+            Self::Device(source) | Self::Loopback(source) => source.drain_packets(on_packet),
             Self::Process(source) => source.drain_packets(on_packet),
         }
     }
@@ -758,13 +775,17 @@ fn capture_worker(
             })?)
         }
         SourceKind::DeviceLoopback => {
-            fail(
-                &state,
-                &stop,
-                &error,
-                "当前运行时不支持 Device Loopback source".into(),
-            );
-            return Err(());
+            let endpoint = source_spec.endpoint_id.ok_or(()).map_err(|_| {
+                fail(&state, &stop, &error, "source 未配置 endpoint ID".into());
+            })?;
+            let backend = WindowsAudioBackend::new().map_err(|e| {
+                fail_windows(&state, &stop, &error, &e);
+            })?;
+            CaptureSource::Loopback(backend.open_device_loopback_source(&endpoint).map_err(
+                |e| {
+                    fail_windows(&state, &stop, &error, &e);
+                },
+            )?)
         }
     };
     let silence = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
@@ -1119,11 +1140,8 @@ mod tests {
         assert!(!engine.status().running);
         assert_eq!(engine.status().state, AudioEngineState::Stopped);
 
-        assert!(matches!(
-            AudioEngine::new(config(SourceKind::DeviceLoopback, 1)),
-            Err(AudioEngineError::UnsupportedSourceKind)
-        ));
-        // 阶段 B.2：多 source 已支持；只有空拓扑被拒绝。
+        // 阶段 B.1/B.2：Device Loopback 与多 source 均已支持；只有空拓扑被拒绝。
+        assert!(AudioEngine::new(config(SourceKind::DeviceLoopback, 1)).is_ok());
         assert!(AudioEngine::new(config(SourceKind::DeviceCapture, 2)).is_ok());
         let empty_graph = RouteGraph {
             sources: Vec::new(),
