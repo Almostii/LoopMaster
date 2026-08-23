@@ -4,10 +4,13 @@
 //! worker 之间只通过固定容量 SPSC FIFO 交换 interleaved `f32` block；配置更新
 //! 通过控制通道发送，由 mixer 在 block 边界应用。
 
-use crate::{ProcessLoopbackSource, WasapiCaptureSource, WindowsAudioBackend, WindowsAudioError};
+use crate::{
+    EndpointFlow, ProcessLoopbackSource, WasapiCaptureSource, WindowsAudioBackend,
+    WindowsAudioError,
+};
 use loopmaster_audio_core::{
-    AudioFifo, MixerPlan, RouteGraphSnapshot, SourceKind, SourceSpec, DEFAULT_BLOCK_FRAMES,
-    INTERNAL_CHANNELS,
+    AudioFifo, AudioFifoConsumer, MixerPlan, RouteGraphSnapshot, SourceKind, SourceSpec,
+    DEFAULT_BLOCK_FRAMES, INTERNAL_CHANNELS,
 };
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -116,7 +119,7 @@ pub enum AudioEngineError {
     ZeroBlockFrames,
     #[error("FIFO 容量必须不小于 block frame 数")]
     FifoTooSmall,
-    #[error("当前运行时骨架只支持单路 source -> 单路 sink")]
+    #[error("路由图至少需要一个 source 和一个 sink")]
     UnsupportedTopology,
     #[error("source 必须是设备捕获 source")]
     UnsupportedSourceKind,
@@ -295,9 +298,21 @@ impl AudioEngine {
         })?;
         let previous = self.config.graph.graph();
         let next = graph.graph();
-        if previous.sources[0].endpoint_id != next.sources[0].endpoint_id
-            || previous.sinks[0].endpoint_id != next.sinks[0].endpoint_id
-        {
+        // 运行中只允许 send 级变更（增益/静音/通道映射/启停）。source/sink 的
+        // 数量或端点集合变化需要重建 worker 组，必须显式重启（阶段 B.2 语义）。
+        let topology_changed = previous.sources.len() != next.sources.len()
+            || previous.sinks.len() != next.sinks.len()
+            || previous
+                .sources
+                .iter()
+                .zip(&next.sources)
+                .any(|(a, b)| a.endpoint_id != b.endpoint_id)
+            || previous
+                .sinks
+                .iter()
+                .zip(&next.sinks)
+                .any(|(a, b)| a.endpoint_id != b.endpoint_id);
+        if topology_changed {
             return Err(AudioEngineError::EndpointChangeRequiresRestart);
         }
         let tx = self
@@ -355,24 +370,86 @@ fn validate_config(config: &AudioEngineConfig) -> Result<(), AudioEngineError> {
         return Err(AudioEngineError::FifoTooSmall);
     }
     let graph = config.graph.graph();
-    if graph.sources.len() != 1 || graph.sinks.len() != 1 || graph.sends.len() != 1 {
+    if graph.sources.is_empty() || graph.sinks.is_empty() {
         return Err(AudioEngineError::UnsupportedTopology);
     }
-    match graph.sources[0].kind {
-        SourceKind::DeviceCapture if graph.sources[0].endpoint_id.is_none() => {
-            return Err(AudioEngineError::MissingSourceEndpoint);
+    for source in &graph.sources {
+        match source.kind {
+            SourceKind::DeviceCapture if source.endpoint_id.is_none() => {
+                return Err(AudioEngineError::MissingSourceEndpoint);
+            }
+            SourceKind::ProcessLoopback if source.process_id.unwrap_or(0) == 0 => {
+                return Err(AudioEngineError::MissingProcessId);
+            }
+            SourceKind::DeviceCapture | SourceKind::ProcessLoopback => {}
+            SourceKind::DeviceLoopback => return Err(AudioEngineError::UnsupportedSourceKind),
         }
-        SourceKind::ProcessLoopback if graph.sources[0].process_id.unwrap_or(0) == 0 => {
-            return Err(AudioEngineError::MissingProcessId);
-        }
-        SourceKind::DeviceCapture | SourceKind::ProcessLoopback => {}
-        SourceKind::DeviceLoopback => return Err(AudioEngineError::UnsupportedSourceKind),
     }
     Ok(())
 }
 
-fn graph_snapshot_sink_endpoint(graph: &RouteGraphSnapshot) -> loopmaster_audio_core::EndpointId {
-    graph.graph().sinks[0].endpoint_id.clone()
+fn graph_sink_endpoints(graph: &RouteGraphSnapshot) -> Vec<loopmaster_audio_core::EndpointId> {
+    graph
+        .graph()
+        .sinks
+        .iter()
+        .map(|sink| sink.endpoint_id.clone())
+        .collect()
+}
+
+/// 路由图中是否存在需要按端点 active 检查的普通设备捕获 source。
+fn endpoints_need_check(graph: &RouteGraphSnapshot) -> bool {
+    graph
+        .graph()
+        .sources
+        .iter()
+        .any(|source| source.kind == SourceKind::DeviceCapture)
+}
+
+/// 重连前确认图中所有 DeviceCapture source 的 endpoint 与所有 sink endpoint 均 active。
+///
+/// 任一 endpoint 失效返回 `Ok(false)`；设备类错误由调用方按重试处理。
+fn all_endpoints_active(graph: &RouteGraphSnapshot) -> Result<bool, WindowsAudioError> {
+    let backend = WindowsAudioBackend::new()?;
+    for source in &graph.graph().sources {
+        if source.kind == SourceKind::DeviceCapture {
+            let Some(endpoint) = &source.endpoint_id else {
+                // validate_config 保证 DeviceCapture 必带 endpoint；防御性视为不可用。
+                return Ok(false);
+            };
+            if !backend.is_endpoint_active(endpoint, EndpointFlow::Capture)? {
+                return Ok(false);
+            }
+        }
+    }
+    for sink in &graph.graph().sinks {
+        if !backend.is_endpoint_active(&sink.endpoint_id, EndpointFlow::Render)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// 创建多条固定容量 FIFO，返回 (producers, consumers)，顺序与调用方传入的
+/// source/sink 列表一一对应。
+fn split_fifo_vec(
+    count: usize,
+    capacity_frames: usize,
+) -> Result<
+    (
+        Vec<loopmaster_audio_core::AudioFifoProducer>,
+        Vec<loopmaster_audio_core::AudioFifoConsumer>,
+    ),
+    loopmaster_audio_core::FifoConfigError,
+> {
+    let mut producers = Vec::with_capacity(count);
+    let mut consumers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (producer, consumer) = AudioFifo::split(capacity_frames, INTERNAL_CHANNELS)?;
+        producers.push(producer);
+        consumers.push(consumer);
+    }
+    Ok((producers, consumers))
 }
 
 fn fail(state: &AtomicU8, stop: &AtomicBool, error: &Mutex<Option<String>>, value: String) {
@@ -436,24 +513,8 @@ fn supervisor_worker(
             }
         }
         let graph = graph_config.lock().expect("路由快照锁未中毒").clone();
-        if attempt > 0 && graph.graph().sources[0].kind == SourceKind::DeviceCapture {
-            let source = graph.graph().sources[0].clone();
-            let source_endpoint = match source.endpoint_id {
-                Some(endpoint) => endpoint,
-                None => {
-                    fail(
-                        &state,
-                        &engine_stop,
-                        &error,
-                        "source 未配置 endpoint ID".into(),
-                    );
-                    break;
-                }
-            };
-            let sink_endpoint = graph_snapshot_sink_endpoint(&graph);
-            match WindowsAudioBackend::new()
-                .and_then(|backend| backend.are_endpoints_active(&source_endpoint, &sink_endpoint))
-            {
+        if attempt > 0 && endpoints_need_check(&graph) {
+            match all_endpoints_active(&graph) {
                 Ok(true) => {}
                 Ok(false) => {
                     if attempt == DEFAULT_RECONNECT_ATTEMPTS {
@@ -476,36 +537,39 @@ fn supervisor_worker(
             }
         }
         let session_stop = Arc::new(AtomicBool::new(false));
-        let (source_tx, mixer_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
-        {
-            Ok(value) => value,
-            Err(e) => {
-                fail(&state, &engine_stop, &error, e.to_string());
-                break;
-            }
-        };
-        let (mixer_tx, render_rx) = match AudioFifo::split(fifo_capacity_frames, INTERNAL_CHANNELS)
-        {
-            Ok(value) => value,
-            Err(e) => {
-                fail(&state, &engine_stop, &error, e.to_string());
-                break;
-            }
-        };
+        // 多路由：每个 source 一条 capture→mixer FIFO，每个 sink 一条 mixer→render FIFO。
+        let (source_producers, mixer_consumers) =
+            match split_fifo_vec(graph.graph().sources.len(), fifo_capacity_frames) {
+                Ok(value) => value,
+                Err(e) => {
+                    fail(&state, &engine_stop, &error, e.to_string());
+                    break;
+                }
+            };
+        let (mixer_producers, render_consumers) =
+            match split_fifo_vec(graph.graph().sinks.len(), fifo_capacity_frames) {
+                Ok(value) => value,
+                Err(e) => {
+                    fail(&state, &engine_stop, &error, e.to_string());
+                    break;
+                }
+            };
         let (session_graph_tx, graph_rx) = mpsc::channel();
         *graph_tx_slot.lock().expect("路由通道锁未中毒") = Some(session_graph_tx);
-        let source = graph.graph().sources[0].clone();
-        let sink_endpoint = graph_snapshot_sink_endpoint(&graph);
-        let mut workers = Vec::with_capacity(3);
-        let capture = spawn_capture_worker(
-            source,
-            Arc::clone(&session_stop),
-            Arc::clone(&state),
-            Arc::clone(&error),
-            Arc::clone(&counters),
-            source_tx,
-        );
-        let mixer = spawn_mixer_worker(
+        let sink_endpoints = graph_sink_endpoints(&graph);
+        let mut workers =
+            Vec::with_capacity(graph.graph().sources.len() + graph.graph().sinks.len() + 1);
+        for (source, producer) in graph.graph().sources.iter().cloned().zip(source_producers) {
+            workers.push(spawn_capture_worker(
+                source,
+                Arc::clone(&session_stop),
+                Arc::clone(&state),
+                Arc::clone(&error),
+                Arc::clone(&counters),
+                producer,
+            ));
+        }
+        workers.push(spawn_mixer_worker(
             graph.clone(),
             graph_rx,
             block_frames,
@@ -513,21 +577,20 @@ fn supervisor_worker(
             Arc::clone(&state),
             Arc::clone(&error),
             Arc::clone(&counters),
-            mixer_rx,
-            mixer_tx,
-        );
-        let render = spawn_render_worker(
-            sink_endpoint,
-            block_frames,
-            Arc::clone(&session_stop),
-            Arc::clone(&state),
-            Arc::clone(&error),
-            Arc::clone(&counters),
-            render_rx,
-        );
-        workers.push(capture);
-        workers.push(mixer);
-        workers.push(render);
+            mixer_consumers,
+            mixer_producers,
+        ));
+        for (endpoint, consumer) in sink_endpoints.into_iter().zip(render_consumers) {
+            workers.push(spawn_render_worker(
+                endpoint,
+                block_frames,
+                Arc::clone(&session_stop),
+                Arc::clone(&state),
+                Arc::clone(&error),
+                Arc::clone(&counters),
+                consumer,
+            ));
+        }
         // 给三个 worker 一个有界启动窗口；设备在打开阶段失效时，
         // session_stop 会先置位，避免把尚未建立的会话报告为 Running。
         thread::sleep(Duration::from_millis(50));
@@ -591,8 +654,8 @@ fn spawn_mixer_worker(
     state: Arc<AtomicU8>,
     error: Arc<Mutex<Option<String>>>,
     counters: Arc<Counters>,
-    consumer: loopmaster_audio_core::AudioFifoConsumer,
-    producer: loopmaster_audio_core::AudioFifoProducer,
+    consumers: Vec<loopmaster_audio_core::AudioFifoConsumer>,
+    producers: Vec<loopmaster_audio_core::AudioFifoProducer>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("loopmaster-mixer".into())
@@ -605,8 +668,8 @@ fn spawn_mixer_worker(
                 state,
                 error,
                 counters,
-                consumer,
-                producer,
+                consumers,
+                producers,
             );
         })
         .expect("创建 mixer worker 失败")
@@ -804,8 +867,8 @@ fn mixer_worker(
     state: Arc<AtomicU8>,
     error: Arc<Mutex<Option<String>>>,
     counters: Arc<Counters>,
-    mut consumer: loopmaster_audio_core::AudioFifoConsumer,
-    mut producer: loopmaster_audio_core::AudioFifoProducer,
+    mut consumers: Vec<loopmaster_audio_core::AudioFifoConsumer>,
+    mut producers: Vec<loopmaster_audio_core::AudioFifoProducer>,
 ) -> Result<(), ()> {
     let mut plan = MixerPlan::new(
         graph.graph(),
@@ -816,15 +879,17 @@ fn mixer_worker(
     .map_err(|e| {
         fail(&state, &stop, &error, e.to_string());
     })?;
-    let mut source_block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
-    let mut sink_block = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
+    let mut source_blocks = vec![vec![0.0f32; block_frames * INTERNAL_CHANNELS]; consumers.len()];
+    let mut sink_blocks = vec![vec![0.0f32; block_frames * INTERNAL_CHANNELS]; producers.len()];
     let block_period = Duration::from_secs_f64(
         block_frames as f64 / loopmaster_audio_core::INTERNAL_SAMPLE_RATE as f64,
     );
     let mut next_deadline = Instant::now();
-    let startup_prefill_frames = block_frames
-        .saturating_mul(STARTUP_PREFILL_BLOCKS)
-        .min(consumer.capacity_frames());
+    let startup_prefill_frames = block_frames.saturating_mul(STARTUP_PREFILL_BLOCKS).min(
+        consumers
+            .first()
+            .map_or(0, AudioFifoConsumer::capacity_frames),
+    );
     let mut primed = false;
     let mut starvation_since = None;
     let mut starvation_reported = false;
@@ -846,9 +911,15 @@ fn mixer_worker(
                 }
             }
         }
-        let available = consumer.available_frames();
+        // 任一 source 有足够数据即推进主节拍；其他 source 的缺失按静音补足
+        //（MixerPlan::process 支持短 source 补静音）。
+        let max_available = consumers
+            .iter()
+            .map(AudioFifoConsumer::available_frames)
+            .max()
+            .unwrap_or(0);
         if !primed {
-            if available < startup_prefill_frames {
+            if max_available < startup_prefill_frames {
                 thread::sleep(Duration::from_millis(1));
                 continue;
             }
@@ -857,7 +928,7 @@ fn mixer_worker(
             // 避免首次处理时连续追赶多个过期 block，造成 FIFO 水位瞬时下降。
             next_deadline = Instant::now();
         }
-        if available < block_frames {
+        if max_available < block_frames {
             let started = starvation_since.get_or_insert_with(Instant::now);
             let grace = underflow_grace_period(block_period);
             if !starvation_reported && started.elapsed() >= grace {
@@ -869,35 +940,32 @@ fn mixer_worker(
         }
         starvation_since = None;
         starvation_reported = false;
-        source_block.fill(0.0);
-        let read = consumer
-            .pop_interleaved(&mut source_block)
-            .map(|r| r.frames())
-            .unwrap_or(0);
-        if read != block_frames {
-            fail(
-                &state,
-                &stop,
-                &error,
-                "source FIFO 在完整 block 检查后仍未提供完整数据".to_owned(),
-            );
-            return Err(());
+        for (index, consumer) in consumers.iter_mut().enumerate() {
+            source_blocks[index].fill(0.0);
+            // 短读的剩余帧保持为 0，由 MixerPlan 按静音处理。
+            let _ = consumer
+                .pop_interleaved(&mut source_blocks[index])
+                .map(|result| result.frames())
+                .unwrap_or(0);
         }
-        let source_refs = [source_block.as_slice()];
-        let mut sink_refs = [sink_block.as_mut_slice()];
+        let source_refs: Vec<&[f32]> = source_blocks.iter().map(Vec::as_slice).collect();
+        let mut sink_refs: Vec<&mut [f32]> =
+            sink_blocks.iter_mut().map(Vec::as_mut_slice).collect();
         if let Err(e) = plan.process(&source_refs, &mut sink_refs) {
             fail(&state, &stop, &error, e.to_string());
             return Err(());
         }
-        let written = producer
-            .push_interleaved(&sink_block)
-            .map(|r| r.frames())
-            .unwrap_or(0);
-        if written < block_frames {
-            counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
-            counters
-                .fifo_dropped_frames
-                .fetch_add((block_frames - written) as u64, Ordering::Relaxed);
+        for (index, producer) in producers.iter_mut().enumerate() {
+            let written = producer
+                .push_interleaved(&sink_blocks[index])
+                .map(|result| result.frames())
+                .unwrap_or(0);
+            if written < block_frames {
+                counters.fifo_overflows.fetch_add(1, Ordering::Relaxed);
+                counters
+                    .fifo_dropped_frames
+                    .fetch_add((block_frames - written) as u64, Ordering::Relaxed);
+            }
         }
         next_deadline += block_period;
         let now = Instant::now();
@@ -1055,8 +1123,17 @@ mod tests {
             AudioEngine::new(config(SourceKind::DeviceLoopback, 1)),
             Err(AudioEngineError::UnsupportedSourceKind)
         ));
+        // 阶段 B.2：多 source 已支持；只有空拓扑被拒绝。
+        assert!(AudioEngine::new(config(SourceKind::DeviceCapture, 2)).is_ok());
+        let empty_graph = RouteGraph {
+            sources: Vec::new(),
+            sinks: Vec::new(),
+            sends: Vec::new(),
+        };
         assert!(matches!(
-            AudioEngine::new(config(SourceKind::DeviceCapture, 2)),
+            AudioEngine::new(AudioEngineConfig::new(
+                RouteGraphSnapshot::new(empty_graph).unwrap()
+            )),
             Err(AudioEngineError::UnsupportedTopology)
         ));
 
