@@ -64,7 +64,9 @@ fn main() {
     };
 
     let args: Vec<String> = env::args().collect();
-    if args.get(1).map(String::as_str) == Some("--engine") && args.len() >= 4 {
+    if args.get(1).map(String::as_str) == Some("--processes") {
+        run_process_list(&backend);
+    } else if args.get(1).map(String::as_str) == Some("--engine") && args.len() >= 4 {
         let seconds = args
             .get(4)
             .and_then(|value| value.parse().ok())
@@ -91,6 +93,29 @@ fn main() {
     println!("发现 {} 个 active endpoint", endpoints.len());
     for (index, endpoint) in endpoints.iter().enumerate() {
         print_endpoint(index + 1, endpoint);
+    }
+}
+
+fn run_process_list(backend: &WindowsAudioBackend) -> ! {
+    match backend.enumerate_processes() {
+        Ok(processes) => {
+            println!("LoopMaster 活动音频进程");
+            println!("发现 {} 个可用于 Process Loopback 的进程", processes.len());
+            for process in processes {
+                match process.executable_path {
+                    Some(path) => println!(
+                        "PID={} | name={} | executable={}",
+                        process.pid, process.name, path
+                    ),
+                    None => println!(
+                        "PID={} | name={} | executable=<unavailable>",
+                        process.pid, process.name
+                    ),
+                }
+            }
+            std::process::exit(0);
+        }
+        Err(error) => exit_with_error("枚举活动音频进程失败", error),
     }
 }
 
