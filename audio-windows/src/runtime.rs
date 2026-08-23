@@ -509,6 +509,7 @@ fn supervisor_worker(
         // session_stop 会先置位，避免把尚未建立的会话报告为 Running。
         thread::sleep(Duration::from_millis(50));
         if !session_stop.load(Ordering::Acquire) {
+            *error.lock().expect("状态锁未中毒") = None;
             state.store(STATE_RUNNING, Ordering::Release);
         }
         while !engine_stop.load(Ordering::Acquire) && !session_stop.load(Ordering::Acquire) {
@@ -1047,9 +1048,14 @@ mod tests {
 
     #[test]
     fn reconnect_window_covers_driver_reenumeration_delay() {
-        assert!(DEFAULT_RECONNECT_ATTEMPTS >= 60);
-        assert!(RECONNECT_DELAY >= Duration::from_millis(250));
-        assert!(RECONNECT_DELAY * DEFAULT_RECONNECT_ATTEMPTS as u32 >= Duration::from_secs(30));
+        let attempts = DEFAULT_RECONNECT_ATTEMPTS;
+        let delay = RECONNECT_DELAY;
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(attempts >= 60);
+            assert!(delay >= Duration::from_millis(250));
+            assert!(delay * attempts as u32 >= Duration::from_secs(30));
+        }
     }
 
     #[test]
