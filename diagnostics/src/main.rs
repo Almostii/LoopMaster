@@ -82,8 +82,17 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
     println!("render writes: {}", status.stats.render_writes);
     println!("render frames: {}", status.stats.rendered_frames);
     println!("FIFO overflow events: {}", status.stats.fifo_overflows);
+    println!("FIFO dropped frames: {}", status.stats.fifo_dropped_frames);
     println!("FIFO underflow events: {}", status.stats.fifo_underflows);
     println!("data discontinuity: {}", status.stats.discontinuities);
+    println!(
+        "startup discontinuity: {}",
+        status.stats.startup_discontinuities
+    );
+    println!(
+        "runtime discontinuity: {}",
+        status.stats.runtime_discontinuities
+    );
     println!("timestamp errors: {}", status.stats.timestamp_errors);
     if let Some(error) = status.last_error {
         eprintln!("引擎错误: {error}");
