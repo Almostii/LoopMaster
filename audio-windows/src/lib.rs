@@ -10,7 +10,8 @@ use thiserror::Error;
 mod runtime;
 
 pub use runtime::{
-    AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineStats, AudioEngineStatus,
+    AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineState, AudioEngineStats,
+    AudioEngineStatus,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +145,28 @@ pub enum WindowsAudioError {
     RenderResample { reason: String, endpoint_id: String },
 }
 
+/// WASAPI 错误的恢复分类。
+///
+/// 设备失效通常可以通过重新枚举并重建 stream 恢复；其他错误必须先由
+/// 上层修正配置或实现对应的功能，不能未经判断自动重试。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsAudioFailureKind {
+    DeviceUnavailable,
+    Other,
+}
+
+/// `AUDCLNT_E_DEVICE_INVALIDATED`。
+pub const AUDCLNT_E_DEVICE_INVALIDATED: i32 = 0x8889_0004u32 as i32;
+/// `AUDCLNT_E_SERVICE_NOT_RUNNING`（Windows SDK 定义值）。
+pub const AUDCLNT_E_SERVICE_NOT_RUNNING: i32 = 0x8889_0010u32 as i32;
+/// 早期资料中曾将 `0x88890005` 标为服务不可用；为兼容外部诊断结果，仍将
+/// 该值视为设备不可用，但不把它冒充为当前 SDK 的正式常量。
+pub const AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY: i32 = 0x8889_0005u32 as i32;
+/// `AUDCLNT_E_ENDPOINT_CREATE_FAILED`。
+pub const AUDCLNT_E_ENDPOINT_CREATE_FAILED: i32 = 0x8889_000Fu32 as i32;
+/// Win32 `ERROR_DEVICE_NOT_CONNECTED` 的 HRESULT 形式。
+pub const HRESULT_ERROR_DEVICE_NOT_CONNECTED: i32 = 0x8007_048Fu32 as i32;
+
 /// WASAPI shared-mode render 写入结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderWriteResult {
@@ -242,6 +265,25 @@ impl WindowsAudioError {
             Self::RenderResample { endpoint_id, .. } => Some(endpoint_id),
             _ => None,
         }
+    }
+
+    /// 判断错误是否属于设备暂时不可用，可进入自动恢复流程。
+    pub fn failure_kind(&self) -> WindowsAudioFailureKind {
+        match self.hresult() {
+            Some(
+                AUDCLNT_E_DEVICE_INVALIDATED
+                | AUDCLNT_E_SERVICE_NOT_RUNNING
+                | AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY
+                | AUDCLNT_E_ENDPOINT_CREATE_FAILED
+                | HRESULT_ERROR_DEVICE_NOT_CONNECTED,
+            ) => WindowsAudioFailureKind::DeviceUnavailable,
+            _ => WindowsAudioFailureKind::Other,
+        }
+    }
+
+    /// 判断错误是否由设备失效导致。
+    pub fn is_device_failure(&self) -> bool {
+        self.failure_kind() == WindowsAudioFailureKind::DeviceUnavailable
     }
 }
 
@@ -1286,6 +1328,40 @@ mod tests {
         };
         assert_eq!(e.hresult(), Some(-2));
         assert_eq!(e.endpoint_id(), Some("endpoint-id"));
+    }
+
+    #[test]
+    fn classifies_device_hresult_as_recoverable() {
+        for hresult in [
+            AUDCLNT_E_DEVICE_INVALIDATED,
+            AUDCLNT_E_SERVICE_NOT_RUNNING,
+            AUDCLNT_E_SERVICE_NOT_RUNNING_LEGACY,
+            AUDCLNT_E_ENDPOINT_CREATE_FAILED,
+            HRESULT_ERROR_DEVICE_NOT_CONNECTED,
+        ] {
+            let error = WindowsAudioError::HResult {
+                operation: "test",
+                hresult,
+                endpoint_id: Some("endpoint-id".into()),
+            };
+            assert_eq!(
+                error.failure_kind(),
+                WindowsAudioFailureKind::DeviceUnavailable,
+                "HRESULT=0x{hresult:08X}"
+            );
+            assert!(error.is_device_failure());
+        }
+    }
+
+    #[test]
+    fn does_not_classify_unrelated_hresult_as_device_failure() {
+        let error = WindowsAudioError::HResult {
+            operation: "test",
+            hresult: -2,
+            endpoint_id: None,
+        };
+        assert_eq!(error.failure_kind(), WindowsAudioFailureKind::Other);
+        assert!(!error.is_device_failure());
     }
 
     #[test]
