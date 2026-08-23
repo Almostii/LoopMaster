@@ -211,13 +211,15 @@ fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
             last_live_output = Instant::now();
         } else if last_live_output.elapsed() >= ENGINE_LIVE_OUTPUT_INTERVAL {
             println!(
-                "实时统计: state={} | capture packet={} | render writes={} | FIFO underflow={} | discontinuity={} | reconnect attempts={}",
+                "实时统计: state={} | capture packet={} | render writes={} | FIFO underflow={} | discontinuity={} | reconnect attempts={} | peak={} dBFS | non-silent={}",
                 status.state.as_str(),
                 status.stats.capture_packets,
                 status.stats.render_writes,
                 status.stats.fifo_underflows,
                 status.stats.discontinuities,
-                status.stats.reconnect_attempts
+                status.stats.reconnect_attempts,
+                peak_dbfs(status.stats.captured_peak),
+                status.stats.non_silent_packets
             );
             last_live_output = Instant::now();
         }
@@ -233,6 +235,11 @@ fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
     println!("运行时间: {} 秒", seconds.max(1));
     println!("capture packet: {}", status.stats.capture_packets);
     println!("capture frames: {}", status.stats.captured_frames);
+    println!(
+        "captured peak: {} dBFS",
+        peak_dbfs(status.stats.captured_peak)
+    );
+    println!("non-silent packets: {}", status.stats.non_silent_packets);
     println!("render writes: {}", status.stats.render_writes);
     println!("render frames: {}", status.stats.rendered_frames);
     println!("FIFO overflow events: {}", status.stats.fifo_overflows);
@@ -453,6 +460,15 @@ fn availability_label(flow: EndpointFlow, format: EndpointFormat) -> &'static st
                 "不满足 render 契约（需 32-bit float / 2 声道）"
             }
         }
+    }
+}
+
+/// 峰值幅度转 dBFS 显示；静音或无效峰值显示 "silence"。
+fn peak_dbfs(peak: f32) -> String {
+    if peak.is_finite() && peak > 0.0 {
+        format!("{:.1}", 20.0 * peak.log10())
+    } else {
+        "silence".to_owned()
     }
 }
 

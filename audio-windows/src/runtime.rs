@@ -9,7 +9,7 @@ use loopmaster_audio_core::{
     AudioFifo, MixerPlan, RouteGraphSnapshot, SourceKind, SourceSpec, DEFAULT_BLOCK_FRAMES,
     INTERNAL_CHANNELS,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -32,9 +32,24 @@ const DEFAULT_FIFO_CAPACITY_BLOCKS: usize = 32;
 // 时 supervisor 无止境占用线程，同时给系统约 30 秒完成重新枚举。
 const DEFAULT_RECONNECT_ATTEMPTS: usize = 60;
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
+// 捕获峰值低于该幅度视为静音（-80 dBFS），用于区分"有 packet"和"有有效音频"。
+const NON_SILENT_PEAK_THRESHOLD: f32 = 1e-4;
 
 fn underflow_grace_period(block_period: Duration) -> Duration {
     block_period * UNDERFLOW_GRACE_BLOCKS as u32
+}
+
+/// 交错 `f32` 样本的最大绝对值（峰值幅度 0.0~1.0）。NaN 样本按
+/// `f32::max` 的语义被忽略；空切片返回 0。
+fn packet_peak(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .fold(0.0f32, |peak, &sample| peak.max(sample.abs()))
+}
+
+/// 峰值幅度是否超过静音阈值（-80 dBFS），即是否承载有效音频内容。
+fn is_non_silent(peak: f32) -> bool {
+    peak > NON_SILENT_PEAK_THRESHOLD
 }
 
 #[derive(Clone, Debug)]
@@ -119,7 +134,7 @@ pub enum AudioEngineError {
     Fifo(#[from] loopmaster_audio_core::FifoConfigError),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AudioEngineStats {
     pub capture_packets: u64,
     pub captured_frames: u64,
@@ -137,9 +152,14 @@ pub struct AudioEngineStats {
     pub graph_updates: u64,
     /// supervisor 因设备失效启动的重连尝试次数；初次启动不计入。
     pub reconnect_attempts: u64,
+    /// 捕获音频的全局峰值幅度（0.0~1.0，静音为 0.0）。用于区分"有
+    /// packet"和"有有效音频"；换算 dBFS 由展示层完成。
+    pub captured_peak: f32,
+    /// 捕获到超过静音阈值（-80 dBFS）内容的 packet 数。
+    pub non_silent_packets: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AudioEngineStatus {
     pub state: AudioEngineState,
     pub running: bool,
@@ -163,6 +183,8 @@ struct Counters {
     render_no_space: AtomicU64,
     graph_updates: AtomicU64,
     reconnect_attempts: AtomicU64,
+    captured_peak: AtomicU32,
+    non_silent_packets: AtomicU64,
 }
 
 impl Counters {
@@ -182,6 +204,8 @@ impl Counters {
             render_no_space: self.render_no_space.load(Ordering::Relaxed),
             graph_updates: self.graph_updates.load(Ordering::Relaxed),
             reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
+            captured_peak: f32::from_bits(self.captured_peak.load(Ordering::Relaxed)),
+            non_silent_packets: self.non_silent_packets.load(Ordering::Relaxed),
         }
     }
 }
@@ -220,6 +244,8 @@ impl AudioEngine {
                 render_no_space: AtomicU64::new(0),
                 graph_updates: AtomicU64::new(0),
                 reconnect_attempts: AtomicU64::new(0),
+                captured_peak: AtomicU32::new(0),
+                non_silent_packets: AtomicU64::new(0),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
@@ -701,6 +727,21 @@ fn capture_worker(
             counters
                 .timestamp_errors
                 .fetch_add(u64::from(packet.timestamp_error), Ordering::Relaxed);
+            // 峰值统计：区分"有 packet"与"有有效音频"。静音 packet 峰值按 0 计，
+            // 真实样本取最大绝对值；全局峰值用 fetch_max 按正数 bit 序比较更新。
+            let peak = if packet.silent {
+                0.0
+            } else {
+                data.map(packet_peak).unwrap_or(0.0)
+            };
+            if peak.is_finite() && peak > 0.0 {
+                counters
+                    .captured_peak
+                    .fetch_max(peak.to_bits(), Ordering::Relaxed);
+            }
+            if is_non_silent(peak) {
+                counters.non_silent_packets.fetch_add(1, Ordering::Relaxed);
+            }
             let written_frames = if packet.silent {
                 push_silence(&mut producer, packet.frames as usize, &silence)
             } else if let Some(samples) = data {
@@ -1246,5 +1287,35 @@ mod tests {
         assert!(status.failed);
         assert!(status.last_error.is_some());
         engine.stop().unwrap();
+    }
+
+    #[test]
+    fn packet_peak_empty_returns_zero() {
+        assert_eq!(packet_peak(&[]), 0.0);
+    }
+
+    #[test]
+    fn packet_peak_ignores_silence() {
+        assert_eq!(packet_peak(&[0.0, 0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn packet_peak_takes_absolute_maximum() {
+        let samples = [0.5, -0.8, 0.1, -0.3, 0.02];
+        assert_eq!(packet_peak(&samples), 0.8);
+    }
+
+    #[test]
+    fn packet_peak_ignores_nan_samples() {
+        let samples = [0.5, f32::NAN, -0.2];
+        assert_eq!(packet_peak(&samples), 0.5);
+    }
+
+    #[test]
+    fn non_silent_threshold_is_minus_80_dbfs() {
+        assert!(!is_non_silent(0.0));
+        assert!(!is_non_silent(1e-5)); // 低于 -80 dBFS 阈值
+        assert!(is_non_silent(1e-3)); // 高于 -80 dBFS 阈值
+        assert!(is_non_silent(0.5));
     }
 }
