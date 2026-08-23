@@ -1,6 +1,6 @@
 use loopmaster_audio_core::{
-    AudioFifo, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot, SendSpec, SinkId, SinkSpec,
-    SourceId, SourceKind, SourceSpec,
+    fill_block, AudioFifo, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot, SendSpec, SinkId,
+    SinkSpec, SourceId, SourceKind, SourceSpec, TestToneConfig, TestToneKind, TonePhase,
 };
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineState, EndpointFlow, EndpointFormat, EndpointInfo,
@@ -100,6 +100,23 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(10);
         run_update_test(pid, &args[3], seconds);
+    } else if args.get(1).map(String::as_str) == Some("--tone") && args.len() >= 4 {
+        let seconds = args
+            .get(4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        let frequency = args
+            .get(5)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(440.0);
+        run_tone_render(&args[2], &args[3], seconds, frequency);
+    } else if args.get(1).map(String::as_str) == Some("--multi-sink-test") && args.len() >= 5 {
+        let pid = args[2].parse().unwrap_or(0);
+        let seconds = args
+            .get(5)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_multi_sink_test(pid, &args[3], &args[4], seconds);
     } else if args.len() >= 3 {
         let capture_id = &args[1];
         let render_id = &args[2];
@@ -387,6 +404,139 @@ fn run_engine_for(engine: &mut AudioEngine, duration_secs: u64) {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// 向指定 render endpoint 播放测试音（阶段 B.6）：sine/impulse/silence/channel-id。
+fn run_tone_render(render_id: &str, kind: &str, seconds: u64, frequency: f32) -> ! {
+    let kind = match kind {
+        "sine" => TestToneKind::Sine,
+        "impulse" => TestToneKind::Impulse,
+        "silence" => TestToneKind::Silence,
+        "channel-id" => TestToneKind::ChannelId,
+        _ => {
+            eprintln!("未知测试音类型: {kind}（可用: sine/impulse/silence/channel-id）");
+            std::process::exit(1);
+        }
+    };
+    let config = TestToneConfig {
+        kind,
+        frequency_hz: frequency,
+        ..TestToneConfig::default()
+    };
+    let backend = match WindowsAudioBackend::new() {
+        Ok(backend) => backend,
+        Err(error) => exit_with_error("初始化 Windows 音频后端失败", error),
+    };
+    let mut sink = match backend.open_render_sink(&EndpointId(render_id.to_owned()), 480) {
+        Ok(sink) => sink,
+        Err(error) => exit_with_error("打开 render sink 失败", error),
+    };
+    let mut phase = TonePhase::default();
+    let mut block = vec![0.0f32; 960];
+    let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
+    let mut writes = 0u64;
+    while Instant::now() < deadline {
+        fill_block(&mut block, 2, &config, &mut phase);
+        match sink.write_f32_block(&block) {
+            Ok(loopmaster_audio_windows::RenderWriteResult::Written { .. }) => {
+                writes += 1;
+            }
+            Ok(loopmaster_audio_windows::RenderWriteResult::NoSpace) => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => exit_with_error("写入测试音失败", error),
+        }
+    }
+    println!("LoopMaster 测试音播放");
+    println!("类型: {kind:?} | 频率: {frequency} Hz | endpoint: {render_id}");
+    println!("运行时间: {} 秒", seconds.max(1));
+    println!("render writes: {writes}");
+    std::process::exit(if writes > 0 { 0 } else { 2 });
+}
+
+/// 验证多 sink 同时输出（阶段 B.4）：Process Loopback 一路 source 同时路由到
+/// 两个 render sink，两边都在写入且状态 Running。
+fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! {
+    if pid == 0 {
+        eprintln!("需要有效的进程 PID");
+        std::process::exit(1);
+    }
+    let graph = RouteGraph {
+        sources: vec![SourceSpec {
+            id: SourceId("process".to_owned()),
+            kind: SourceKind::ProcessLoopback,
+            endpoint_id: None,
+            process_id: Some(pid),
+            display_name: format!("process:{pid}"),
+        }],
+        sinks: vec![
+            SinkSpec {
+                id: SinkId("sink-a".to_owned()),
+                endpoint_id: EndpointId(sink_a.to_owned()),
+                display_name: "sink-a".to_owned(),
+            },
+            SinkSpec {
+                id: SinkId("sink-b".to_owned()),
+                endpoint_id: EndpointId(sink_b.to_owned()),
+                display_name: "sink-b".to_owned(),
+            },
+        ],
+        sends: vec![
+            SendSpec {
+                source_id: SourceId("process".to_owned()),
+                sink_id: SinkId("sink-a".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                channel_map: Vec::new(),
+            },
+            SendSpec {
+                source_id: SourceId("process".to_owned()),
+                sink_id: SinkId("sink-b".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                channel_map: Vec::new(),
+            },
+        ],
+    };
+    let snapshot = RouteGraphSnapshot::new(graph).expect("引擎验收路由图有效");
+    let mut engine = AudioEngine::new(AudioEngineConfig::new(snapshot)).expect("引擎验收配置有效");
+    if let Err(error) = engine.start() {
+        eprintln!("启动正式音频引擎失败: {error}");
+        std::process::exit(1);
+    }
+    run_engine_for(&mut engine, seconds.max(1));
+    let status = engine.status();
+    let _ = engine.stop();
+    println!("LoopMaster 多 sink 引擎验收");
+    println!("sink A: {sink_a}");
+    println!("sink B: {sink_b}");
+    println!("运行时间: {} 秒", seconds.max(1));
+    println!("capture packet: {}", status.stats.capture_packets);
+    println!(
+        "render writes（两个 sink 合计）: {}",
+        status.stats.render_writes
+    );
+    println!(
+        "rendered peak: {} dBFS",
+        peak_dbfs(status.stats.rendered_peak)
+    );
+    println!("non-silent packets: {}", status.stats.non_silent_packets);
+    println!(
+        "FIFO underflow: {} | discontinuity: {}",
+        status.stats.fifo_underflows, status.stats.discontinuities
+    );
+    println!("状态: {}", status.state.as_str());
+    std::process::exit(
+        if !status.failed
+            && status.stats.capture_packets > 0
+            && status.stats.render_writes > 0
+            && status.stats.non_silent_packets > 0
+        {
+            0
+        } else {
+            2
+        },
+    );
 }
 
 fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {

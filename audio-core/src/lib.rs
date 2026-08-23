@@ -9,6 +9,7 @@ mod fifo;
 mod mixer;
 mod resampler;
 mod route_snapshot;
+mod test_tone;
 
 pub use fifo::{
     AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
@@ -19,6 +20,7 @@ pub use resampler::{
     FixedInputResampler, FixedOutputResampler, ResamplerConfigError, ResamplerProcessError,
 };
 pub use route_snapshot::RouteGraphSnapshot;
+pub use test_tone::{fill_block, TestToneConfig, TestToneKind, TonePhase};
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
