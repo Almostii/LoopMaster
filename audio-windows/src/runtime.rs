@@ -36,8 +36,8 @@ pub struct AudioEngineConfig {
 /// 音频引擎的运行状态。
 ///
 /// `Degraded` 表示 worker 因设备失效退出，错误具备重连条件；
-/// `Reconnecting` 为后续自动重建 stream 预留，当前版本只提供状态模型，
-/// 不会假装已经完成真实设备拔插恢复。
+/// `Reconnecting` 表示 supervisor 正在停止旧会话并重建 stream；
+/// 重试耗尽后进入 `Failed`。当前重连仍依赖原 endpoint 的稳定 ID。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioEngineState {
     Stopped,
