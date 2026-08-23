@@ -160,6 +160,11 @@ pub struct AudioEngineStats {
     pub captured_peak: f32,
     /// 捕获到超过静音阈值（-80 dBFS）内容的 packet 数。
     pub non_silent_packets: u64,
+    /// 混音后写入 render 的全局峰值幅度（0.0~1.0）。
+    pub rendered_peak: f32,
+    /// 混音后写入 render 且超过静音阈值的 block 数。运行中静音切换后
+    /// 该计数停止增长，用于验证 send 级路由变更是否在块边界生效。
+    pub rendered_non_silent_blocks: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -188,6 +193,8 @@ struct Counters {
     reconnect_attempts: AtomicU64,
     captured_peak: AtomicU32,
     non_silent_packets: AtomicU64,
+    rendered_peak: AtomicU32,
+    rendered_non_silent_blocks: AtomicU64,
 }
 
 impl Counters {
@@ -209,6 +216,8 @@ impl Counters {
             reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
             captured_peak: f32::from_bits(self.captured_peak.load(Ordering::Relaxed)),
             non_silent_packets: self.non_silent_packets.load(Ordering::Relaxed),
+            rendered_peak: f32::from_bits(self.rendered_peak.load(Ordering::Relaxed)),
+            rendered_non_silent_blocks: self.rendered_non_silent_blocks.load(Ordering::Relaxed),
         }
     }
 }
@@ -249,6 +258,8 @@ impl AudioEngine {
                 reconnect_attempts: AtomicU64::new(0),
                 captured_peak: AtomicU32::new(0),
                 non_silent_packets: AtomicU64::new(0),
+                rendered_peak: AtomicU32::new(0),
+                rendered_non_silent_blocks: AtomicU64::new(0),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
@@ -1077,6 +1088,18 @@ fn render_worker(
                 counters
                     .rendered_frames
                     .fetch_add(u64::from(frames), Ordering::Relaxed);
+                // render 侧峰值统计：验证 send 级路由变更是否在块边界生效。
+                let peak = packet_peak(&block);
+                if peak.is_finite() && peak > 0.0 {
+                    counters
+                        .rendered_peak
+                        .fetch_max(peak.to_bits(), Ordering::Relaxed);
+                }
+                if is_non_silent(peak) {
+                    counters
+                        .rendered_non_silent_blocks
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 next_deadline += block_period;
                 let now = Instant::now();
                 if next_deadline > now {
