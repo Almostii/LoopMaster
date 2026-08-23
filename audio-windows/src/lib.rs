@@ -777,6 +777,25 @@ impl WindowsAudioBackend {
             open_capture_source(endpoint_id)
         }
     }
+
+    /// 打开指定 render endpoint 的 Device Loopback 捕获（该设备的播放总混音）。
+    ///
+    /// 当前与普通 capture 一样要求 48 kHz / 32-bit float / 2 声道的内部契约；
+    /// 非 48 kHz 设备（如 44.1 kHz 虚拟声卡）的 loopback 重采样在阶段 B.5 补充。
+    pub fn open_device_loopback_source(
+        &self,
+        endpoint_id: &EndpointId,
+    ) -> Result<WasapiCaptureSource, WindowsAudioError> {
+        #[cfg(not(windows))]
+        {
+            let _ = (self, endpoint_id);
+            Err(WindowsAudioError::UnsupportedPlatform)
+        }
+        #[cfg(windows)]
+        {
+            open_device_loopback_source(endpoint_id)
+        }
+    }
 }
 
 impl WasapiRenderSink {
@@ -1317,6 +1336,159 @@ fn open_capture_source(endpoint_id: &EndpointId) -> Result<WasapiCaptureSource, 
     initialize_result.map_err(|error| {
         hresult_error(
             "IAudioClient::Initialize(shared)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let capture_client: IAudioCaptureClient = unsafe { client.GetService() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetService(IAudioCaptureClient)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    unsafe { client.Start() }.map_err(|error| {
+        hresult_error("IAudioClient::Start", Some(endpoint_id.0.clone()), error)
+    })?;
+    Ok(WasapiCaptureSource {
+        _com: com,
+        client,
+        capture_client,
+        endpoint_id: endpoint_id.clone(),
+        format,
+    })
+}
+
+#[cfg(windows)]
+fn open_device_loopback_source(
+    endpoint_id: &EndpointId,
+) -> Result<WasapiCaptureSource, WindowsAudioError> {
+    use windows::core::Interface;
+    use windows::Win32::Media::Audio::{
+        eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, IMMEndpoint,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+        DEVICE_STATE_ACTIVE,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    let com_result = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
+    let com_hresult = com_result.0;
+    if com_hresult < 0 && com_hresult as u32 != 0x80010106 {
+        return Err(WindowsAudioError::ComInitialization {
+            hresult: com_hresult,
+        });
+    }
+    let com = ComGuard {
+        should_uninitialize: com_hresult == 0 || com_hresult == 1,
+    };
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|error| {
+            hresult_error(
+                "CoCreateInstance(MMDeviceEnumerator)",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+    let wide_id: Vec<u16> = endpoint_id
+        .0
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let device = unsafe { enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr())) }.map_err(
+        |error| {
+            hresult_error(
+                "IMMDeviceEnumerator::GetDevice",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        },
+    )?;
+    let state = unsafe { device.GetState() }.map_err(|error| {
+        hresult_error("IMMDevice::GetState", Some(endpoint_id.0.clone()), error)
+    })?;
+    if state != DEVICE_STATE_ACTIVE {
+        return Err(WindowsAudioError::CaptureState {
+            reason: "endpoint 不是 active 状态",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+    // Device Loopback 的目标是 render endpoint；确认流向为渲染，避免误用捕获设备。
+    let endpoint = device.cast::<IMMEndpoint>().map_err(|error| {
+        hresult_error(
+            "IMMDevice::QueryInterface(IMMEndpoint)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let flow = unsafe { endpoint.GetDataFlow() }.map_err(|error| {
+        hresult_error(
+            "IMMEndpoint::GetDataFlow",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if flow != eRender {
+        return Err(WindowsAudioError::CaptureState {
+            reason: "Device Loopback 目标必须是 render endpoint",
+            endpoint_id: endpoint_id.0.clone(),
+        });
+    }
+    let client: IAudioClient = unsafe { device.Activate::<IAudioClient>(CLSCTX_ALL, None) }
+        .map_err(|error| {
+            hresult_error(
+                "IMMDevice::Activate(IAudioClient)",
+                Some(endpoint_id.0.clone()),
+                error,
+            )
+        })?;
+    let format_ptr = unsafe { client.GetMixFormat() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetMixFormat",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    if format_ptr.is_null() {
+        return Err(invalid_format(
+            "IAudioClient::GetMixFormat 返回空指针",
+            Some(endpoint_id.0.clone()),
+        ));
+    }
+    let format_result = unsafe { inspect_capture_mix_format(format_ptr, endpoint_id) };
+    let format = match format_result {
+        Ok(format) => format,
+        Err(error) => {
+            unsafe {
+                windows::Win32::System::Com::CoTaskMemFree(Some(
+                    format_ptr as *const core::ffi::c_void,
+                ))
+            };
+            return Err(error);
+        }
+    };
+    // Loopback 捕获共享模式渲染流：加 AUDCLNT_STREAMFLAGS_LOOPBACK，
+    // 数据经 IAudioCaptureClient 读取，格式契约与普通 capture 相同（48k/32float/2ch）。
+    let initialize_result = unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK,
+            0,
+            0,
+            format_ptr,
+            None,
+        )
+    };
+    unsafe {
+        windows::Win32::System::Com::CoTaskMemFree(Some(format_ptr as *const core::ffi::c_void))
+    };
+    initialize_result.map_err(|error| {
+        hresult_error(
+            "IAudioClient::Initialize(shared, loopback)",
             Some(endpoint_id.0.clone()),
             error,
         )
