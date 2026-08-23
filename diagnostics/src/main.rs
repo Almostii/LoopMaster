@@ -7,6 +7,7 @@ use loopmaster_audio_windows::{
     WindowsAudioBackend,
 };
 use std::env;
+use std::thread;
 use std::time::{Duration, Instant};
 
 const ENGINE_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
@@ -80,6 +81,18 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(10);
         run_process_engine_test(pid, &args[3], seconds);
+    } else if args.get(1).map(String::as_str) == Some("--loopback-engine") && args.len() >= 4 {
+        let seconds = args
+            .get(4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_loopback_engine_test(&args[2], &args[3], seconds);
+    } else if args.get(1).map(String::as_str) == Some("--loopback-tone-test") && args.len() >= 3 {
+        let seconds = args
+            .get(3)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_loopback_tone_test(&args[2], seconds);
     } else if args.len() >= 3 {
         let capture_id = &args[1];
         let render_id = &args[2];
@@ -172,6 +185,101 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
         }],
     };
     run_engine_graph_test(graph, seconds)
+}
+
+fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seconds: u64) -> ! {
+    let graph = RouteGraph {
+        sources: vec![SourceSpec {
+            id: SourceId("loopback".to_owned()),
+            kind: SourceKind::DeviceLoopback,
+            endpoint_id: Some(EndpointId(loopback_render_id.to_owned())),
+            process_id: None,
+            display_name: "loopback".to_owned(),
+        }],
+        sinks: vec![SinkSpec {
+            id: SinkId("render".to_owned()),
+            endpoint_id: EndpointId(sink_render_id.to_owned()),
+            display_name: "render".to_owned(),
+        }],
+        sends: vec![SendSpec {
+            source_id: SourceId("loopback".to_owned()),
+            sink_id: SinkId("render".to_owned()),
+            gain_db: 0.0,
+            muted: false,
+            channel_map: Vec::new(),
+        }],
+    };
+    run_engine_graph_test(graph, seconds)
+}
+
+/// 自验证 Device Loopback：向同一 render endpoint 播放 440 Hz 正弦测试音，
+/// 同时从该 endpoint 的 loopback 流抓回，统计抓到的 packet/电平。
+/// 不依赖外部声音源，直接证明 loopback 数据链路完整（阶段 B.1/B.6）。
+fn run_loopback_tone_test(render_id: &str, seconds: u64) -> ! {
+    let backend = match WindowsAudioBackend::new() {
+        Ok(backend) => backend,
+        Err(error) => exit_with_error("初始化 Windows 音频后端失败", error),
+    };
+    let endpoint = EndpointId(render_id.to_owned());
+    let mut sink = match backend.open_render_sink(&endpoint, 480) {
+        Ok(sink) => sink,
+        Err(error) => exit_with_error("打开 render sink 失败", error),
+    };
+    let mut loopback = match backend.open_device_loopback_source(&endpoint) {
+        Ok(source) => source,
+        Err(error) => exit_with_error("打开 Device Loopback 失败", error),
+    };
+    let sample_rate = 48_000.0f32;
+    let frequency = 440.0f32;
+    let mut phase = 0.0f32;
+    let mut block = vec![0.0f32; 960];
+    let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
+    let mut packets = 0u64;
+    let mut captured_frames = 0u64;
+    let mut peak = 0.0f32;
+    let mut non_silent = 0u64;
+    while Instant::now() < deadline {
+        for frame in 0..480 {
+            let sample = (2.0 * std::f32::consts::PI * frequency * phase / sample_rate).sin() * 0.5;
+            block[frame * 2] = sample;
+            block[frame * 2 + 1] = sample;
+            phase += 1.0;
+            if phase >= sample_rate {
+                phase = 0.0;
+            }
+        }
+        match sink.write_f32_block(&block) {
+            Ok(loopmaster_audio_windows::RenderWriteResult::Written { .. }) => {}
+            Ok(loopmaster_audio_windows::RenderWriteResult::NoSpace) => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => exit_with_error("写入测试音失败", error),
+        }
+        let result = loopback
+            .drain_packets(|packet, data| {
+                packets += 1;
+                captured_frames += u64::from(packet.frames);
+                if let Some(samples) = data {
+                    let packet_peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+                    peak = peak.max(packet_peak);
+                    if packet_peak > 1e-4 {
+                        non_silent += 1;
+                    }
+                }
+            })
+            .unwrap_or_default();
+        if result.packets == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    println!("LoopMaster Device Loopback 自验证（测试音 440 Hz）");
+    println!("目标 endpoint: {render_id}");
+    println!("运行时间: {} 秒", seconds.max(1));
+    println!("loopback packets: {packets}");
+    println!("loopback frames: {captured_frames}");
+    println!("loopback peak: {:.1} dBFS", 20.0 * peak.log10().max(-120.0));
+    println!("non-silent packets: {non_silent}");
+    std::process::exit(if packets > 0 && non_silent > 0 { 0 } else { 2 });
 }
 
 fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
