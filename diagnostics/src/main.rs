@@ -109,7 +109,11 @@ fn main() {
             .get(5)
             .and_then(|value| value.parse().ok())
             .unwrap_or(440.0);
-        run_tone_render(&args[2], &args[3], seconds, frequency);
+        let amplitude = args
+            .get(6)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.5);
+        run_tone_render(&args[2], &args[3], seconds, frequency, amplitude);
     } else if args.get(1).map(String::as_str) == Some("--multi-sink-test") && args.len() >= 5 {
         let pid = args[2].parse().unwrap_or(0);
         let seconds = args
@@ -407,7 +411,7 @@ fn run_engine_for(engine: &mut AudioEngine, duration_secs: u64) {
 }
 
 /// 向指定 render endpoint 播放测试音（阶段 B.6）：sine/impulse/silence/channel-id。
-fn run_tone_render(render_id: &str, kind: &str, seconds: u64, frequency: f32) -> ! {
+fn run_tone_render(render_id: &str, kind: &str, seconds: u64, frequency: f32, amplitude: f32) -> ! {
     let kind = match kind {
         "sine" => TestToneKind::Sine,
         "impulse" => TestToneKind::Impulse,
@@ -421,7 +425,7 @@ fn run_tone_render(render_id: &str, kind: &str, seconds: u64, frequency: f32) ->
     let config = TestToneConfig {
         kind,
         frequency_hz: frequency,
-        ..TestToneConfig::default()
+        amplitude: amplitude.clamp(0.0, 1.0),
     };
     let backend = match WindowsAudioBackend::new() {
         Ok(backend) => backend,
@@ -435,6 +439,10 @@ fn run_tone_render(render_id: &str, kind: &str, seconds: u64, frequency: f32) ->
     let mut block = vec![0.0f32; 960];
     let deadline = Instant::now() + Duration::from_secs(seconds.max(1));
     let mut writes = 0u64;
+    // 与引擎 render worker 相同的 block 节拍（10 ms），避免全速写入导致
+    // WASAPI 缓冲突发抖动产生爆音。
+    let block_period = Duration::from_secs_f64(480.0 / 48_000.0);
+    let mut next_deadline = Instant::now();
     while Instant::now() < deadline {
         fill_block(&mut block, 2, &config, &mut phase);
         match sink.write_f32_block(&block) {
@@ -443,8 +451,16 @@ fn run_tone_render(render_id: &str, kind: &str, seconds: u64, frequency: f32) ->
             }
             Ok(loopmaster_audio_windows::RenderWriteResult::NoSpace) => {
                 thread::sleep(Duration::from_millis(1));
+                continue;
             }
             Err(error) => exit_with_error("写入测试音失败", error),
+        }
+        next_deadline += block_period;
+        let now = Instant::now();
+        if next_deadline > now {
+            thread::sleep(next_deadline - now);
+        } else {
+            next_deadline = now;
         }
     }
     println!("LoopMaster 测试音播放");
