@@ -93,6 +93,13 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or(10);
         run_loopback_tone_test(&args[2], seconds);
+    } else if args.get(1).map(String::as_str) == Some("--update-test") && args.len() >= 4 {
+        let pid = args[2].parse().unwrap_or(0);
+        let seconds = args
+            .get(4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_update_test(pid, &args[3], seconds);
     } else if args.len() >= 3 {
         let capture_id = &args[1];
         let render_id = &args[2];
@@ -280,6 +287,106 @@ fn run_loopback_tone_test(render_id: &str, seconds: u64) -> ! {
     println!("loopback peak: {:.1} dBFS", 20.0 * peak.log10().max(-120.0));
     println!("non-silent packets: {non_silent}");
     std::process::exit(if packets > 0 && non_silent > 0 { 0 } else { 2 });
+}
+
+/// 验证运行中 send 级路由变更在块边界生效（阶段 B.3）：
+/// Process Loopback 引擎跑一段时间后调用 update_graph 静音，检查
+/// rendered_non_silent_blocks 停止增长且状态保持 Running。
+fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
+    if pid == 0 {
+        eprintln!("需要有效的进程 PID");
+        std::process::exit(1);
+    }
+    let make_graph = |muted: bool| RouteGraph {
+        sources: vec![SourceSpec {
+            id: SourceId("process".to_owned()),
+            kind: SourceKind::ProcessLoopback,
+            endpoint_id: None,
+            process_id: Some(pid),
+            display_name: format!("process:{pid}"),
+        }],
+        sinks: vec![SinkSpec {
+            id: SinkId("render".to_owned()),
+            endpoint_id: EndpointId(render_id.to_owned()),
+            display_name: "render".to_owned(),
+        }],
+        sends: vec![SendSpec {
+            source_id: SourceId("process".to_owned()),
+            sink_id: SinkId("render".to_owned()),
+            gain_db: 0.0,
+            muted,
+            channel_map: Vec::new(),
+        }],
+    };
+    let mut engine = AudioEngine::new(AudioEngineConfig::new(
+        RouteGraphSnapshot::new(make_graph(false)).expect("引擎验收路由图有效"),
+    ))
+    .expect("引擎验收配置有效");
+    if let Err(error) = engine.start() {
+        eprintln!("启动正式音频引擎失败: {error}");
+        std::process::exit(1);
+    }
+    let half = (seconds.max(2) / 2).max(1);
+    run_engine_for(&mut engine, half);
+    let mid = engine.status();
+    println!(
+        "第一段（正常）: rendered_non_silent_blocks={} | rendered_peak={} dBFS | state={}",
+        mid.stats.rendered_non_silent_blocks,
+        peak_dbfs(mid.stats.rendered_peak),
+        mid.state.as_str()
+    );
+    if let Err(error) =
+        engine.update_graph(RouteGraphSnapshot::new(make_graph(true)).expect("静音路由图有效"))
+    {
+        eprintln!("update_graph 失败: {error}");
+        std::process::exit(1);
+    }
+    println!("已执行 update_graph(muted=true)，等待块边界应用…");
+    run_engine_for(&mut engine, half);
+    let end = engine.status();
+    // 切换边界的 mpsc 传播延迟允许少量残留（< 5%）：静音真正生效时
+    // 第二段增长应远小于第一段。
+    let growth_first = mid.stats.rendered_non_silent_blocks;
+    let growth_second = end.stats.rendered_non_silent_blocks - mid.stats.rendered_non_silent_blocks;
+    let muted_effective = growth_second * 100 <= growth_first.max(1) * 5;
+    println!(
+        "第二段（静音）: rendered_non_silent_blocks={}（增长 {growth_second}）| rendered_peak={} dBFS | state={}",
+        end.stats.rendered_non_silent_blocks,
+        peak_dbfs(end.stats.rendered_peak),
+        end.state.as_str()
+    );
+    println!("graph_updates: {}", end.stats.graph_updates);
+    println!(
+        "静音切换生效: {}",
+        if muted_effective {
+            "是（第二段增长远小于第一段）"
+        } else {
+            "否"
+        }
+    );
+    println!(
+        "切换期间 underflow/discontinuity: {}/{}",
+        end.stats.fifo_underflows, end.stats.discontinuities
+    );
+    let _ = engine.stop();
+    std::process::exit(
+        if muted_effective && end.stats.graph_updates >= 1 && !end.failed {
+            0
+        } else {
+            2
+        },
+    );
+}
+
+fn run_engine_for(engine: &mut AudioEngine, duration_secs: u64) {
+    let deadline = Instant::now() + Duration::from_secs(duration_secs.max(1));
+    while Instant::now() < deadline {
+        let status = engine.status();
+        if status.failed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
