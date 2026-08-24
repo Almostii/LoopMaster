@@ -7,8 +7,8 @@
 //!
 //! M1 范围：设备/进程枚举投影、路由编辑（增删 source/sink/send、增益、
 //! 静音、启停、通道映射）、引擎命令（`EngineCommand`）、状态/统计事件
-//! 订阅（`ServiceEvent`）、手动重连（`request_reconnect`）。预设与
-//! schema version 属 M2 演进。
+//! 订阅（`ServiceEvent`）、手动重连（`request_reconnect`）。
+//! M2 范围：配置与预设（`AppConfig`/schema version/原子写入）。
 
 use loopmaster_audio_core::{
     AudioFormat, EndpointId, RouteGraph, RouteGraphError, RouteGraphSnapshot, SendSpec, SinkId,
@@ -24,6 +24,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use thiserror::Error;
+
+mod config;
+
+pub use config::{AppConfig, ConfigError, UiState, CURRENT_SCHEMA_VERSION};
 
 /// 服务事件轮询间隔：引擎状态/统计变化以有界频率投影为事件，避免
 /// UI 直接轮询实时内部结构。
