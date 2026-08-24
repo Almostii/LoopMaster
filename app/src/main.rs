@@ -86,6 +86,13 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
+        ui.on_toggle_route(move |enabled: bool| {
+            apply_send_change(&ui_weak, &state_rc, None, Some(!enabled));
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
         ui.on_source_selected(move |_| {
             apply_route_selection(&ui_weak, &state_rc);
         });
@@ -299,6 +306,7 @@ fn apply_send_change(
     }
     if let Some(mute) = muted {
         state_borrow.muted = mute;
+        ui.set_route_enabled(!mute);
     }
     // 先构建图（结束对 state 的可变借用），再取服务应用。
     let graph = match build_graph(&mut state_borrow, &ui) {
