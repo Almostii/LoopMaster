@@ -1779,8 +1779,9 @@ export component MainWindow inherits Window {
                 remove-requested => { root.remove-current-output(); }
             }
             Flickable {
-                x: 732px;
-                y: 310px;
+                // 附加输出属于 Output Channels 列，不属于 Monitors 监听视图。
+                x: 382px;
+                y: 348px;
                 width: 280px;
                 height: 300px;
                 viewport-height: root.route-output-extra-model.length * 86px;
