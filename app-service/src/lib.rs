@@ -15,7 +15,8 @@ use loopmaster_audio_core::{
 };
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineStatus, EndpointFlow,
-    EndpointInfo, ProcessInfo, WindowsAudioBackend, WindowsAudioError, WindowsAudioFailureKind,
+    EndpointFormat, EndpointInfo, ProcessInfo, SampleEncoding, WindowsAudioBackend,
+    WindowsAudioError, WindowsAudioFailureKind,
 };
 use thiserror::Error;
 
@@ -73,12 +74,25 @@ impl DeviceFlow {
 /// 设备对 LoopMaster 契约的兼容性结论。
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeviceCompatibility {
-    /// 可作为 capture source（32-bit float / 2 声道，采样率自动重采样）。
+    /// 可作为 capture source；必要的编码、采样率和声道转换由音频边界完成。
     CaptureReady,
-    /// 可作为 render sink（32-bit float / 2 声道，采样率自动重采样）。
+    /// 可作为 render sink；必要的编码、采样率和声道转换由音频边界完成。
     RenderReady,
     /// 不满足任一契约；reason 给出面向用户的原因。
     Unsupported { reason: String },
+}
+
+/// endpoint 原生格式进入 LoopMaster 实时链路时所需的处理。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceFormatSupport {
+    /// 原生格式已等于内部 48 kHz / 32-bit float / 2 声道格式。
+    Native,
+    /// endpoint 可用，但音频边界必须执行编码、采样率或声道转换。
+    ConversionRequired,
+    /// endpoint 格式已读取，但当前音频边界不能处理。
+    Unsupported,
+    /// 无法读取足够的 endpoint 格式信息。
+    Unknown,
 }
 
 /// 设备运行状态。
@@ -99,6 +113,13 @@ pub struct DeviceModel {
     pub bits_per_sample: Option<u16>,
     pub channel_mask: Option<u32>,
     pub is_float: Option<bool>,
+    pub is_pcm: Option<bool>,
+    /// 面向 UI 和日志的完整原生格式摘要。
+    pub native_format_description: Option<String>,
+    /// 原生格式是否需要转换，独立于设备能否被路由选择。
+    pub format_support: DeviceFormatSupport,
+    /// 为什么原生支持、需要转换或不受支持。
+    pub format_support_reason: String,
     pub compatibility: DeviceCompatibility,
     pub status: DeviceStatus,
 }
@@ -109,32 +130,16 @@ impl DeviceModel {
             EndpointFlow::Capture => DeviceFlow::Capture,
             EndpointFlow::Render => DeviceFlow::Render,
         };
-        let (compatibility, status) = match info.endpoint_format() {
-            Some(format) => match flow {
-                DeviceFlow::Capture if format.capture_compatible() => {
-                    (DeviceCompatibility::CaptureReady, DeviceStatus::Active)
-                }
-                DeviceFlow::Capture => (
-                    DeviceCompatibility::Unsupported {
-                        reason: "格式不满足 capture 契约（需 32-bit float / 2 声道）".into(),
-                    },
-                    DeviceStatus::Unsupported,
-                ),
-                DeviceFlow::Render if format.render_compatible() => {
-                    (DeviceCompatibility::RenderReady, DeviceStatus::Active)
-                }
-                DeviceFlow::Render => (
-                    DeviceCompatibility::Unsupported {
-                        reason: "格式不满足 render 契约（需 32-bit float / 2 声道）".into(),
-                    },
-                    DeviceStatus::Unsupported,
-                ),
-            },
+        let endpoint_format = info.endpoint_format();
+        let (compatibility, status, format_support, format_support_reason) = match endpoint_format {
+            Some(format) => project_format_support(flow, format),
             None => (
                 DeviceCompatibility::Unsupported {
-                    reason: "无法读取设备格式".into(),
+                    reason: "无法读取设备格式，不能确认音频边界是否可安全处理".into(),
                 },
                 DeviceStatus::Unsupported,
+                DeviceFormatSupport::Unknown,
+                "无法读取编码、采样率、位深或声道信息".into(),
             ),
         };
         Self {
@@ -145,10 +150,85 @@ impl DeviceModel {
             bits_per_sample: info.bits_per_sample,
             channel_mask: info.channel_mask,
             is_float: info.is_float,
+            is_pcm: info.is_pcm,
+            native_format_description: endpoint_format.map(endpoint_format_description),
+            format_support,
+            format_support_reason,
             compatibility,
             status,
         }
     }
+}
+
+fn project_format_support(
+    flow: DeviceFlow,
+    format: EndpointFormat,
+) -> (
+    DeviceCompatibility,
+    DeviceStatus,
+    DeviceFormatSupport,
+    String,
+) {
+    let compatible = match flow {
+        DeviceFlow::Capture => format.capture_compatible(),
+        DeviceFlow::Render => format.render_compatible(),
+    };
+    let description = endpoint_format_description(format);
+    if !compatible {
+        let reason = format!("当前音频边界不支持此 {} 格式：{description}", flow.as_str());
+        return (
+            DeviceCompatibility::Unsupported {
+                reason: reason.clone(),
+            },
+            DeviceStatus::Unsupported,
+            DeviceFormatSupport::Unsupported,
+            reason,
+        );
+    }
+
+    let compatibility = match flow {
+        DeviceFlow::Capture => DeviceCompatibility::CaptureReady,
+        DeviceFlow::Render => DeviceCompatibility::RenderReady,
+    };
+    if format.audio_format() == AudioFormat::INTERNAL
+        && format.sample_encoding() == Some(SampleEncoding::Float32)
+    {
+        (
+            compatibility,
+            DeviceStatus::Active,
+            DeviceFormatSupport::Native,
+            "原生格式与内部 48 kHz / 32-bit IEEE float / 2 声道格式一致".into(),
+        )
+    } else {
+        let direction = match flow {
+            DeviceFlow::Capture => "转换为内部 48 kHz / 32-bit IEEE float / 2 声道",
+            DeviceFlow::Render => "由内部 48 kHz / 32-bit IEEE float / 2 声道转换后写入",
+        };
+        (
+            compatibility,
+            DeviceStatus::Active,
+            DeviceFormatSupport::ConversionRequired,
+            format!("设备可用；原生格式为 {description}；将{direction}"),
+        )
+    }
+}
+
+fn endpoint_format_description(format: EndpointFormat) -> String {
+    let sample_rate = if format.sample_rate.is_multiple_of(1_000) {
+        format!("{} kHz", format.sample_rate / 1_000)
+    } else if format.sample_rate.is_multiple_of(100) {
+        format!("{:.1} kHz", format.sample_rate as f64 / 1_000.0)
+    } else {
+        format!("{} Hz", format.sample_rate)
+    };
+    let encoding = match format.sample_encoding() {
+        Some(SampleEncoding::Float32) => "32-bit IEEE float".to_owned(),
+        Some(SampleEncoding::Pcm16) => "16-bit PCM".to_owned(),
+        None if format.is_float => format!("{}-bit IEEE float", format.bits_per_sample),
+        None if format.is_pcm => format!("{}-bit PCM", format.bits_per_sample),
+        None => format!("{}-bit 未知编码", format.bits_per_sample),
+    };
+    format!("{sample_rate} / {encoding} / {} 声道", format.channels)
 }
 
 /// 设备模型统一枚举入口。
@@ -456,6 +536,29 @@ mod tests {
         })
     }
 
+    fn endpoint(
+        flow: EndpointFlow,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        channels: u16,
+        is_float: bool,
+        is_pcm: bool,
+    ) -> EndpointInfo {
+        EndpointInfo {
+            id: EndpointId("device".into()),
+            name: "Device".into(),
+            flow,
+            format: Some(AudioFormat {
+                sample_rate,
+                channels,
+            }),
+            bits_per_sample: Some(bits_per_sample),
+            channel_mask: Some(if channels == 2 { 3 } else { 0 }),
+            is_float: Some(is_float),
+            is_pcm: Some(is_pcm),
+        }
+    }
+
     #[test]
     fn applies_gain_and_mute_to_existing_send() {
         let mut editor = editor();
@@ -521,22 +624,62 @@ mod tests {
     }
 
     #[test]
-    fn device_projection_marks_capture_ready() {
-        let info = EndpointInfo {
-            id: EndpointId("cap".into()),
-            name: "Mic".into(),
-            flow: EndpointFlow::Capture,
-            format: Some(AudioFormat {
-                sample_rate: 44_100,
-                channels: 2,
-            }),
-            bits_per_sample: Some(32),
-            channel_mask: Some(3),
-            is_float: Some(true),
-        };
+    fn device_projection_marks_native_capture_ready() {
+        let info = endpoint(EndpointFlow::Capture, 48_000, 32, 2, true, false);
         let model = DeviceModel::from_endpoint(&info);
         assert_eq!(model.compatibility, DeviceCompatibility::CaptureReady);
         assert_eq!(model.status, DeviceStatus::Active);
+        assert_eq!(model.format_support, DeviceFormatSupport::Native);
+        assert_eq!(
+            model.native_format_description.as_deref(),
+            Some("48 kHz / 32-bit IEEE float / 2 声道")
+        );
+    }
+
+    #[test]
+    fn device_projection_keeps_pcm_44k_mono_selectable_with_conversion() {
+        let info = endpoint(EndpointFlow::Capture, 44_100, 16, 1, false, true);
+        let model = DeviceModel::from_endpoint(&info);
+        assert_eq!(model.compatibility, DeviceCompatibility::CaptureReady);
+        assert_eq!(model.status, DeviceStatus::Active);
+        assert_eq!(
+            model.format_support,
+            DeviceFormatSupport::ConversionRequired
+        );
+        assert_eq!(
+            model.native_format_description.as_deref(),
+            Some("44.1 kHz / 16-bit PCM / 1 声道")
+        );
+        assert!(model.format_support_reason.contains("转换为内部"));
+    }
+
+    #[test]
+    fn device_projection_marks_multichannel_render_as_conversion() {
+        let info = endpoint(EndpointFlow::Render, 48_000, 32, 6, true, false);
+        let model = DeviceModel::from_endpoint(&info);
+        assert_eq!(model.compatibility, DeviceCompatibility::RenderReady);
+        assert_eq!(
+            model.format_support,
+            DeviceFormatSupport::ConversionRequired
+        );
+        assert!(model.format_support_reason.contains("转换后写入"));
+    }
+
+    #[test]
+    fn device_projection_explains_unsupported_pcm_depth() {
+        let info = endpoint(EndpointFlow::Render, 48_000, 24, 2, false, true);
+        let model = DeviceModel::from_endpoint(&info);
+        assert_eq!(model.status, DeviceStatus::Unsupported);
+        assert_eq!(model.format_support, DeviceFormatSupport::Unsupported);
+        assert_eq!(
+            model.native_format_description.as_deref(),
+            Some("48 kHz / 24-bit PCM / 2 声道")
+        );
+        assert!(matches!(
+            model.compatibility,
+            DeviceCompatibility::Unsupported { ref reason }
+                if reason.contains("48 kHz / 24-bit PCM / 2 声道")
+        ));
     }
 
     #[test]
