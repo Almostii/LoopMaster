@@ -219,6 +219,29 @@ fn main() -> Result<(), slint::PlatformError> {
             request_refresh(&ui_weak, &state_rc);
         });
     }
+    // 主路由页三个列标题的加号先复用异步枚举入口：在动态卡片接入前，
+    // 点击加号不会创建虚假的虚拟设备，而是刷新可选来源/输出列表。
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_add_source(move || {
+            request_refresh(&ui_weak, &state_rc);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_add_output(move || {
+            request_refresh(&ui_weak, &state_rc);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_add_monitor(move || {
+            request_refresh(&ui_weak, &state_rc);
+        });
+    }
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
