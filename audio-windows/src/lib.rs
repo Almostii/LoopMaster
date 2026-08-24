@@ -235,8 +235,6 @@ pub enum RenderWriteResult {
 /// 但构造和写入会返回 [`WindowsAudioError::UnsupportedPlatform`]。
 pub struct WasapiRenderSink {
     #[cfg(windows)]
-    _com: ComGuard,
-    #[cfg(windows)]
     client: windows::Win32::Media::Audio::IAudioClient,
     #[cfg(windows)]
     render_client: windows::Win32::Media::Audio::IAudioRenderClient,
@@ -246,6 +244,10 @@ pub struct WasapiRenderSink {
     block_frames: usize,
     resampler: Option<FixedInputResampler>,
     resampled_output: Vec<f32>,
+    // Keep COM initialized until every COM interface above has been released.
+    // Rust drops struct fields in declaration order.
+    #[cfg(windows)]
+    _com: ComGuard,
 }
 
 /// 一次 WASAPI capture packet 的元数据。
@@ -273,13 +275,15 @@ pub struct CaptureDrainResult {
 /// WASAPI shared-mode 普通 capture source。
 pub struct WasapiCaptureSource {
     #[cfg(windows)]
-    _com: ComGuard,
-    #[cfg(windows)]
     client: windows::Win32::Media::Audio::IAudioClient,
     #[cfg(windows)]
     capture_client: windows::Win32::Media::Audio::IAudioCaptureClient,
     endpoint_id: EndpointId,
     format: EndpointFormat,
+    // Keep COM initialized until every COM interface above has been released.
+    // Rust drops struct fields in declaration order.
+    #[cfg(windows)]
+    _com: ComGuard,
 }
 
 #[cfg(windows)]

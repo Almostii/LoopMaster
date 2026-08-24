@@ -141,19 +141,6 @@ fn effective_mute(source_enabled: bool, monitor_enabled: bool) -> bool {
     !source_enabled || !monitor_enabled
 }
 
-#[cfg(test)]
-mod tests {
-    use super::effective_mute;
-
-    #[test]
-    fn route_is_muted_when_either_side_is_disabled() {
-        assert!(!effective_mute(true, true));
-        assert!(effective_mute(false, true));
-        assert!(effective_mute(true, false));
-        assert!(effective_mute(false, false));
-    }
-}
-
 /// 刷新进程与 sink 设备列表。
 fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
     let devices = DeviceRepository::new();
@@ -432,5 +419,18 @@ fn poll_status(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
         ui.set_stats_text(SharedString::from(text));
     } else {
         ui.set_stats_text(SharedString::from("引擎未启动"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_mute;
+
+    #[test]
+    fn route_is_muted_when_either_side_is_disabled() {
+        assert!(!effective_mute(true, true));
+        assert!(effective_mute(false, true));
+        assert!(effective_mute(true, false));
+        assert!(effective_mute(false, false));
     }
 }

@@ -68,12 +68,18 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.get(1).map(String::as_str) == Some("--processes") {
         run_process_list(&backend);
+    } else if args.get(1).map(String::as_str) == Some("--recovery-engine") && args.len() >= 4 {
+        let seconds = args
+            .get(4)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10);
+        run_engine_test(&args[2], &args[3], seconds, true);
     } else if args.get(1).map(String::as_str) == Some("--engine") && args.len() >= 4 {
         let seconds = args
             .get(4)
             .and_then(|value| value.parse().ok())
             .unwrap_or(10);
-        run_engine_test(&args[2], &args[3], seconds);
+        run_engine_test(&args[2], &args[3], seconds, false);
     } else if args.get(1).map(String::as_str) == Some("--process-engine") && args.len() >= 4 {
         let pid = args[2].parse().unwrap_or(0);
         let seconds = args
@@ -161,7 +167,7 @@ fn run_process_list(backend: &WindowsAudioBackend) -> ! {
     }
 }
 
-fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
+fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recovery: bool) -> ! {
     let graph = RouteGraph {
         sources: vec![SourceSpec {
             id: SourceId("capture".to_owned()),
@@ -183,7 +189,7 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64) -> ! {
             channel_map: Vec::new(),
         }],
     };
-    run_engine_graph_test(graph, seconds)
+    run_engine_graph_test(graph, seconds, allow_recovery)
 }
 
 fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
@@ -212,7 +218,7 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             channel_map: Vec::new(),
         }],
     };
-    run_engine_graph_test(graph, seconds)
+    run_engine_graph_test(graph, seconds, false)
 }
 
 fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seconds: u64) -> ! {
@@ -237,7 +243,7 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             channel_map: Vec::new(),
         }],
     };
-    run_engine_graph_test(graph, seconds)
+    run_engine_graph_test(graph, seconds, false)
 }
 
 /// 自验证 Device Loopback：向同一 render endpoint 播放 440 Hz 正弦测试音，
@@ -555,14 +561,18 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
     );
 }
 
-fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
+fn run_engine_graph_test(graph: RouteGraph, seconds: u64, allow_recovery: bool) -> ! {
     let snapshot = RouteGraphSnapshot::new(graph).expect("引擎验收路由图有效");
     let mut engine = AudioEngine::new(AudioEngineConfig::new(snapshot)).expect("引擎验收配置有效");
     if let Err(error) = engine.start() {
         eprintln!("启动正式音频引擎失败: {error}");
         std::process::exit(1);
     }
-    println!("提示：请在本命令运行期间拔出并重新插入声卡或 VB-CABLE，以验证自动恢复。");
+    if allow_recovery {
+        println!("提示：本命令允许一次设备拔插，用于验证自动恢复。");
+    } else {
+        println!("提示：严格稳定性模式下不要拔插设备或修改音频设置。");
+    }
     println!("提示：状态统计来自周期采样；持续时间短于采样间隔的状态可能不会被观察到。");
     let initial_status = engine.status();
     let mut state_observation = StateObservation::new(initial_status.state);
@@ -655,16 +665,39 @@ fn run_engine_graph_test(graph: RouteGraph, seconds: u64) -> ! {
         state_observation.transition_count(AudioEngineState::Reconnecting),
         state_observation.transition_count(AudioEngineState::Failed),
     );
-    if let Some(error) = status.last_error {
+    if let Some(ref error) = status.last_error {
         eprintln!("引擎错误: {error}");
     }
-    std::process::exit(
-        if !status.failed && status.stats.capture_packets > 0 && status.stats.rendered_frames > 0 {
-            0
-        } else {
-            2
-        },
-    );
+    std::process::exit(if engine_run_succeeded(&status, allow_recovery) {
+        0
+    } else {
+        2
+    });
+}
+
+fn engine_run_succeeded(
+    status: &loopmaster_audio_windows::AudioEngineStatus,
+    allow_recovery: bool,
+) -> bool {
+    let stats = status.stats;
+    if status.failed
+        || status.state != AudioEngineState::Running
+        || stats.capture_packets == 0
+        || stats.rendered_frames == 0
+        || stats.fifo_overflows > 0
+        || stats.fifo_dropped_frames > 0
+        || stats.fifo_underflows > 0
+        || stats.timestamp_errors > 0
+    {
+        return false;
+    }
+    if allow_recovery {
+        // 首个 packet 的启动边界 discontinuity 可以忽略；设备拔插产生的运行期
+        // discontinuity 必须同时观察到重连。
+        stats.runtime_discontinuities == 0 || stats.reconnect_attempts > 0
+    } else {
+        stats.runtime_discontinuities == 0 && stats.reconnect_attempts == 0
+    }
 }
 
 fn run_capture_render_test(
@@ -887,5 +920,45 @@ mod tests {
             1
         );
         assert_eq!(observation.transition_count(AudioEngineState::Failed), 1);
+    }
+
+    fn passing_status() -> loopmaster_audio_windows::AudioEngineStatus {
+        loopmaster_audio_windows::AudioEngineStatus {
+            state: AudioEngineState::Running,
+            running: true,
+            failed: false,
+            last_error: None,
+            stats: loopmaster_audio_windows::AudioEngineStats {
+                capture_packets: 1,
+                rendered_frames: 480,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn strict_engine_verdict_rejects_audio_faults() {
+        let mut status = passing_status();
+        assert!(engine_run_succeeded(&status, false));
+        status.stats.fifo_underflows = 1;
+        assert!(!engine_run_succeeded(&status, false));
+        status.stats.fifo_underflows = 0;
+        status.stats.startup_discontinuities = 1;
+        status.stats.discontinuities = 1;
+        assert!(engine_run_succeeded(&status, false));
+        status.stats.runtime_discontinuities = 1;
+        assert!(!engine_run_succeeded(&status, false));
+    }
+
+    #[test]
+    fn recovery_engine_verdict_allows_reconnected_discontinuity_only() {
+        let mut status = passing_status();
+        status.stats.runtime_discontinuities = 1;
+        status.stats.discontinuities = 1;
+        assert!(!engine_run_succeeded(&status, true));
+        status.stats.reconnect_attempts = 1;
+        assert!(engine_run_succeeded(&status, true));
+        status.stats.fifo_underflows = 1;
+        assert!(!engine_run_succeeded(&status, true));
     }
 }

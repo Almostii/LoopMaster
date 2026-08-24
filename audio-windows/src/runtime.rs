@@ -55,6 +55,16 @@ fn is_non_silent(peak: f32) -> bool {
     peak > NON_SILENT_PEAK_THRESHOLD
 }
 
+fn should_report_source_underflow(
+    available_frames: usize,
+    block_frames: usize,
+    starvation_elapsed: Duration,
+    already_reported: bool,
+    grace: Duration,
+) -> bool {
+    available_frames < block_frames && !already_reported && starvation_elapsed >= grace
+}
+
 #[derive(Clone, Debug)]
 pub struct AudioEngineConfig {
     pub graph: RouteGraphSnapshot,
@@ -599,6 +609,7 @@ fn supervisor_worker(
         for (source, producer) in graph.graph().sources.iter().cloned().zip(source_producers) {
             workers.push(spawn_capture_worker(
                 source,
+                block_frames,
                 Arc::clone(&session_stop),
                 Arc::clone(&state),
                 Arc::clone(&error),
@@ -668,6 +679,7 @@ fn mark_reconnect_exhausted(
 
 fn spawn_capture_worker(
     source: SourceSpec,
+    block_frames: usize,
     stop: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
     error: Arc<Mutex<Option<String>>>,
@@ -677,7 +689,7 @@ fn spawn_capture_worker(
     thread::Builder::new()
         .name("loopmaster-capture".into())
         .spawn(move || {
-            let _ = capture_worker(source, stop, state, error, counters, producer);
+            let _ = capture_worker(source, block_frames, stop, state, error, counters, producer);
         })
         .expect("创建 capture worker 失败")
 }
@@ -803,6 +815,7 @@ impl CaptureResampler {
 
 fn capture_worker(
     source_spec: SourceSpec,
+    block_frames: usize,
     stop: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
     error: Arc<Mutex<Option<String>>>,
@@ -852,8 +865,8 @@ fn capture_worker(
             )?)
         }
     };
-    let silence = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
-    let mut capture_resampler = CaptureResampler::new(source.source_format(), DEFAULT_BLOCK_FRAMES)
+    let silence = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
+    let mut capture_resampler = CaptureResampler::new(source.source_format(), block_frames)
         .map_err(|e| {
             fail(&state, &stop, &error, e.to_string());
         })?;
@@ -1031,8 +1044,8 @@ fn mixer_worker(
             .map_or(0, AudioFifoConsumer::capacity_frames),
     );
     let mut primed = false;
-    let mut starvation_since = None;
-    let mut starvation_reported = false;
+    let mut source_starvation_since = vec![None; consumers.len()];
+    let mut source_starvation_reported = vec![false; consumers.len()];
     while !stop.load(Ordering::Acquire) {
         while let Ok(next) = graph_rx.try_recv() {
             match MixerPlan::new(
@@ -1068,18 +1081,33 @@ fn mixer_worker(
             // 避免首次处理时连续追赶多个过期 block，造成 FIFO 水位瞬时下降。
             next_deadline = Instant::now();
         }
-        if max_available < block_frames {
-            let started = starvation_since.get_or_insert_with(Instant::now);
-            let grace = underflow_grace_period(block_period);
-            if !starvation_reported && started.elapsed() >= grace {
-                counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
-                starvation_reported = true;
+
+        // Track each source independently. One healthy source must not hide another
+        // source that is starving and being replaced with silence.
+        let grace = underflow_grace_period(block_period);
+        for (index, consumer) in consumers.iter().enumerate() {
+            let available = consumer.available_frames();
+            if available < block_frames {
+                let started = source_starvation_since[index].get_or_insert_with(Instant::now);
+                if should_report_source_underflow(
+                    available,
+                    block_frames,
+                    started.elapsed(),
+                    source_starvation_reported[index],
+                    grace,
+                ) {
+                    counters.fifo_underflows.fetch_add(1, Ordering::Relaxed);
+                    source_starvation_reported[index] = true;
+                }
+            } else {
+                source_starvation_since[index] = None;
+                source_starvation_reported[index] = false;
             }
+        }
+        if max_available < block_frames {
             thread::sleep(Duration::from_millis(1));
             continue;
         }
-        starvation_since = None;
-        starvation_reported = false;
         for (index, consumer) in consumers.iter_mut().enumerate() {
             source_blocks[index].fill(0.0);
             // 短读的剩余帧保持为 0，由 MixerPlan 按静音处理。
@@ -1571,5 +1599,52 @@ mod tests {
         assert!(!is_non_silent(1e-5)); // 低于 -80 dBFS 阈值
         assert!(is_non_silent(1e-3)); // 高于 -80 dBFS 阈值
         assert!(is_non_silent(0.5));
+    }
+
+    #[test]
+    fn reports_underflow_for_one_starved_source_even_when_another_is_ready() {
+        assert!(should_report_source_underflow(
+            0,
+            480,
+            Duration::from_millis(20),
+            false,
+            Duration::from_millis(20),
+        ));
+        assert!(!should_report_source_underflow(
+            480,
+            480,
+            Duration::from_millis(20),
+            false,
+            Duration::from_millis(20),
+        ));
+        assert!(!should_report_source_underflow(
+            0,
+            480,
+            Duration::from_millis(20),
+            true,
+            Duration::from_millis(20),
+        ));
+    }
+
+    #[test]
+    fn capture_resampler_uses_configured_block_size() {
+        let source_format = crate::EndpointFormat {
+            sample_rate: 44_100,
+            bits_per_sample: 32,
+            channels: INTERNAL_CHANNELS as u16,
+            channel_mask: 3,
+            is_float: true,
+        };
+        for block_frames in [240, 960] {
+            let resampler = CaptureResampler::new(Some(source_format), block_frames).unwrap();
+            assert_eq!(
+                resampler.output_block.len(),
+                block_frames * INTERNAL_CHANNELS
+            );
+            assert_eq!(
+                resampler.resampler.as_ref().unwrap().output_frames(),
+                block_frames
+            );
+        }
     }
 }
