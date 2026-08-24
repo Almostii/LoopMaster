@@ -684,6 +684,7 @@ component SourceNode inherits Rectangle {
     callback source-selected(int);
     callback toggle-route(bool);
     callback apply-gain(float);
+    callback remove-requested();
     private property <bool> has-source: root.source-index >= 0
         && root.source-index < root.source-model.length;
 
@@ -737,6 +738,17 @@ component SourceNode inherits Rectangle {
                 enabled: root.has-source;
                 label: "声源开关";
                 toggled(value) => { root.toggle-route(value); }
+            }
+            Rectangle {
+                width: 20px;
+                height: 24px;
+                border-radius: 4px;
+                background: remove-touch.has-hover ? #fff1f2 : transparent;
+                Text { width: parent.width; height: parent.height; text: "×"; color: #b23f3f; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                accessible-role: button;
+                accessible-label: "移除音频来源";
+                accessible-action-default => { root.remove-requested(); }
+                remove-touch := TouchArea { clicked => { root.remove-requested(); } }
             }
         }
         Rectangle { y: 56px; width: root.width; height: 1px; background: #e2e8f0; }
@@ -866,6 +878,7 @@ component OutputNode inherits Rectangle {
     in property <float> meter: 0;
     in-out property <bool> route-enabled: true;
     in property <bool> running: false;
+    in property <string> flow-label: "Render 输出设备";
     callback output-selected(int);
     callback toggle-route(bool);
     private property <bool> has-output: root.output-index >= 0
@@ -907,7 +920,7 @@ component OutputNode inherits Rectangle {
                 spacing: 1px;
                 horizontal-stretch: 1;
                 Text { text: root.has-output ? root.output-model[root.output-index] : "选择监听设备"; color: #1e293b; font-size: 12px; font-weight: 700; overflow: elide; }
-                Text { text: "默认音频输出设备"; color: #64748b; font-size: 10px; }
+                Text { text: root.flow-label; color: #64748b; font-size: 10px; }
             }
             LoopbackToggle {
                 checked <=> root.route-enabled;
@@ -1304,6 +1317,7 @@ component DemoMonitorCard inherits Rectangle {
     in-out property <bool> route-enabled: true;
     callback output-selected(int);
     callback toggle-monitor(bool);
+    callback remove-requested();
     private property <bool> has-output: root.output-index >= 0
         && root.output-index < root.output-model.length;
 
@@ -1340,6 +1354,17 @@ component DemoMonitorCard inherits Rectangle {
                 Text { height: 16px; text: "默认音频输出设备"; color: #64748b; font-size: 10px; vertical-alignment: center; overflow: elide; }
             }
             LoopbackToggle { checked <=> root.route-enabled; enabled: root.has-output; label: "监听开关"; toggled(value) => { root.toggle-monitor(value); } }
+            Rectangle {
+                width: 20px;
+                height: 24px;
+                border-radius: 4px;
+                background: remove-touch.has-hover ? #fff1f2 : transparent;
+                Text { width: parent.width; height: parent.height; text: "×"; color: #b23f3f; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                accessible-role: button;
+                accessible-label: "移除监听设备";
+                accessible-action-default => { root.remove-requested(); }
+                remove-touch := TouchArea { clicked => { root.remove-requested(); } }
+            }
         }
         Rectangle { y: 51px; width: root.width; height: 1px; background: #e2e8f0; }
     }
@@ -1457,6 +1482,8 @@ export component MainWindow inherits Window {
     in-out property <[string]> output-model: [];
     in-out property <int> source-index: -1;
     in-out property <int> output-index: -1;
+    in-out property <int> route-source-count: 0;
+    in-out property <int> route-output-count: 0;
     in-out property <float> gain: 0;
     in-out property <bool> running: false;
     // 结构化引擎阶段：stopped|starting|running|degraded|reconnecting|failed，
@@ -1593,21 +1620,21 @@ export component MainWindow inherits Window {
                 x: 32px;
                 y: 58px;
                 title: "Sources 音频来源";
-                subtitle: "可用来源 " + root.source-model.length;
+                subtitle: "已添加 " + root.route-source-count + " / 可用 " + root.source-model.length;
                 add-requested => { root.add-source(); }
             }
             ColumnHeader {
                 x: 382px;
                 y: 58px;
                 title: "Output Channels 输出通道";
-                subtitle: "可用输出设备 " + root.output-model.length;
+                subtitle: "已添加 " + root.route-output-count + " / 可用 " + root.output-model.length;
                 add-requested => { root.add-output(); }
             }
             if root.show-monitors: ColumnHeader {
                 x: 732px;
                 y: 58px;
                 title: "Monitors 监听设备";
-                subtitle: root.output-model.length > 0 ? "可添加监听目标" : "暂无可用输出设备";
+                subtitle: root.route-output-count > 0 ? "已添加 " + root.route-output-count + " 个监听目标" : "暂无监听目标";
                 add-requested => { root.add-monitor(); }
             }
             DemoSourceCard {
@@ -1624,8 +1651,20 @@ export component MainWindow inherits Window {
                 toggle-route(value) => { root.toggle-route(value); }
                 apply-gain(value) => { root.apply-gain(value); }
             }
-            DemoChannelCard { x: 382px; y: 110px; title: "Channels 1 & 2"; first-label: "Channel 1 (L)"; second-label: "Channel 2 (R)"; meter: root.source-meter; connected: root.route-ready && root.route-enabled && root.monitor-enabled; }
-            DemoChannelCard { x: 382px; y: 248px; title: "Channels 3 & 4"; first-label: "Channel 3"; second-label: "Channel 4"; meter: 0; connected: false; }
+            // Output Channels 对应真实 Render endpoint；不把声卡名称中的 1/2、3/4
+            // 伪装成独立的虚拟通道或 bus。
+            OutputNode {
+                x: 382px;
+                y: 110px;
+                output-model: root.output-model;
+                output-index <=> root.output-index;
+                meter: root.output-meter-l;
+                route-enabled: root.route-ready && root.route-enabled;
+                running: root.running;
+                flow-label: "Render 输出设备";
+                output-selected(index) => { root.output-selected(index); }
+                toggle-route(value) => { root.toggle-route(value); }
+            }
             if root.show-monitors: DemoMonitorCard {
                 x: 732px;
                 y: 110px;

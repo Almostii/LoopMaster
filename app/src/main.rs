@@ -9,13 +9,13 @@ slint::include_modules!();
 
 use loopmaster_app_service::{
     DeviceCompatibility, DeviceFlow, DeviceRepository, EngineCommand, EngineService,
-    ProcessRepository, ServiceEvent,
+    ProcessRepository, RouteEdit, RouteEditor, ServiceEvent,
 };
 use loopmaster_audio_core::{
     EndpointId, RouteGraph, SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec,
 };
 use loopmaster_audio_windows::AudioEngineState;
-use slint::{SharedString, VecModel, Weak};
+use slint::{Model, SharedString, VecModel, Weak};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -30,10 +30,10 @@ enum UiCommand {
     },
     Stop,
     ApplyGain {
-        gain_db: f32,
+        updates: Vec<(SourceId, SinkId, f32)>,
     },
     ApplyMuted {
-        muted: bool,
+        updates: Vec<(SourceId, SinkId, bool)>,
     },
     /// 请求服务线程退出（应用退出时发送）。
     Shutdown,
@@ -104,9 +104,6 @@ impl ServiceThread {
 /// 命令处理非实时，绝不阻塞音频线程。
 fn service_loop(rx: Receiver<UiCommand>, out: Sender<UiEvent>) {
     let mut service = ServiceThread::new();
-    // 当前单路 MVP 路由使用固定 source/sink ID。
-    let source_id = SourceId("process".into());
-    let sink_id = SinkId("sink".into());
     loop {
         // 先中继引擎事件。
         if let Some(events) = service.events.as_ref() {
@@ -127,30 +124,34 @@ fn service_loop(rx: Receiver<UiCommand>, out: Sender<UiEvent>) {
         match command {
             UiCommand::Start { graph } => service.restart_with(graph, &out),
             UiCommand::Stop => service.stop(&out),
-            UiCommand::ApplyGain { gain_db } => {
-                if let Err(error) = service.apply(|engine| {
-                    engine
-                        .command(EngineCommand::SetGain {
-                            source_id: source_id.clone(),
-                            sink_id: sink_id.clone(),
-                            gain_db,
-                        })
-                        .map_err(|error| error.to_string())
-                }) {
-                    let _ = out.send(UiEvent::Error(error));
+            UiCommand::ApplyGain { updates } => {
+                for (source_id, sink_id, gain_db) in updates {
+                    if let Err(error) = service.apply(|engine| {
+                        engine
+                            .command(EngineCommand::SetGain {
+                                source_id,
+                                sink_id,
+                                gain_db,
+                            })
+                            .map_err(|error| error.to_string())
+                    }) {
+                        let _ = out.send(UiEvent::Error(error));
+                    }
                 }
             }
-            UiCommand::ApplyMuted { muted } => {
-                if let Err(error) = service.apply(|engine| {
-                    engine
-                        .command(EngineCommand::SetMuted {
-                            source_id: source_id.clone(),
-                            sink_id: sink_id.clone(),
-                            muted,
-                        })
-                        .map_err(|error| error.to_string())
-                }) {
-                    let _ = out.send(UiEvent::Error(error));
+            UiCommand::ApplyMuted { updates } => {
+                for (source_id, sink_id, muted) in updates {
+                    if let Err(error) = service.apply(|engine| {
+                        engine
+                            .command(EngineCommand::SetMuted {
+                                source_id,
+                                sink_id,
+                                muted,
+                            })
+                            .map_err(|error| error.to_string())
+                    }) {
+                        let _ = out.send(UiEvent::Error(error));
+                    }
                 }
             }
             UiCommand::Shutdown => break, // 实际在命令接收处处理，防御性覆盖
@@ -162,6 +163,12 @@ struct RefreshResult {
     process_entries: Option<Vec<(u32, String)>>,
     sink_entries: Option<Vec<(String, String)>>,
     errors: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddTarget {
+    Source,
+    Sink,
 }
 
 /// UI 侧应用状态（Rc<RefCell> 供回调共享）。
@@ -182,6 +189,10 @@ struct AppState {
     refreshing: bool,
     selected_process_pid: Option<u32>,
     selected_sink_id: Option<String>,
+    /// 主路由页的可编辑草稿；所有 source/sink/send 均使用稳定 ID。
+    route_editor: RouteEditor,
+    /// 加号点击后等待本轮异步枚举完成，再将当前选择加入草稿。
+    pending_add: Option<AddTarget>,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -206,6 +217,8 @@ fn main() -> Result<(), slint::PlatformError> {
         refreshing: false,
         selected_process_pid: None,
         selected_sink_id: None,
+        route_editor: RouteEditor::new(RouteGraph::default()),
+        pending_add: None,
     }));
 
     // 初始填充设备/进程；枚举在后台线程执行，避免阻塞 UI。
@@ -219,12 +232,12 @@ fn main() -> Result<(), slint::PlatformError> {
             request_refresh(&ui_weak, &state_rc);
         });
     }
-    // 主路由页三个列标题的加号先复用异步枚举入口：在动态卡片接入前，
-    // 点击加号不会创建虚假的虚拟设备，而是刷新可选来源/输出列表。
+    // 加号先刷新可选列表，枚举完成后把当前选择实际加入 RouteGraph 草稿。
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_add_source(move || {
+            state_rc.borrow_mut().pending_add = Some(AddTarget::Source);
             request_refresh(&ui_weak, &state_rc);
         });
     }
@@ -232,6 +245,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_add_output(move || {
+            state_rc.borrow_mut().pending_add = Some(AddTarget::Sink);
             request_refresh(&ui_weak, &state_rc);
         });
     }
@@ -239,6 +253,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_add_monitor(move || {
+            state_rc.borrow_mut().pending_add = Some(AddTarget::Sink);
             request_refresh(&ui_weak, &state_rc);
         });
     }
@@ -454,44 +469,55 @@ fn apply_refresh_result(
     result: RefreshResult,
 ) {
     let Some(ui) = ui.upgrade() else { return };
-    let mut state = state.borrow_mut();
-    if let Some(entries) = result.process_entries {
-        let ids: Vec<u32> = entries.iter().map(|(pid, _)| *pid).collect();
-        let names: Vec<SharedString> = entries
-            .iter()
-            .map(|(pid, name)| SharedString::from(format!("{name} (PID {pid})")))
-            .collect();
-        let index = preserve_selection_index(
-            state.selected_process_pid.as_ref(),
-            &ids,
-            ui.get_source_index(),
-        );
-        state.process_pids = ids;
-        state.selected_process_pid = usize::try_from(index)
-            .ok()
-            .and_then(|index| state.process_pids.get(index).copied());
-        ui.set_source_model(Rc::new(VecModel::from(names)).into());
-        ui.set_source_index(index);
-    }
-    if let Some(entries) = result.sink_entries {
-        let ids: Vec<String> = entries.iter().map(|(id, _)| id.clone()).collect();
-        let names: Vec<SharedString> = entries
-            .iter()
-            .map(|(_, name)| SharedString::from(name.clone()))
-            .collect();
-        let index =
-            preserve_selection_index(state.selected_sink_id.as_ref(), &ids, ui.get_output_index());
-        state.sink_ids = ids;
-        state.selected_sink_id = usize::try_from(index)
-            .ok()
-            .and_then(|index| state.sink_ids.get(index).cloned());
-        ui.set_output_model(Rc::new(VecModel::from(names)).into());
-        ui.set_output_index(index);
-    }
+    let pending_add = {
+        let mut state = state.borrow_mut();
+        if let Some(entries) = result.process_entries {
+            let ids: Vec<u32> = entries.iter().map(|(pid, _)| *pid).collect();
+            let names: Vec<SharedString> = entries
+                .iter()
+                .map(|(pid, name)| SharedString::from(format!("{name} (PID {pid})")))
+                .collect();
+            let index = preserve_selection_index(
+                state.selected_process_pid.as_ref(),
+                &ids,
+                ui.get_source_index(),
+            );
+            state.process_pids = ids;
+            state.selected_process_pid = usize::try_from(index)
+                .ok()
+                .and_then(|index| state.process_pids.get(index).copied());
+            ui.set_source_model(Rc::new(VecModel::from(names)).into());
+            ui.set_source_index(index);
+        }
+        if let Some(entries) = result.sink_entries {
+            let ids: Vec<String> = entries.iter().map(|(id, _)| id.clone()).collect();
+            let names: Vec<SharedString> = entries
+                .iter()
+                .map(|(_, name)| SharedString::from(name.clone()))
+                .collect();
+            let index = preserve_selection_index(
+                state.selected_sink_id.as_ref(),
+                &ids,
+                ui.get_output_index(),
+            );
+            state.sink_ids = ids;
+            state.selected_sink_id = usize::try_from(index)
+                .ok()
+                .and_then(|index| state.sink_ids.get(index).cloned());
+            ui.set_output_model(Rc::new(VecModel::from(names)).into());
+            ui.set_output_index(index);
+        }
+        state.pending_add.take()
+    };
     ui.set_refreshing(false);
     if !result.errors.is_empty() {
         ui.set_engine_state(SharedString::from(result.errors.join("；")));
-    } else if !state.running {
+    } else if let Some(target) = pending_add {
+        match target {
+            AddTarget::Source => add_selected_source(&ui, state),
+            AddTarget::Sink => add_selected_sink(&ui, state),
+        }
+    } else if !state.borrow().running {
         ui.set_engine_phase(SharedString::from("stopped"));
         ui.set_engine_state(SharedString::from("已停止"));
     }
@@ -521,38 +547,184 @@ fn preserve_selection_index<T: PartialEq>(
     }
 }
 
-/// 按当前 UI 选择构造路由图。
-fn build_graph(state: &AppState, ui: &MainWindow) -> Result<RouteGraph, String> {
+fn source_id_for_pid(pid: u32) -> SourceId {
+    SourceId(format!("process:{pid}"))
+}
+
+fn sink_id_for_endpoint(endpoint_id: &str) -> SinkId {
+    SinkId(format!("sink:{endpoint_id}"))
+}
+
+fn selected_source(state: &AppState, ui: &MainWindow) -> Result<(u32, String), String> {
+    let index = usize::try_from(ui.get_source_index()).map_err(|_| "请先选择音频来源进程")?;
     let pid = *state
         .process_pids
-        .get(ui.get_source_index() as usize)
+        .get(index)
         .ok_or("请先选择音频来源进程")?;
-    let sink_id = state
+    let name = ui
+        .get_source_model()
+        .row_data(index)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| format!("进程 PID {pid}"));
+    Ok((pid, name))
+}
+
+fn selected_sink(state: &AppState, ui: &MainWindow) -> Result<(String, String), String> {
+    let index = usize::try_from(ui.get_output_index()).map_err(|_| "请先选择输出设备")?;
+    let endpoint_id = state
         .sink_ids
-        .get(ui.get_output_index() as usize)
+        .get(index)
+        .cloned()
         .ok_or("请先选择输出设备")?;
-    Ok(RouteGraph {
-        sources: vec![SourceSpec {
-            id: SourceId("process".into()),
-            kind: SourceKind::ProcessLoopback,
-            endpoint_id: None,
-            process_id: Some(pid),
-            display_name: format!("process:{pid}"),
-        }],
-        sinks: vec![SinkSpec {
-            id: SinkId("sink".into()),
-            endpoint_id: EndpointId(sink_id.clone()),
-            display_name: "sink".into(),
-        }],
-        sends: vec![SendSpec {
-            source_id: SourceId("process".into()),
-            sink_id: SinkId("sink".into()),
-            gain_db: state.gain_db,
-            muted: state.muted,
+    let name = ui
+        .get_output_model()
+        .row_data(index)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| endpoint_id.clone());
+    Ok((endpoint_id, name))
+}
+
+fn add_selected_source(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let (pid, display_name) = match selected_source(&state.borrow(), ui) {
+        Ok(value) => value,
+        Err(message) => {
+            ui.set_engine_state(SharedString::from(message));
+            return;
+        }
+    };
+    let source_id = source_id_for_pid(pid);
+    let mut state_borrow = state.borrow_mut();
+    if state_borrow
+        .route_editor
+        .draft()
+        .sources
+        .iter()
+        .any(|source| source.id == source_id)
+    {
+        ui.set_engine_state(SharedString::from("该音频来源已在当前路由中"));
+        return;
+    }
+    let source = SourceSpec {
+        id: source_id.clone(),
+        kind: SourceKind::ProcessLoopback,
+        endpoint_id: None,
+        process_id: Some(pid),
+        display_name,
+    };
+    if let Err(error) = state_borrow
+        .route_editor
+        .apply(RouteEdit::AddSource(source))
+    {
+        ui.set_engine_state(SharedString::from(error.to_string()));
+        return;
+    }
+    let sinks = state_borrow.route_editor.draft().sinks.clone();
+    for sink in sinks {
+        let send = SendSpec {
+            source_id: source_id.clone(),
+            sink_id: sink.id,
+            gain_db: state_borrow.gain_db,
+            muted: state_borrow.muted,
             enabled: true,
             channel_map: Vec::new(),
-        }],
-    })
+        };
+        if let Err(error) = state_borrow.route_editor.apply(RouteEdit::SetSend(send)) {
+            ui.set_engine_state(SharedString::from(error.to_string()));
+            return;
+        }
+    }
+    ui.set_engine_state(SharedString::from("已添加音频来源"));
+    drop(state_borrow);
+    sync_route_counts(ui, state);
+    submit_draft_if_ready(ui, state);
+}
+
+fn add_selected_sink(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let (endpoint_id, display_name) = match selected_sink(&state.borrow(), ui) {
+        Ok(value) => value,
+        Err(message) => {
+            ui.set_engine_state(SharedString::from(message));
+            return;
+        }
+    };
+    let sink_id = sink_id_for_endpoint(&endpoint_id);
+    let mut state_borrow = state.borrow_mut();
+    if state_borrow
+        .route_editor
+        .draft()
+        .sinks
+        .iter()
+        .any(|sink| sink.id == sink_id)
+    {
+        ui.set_engine_state(SharedString::from("该输出设备已在当前路由中"));
+        return;
+    }
+    let sink = SinkSpec {
+        id: sink_id.clone(),
+        endpoint_id: EndpointId(endpoint_id),
+        display_name,
+    };
+    if let Err(error) = state_borrow.route_editor.apply(RouteEdit::AddSink(sink)) {
+        ui.set_engine_state(SharedString::from(error.to_string()));
+        return;
+    }
+    let sources = state_borrow.route_editor.draft().sources.clone();
+    for source in sources {
+        let send = SendSpec {
+            source_id: source.id,
+            sink_id: sink_id.clone(),
+            gain_db: state_borrow.gain_db,
+            muted: state_borrow.muted,
+            enabled: true,
+            channel_map: Vec::new(),
+        };
+        if let Err(error) = state_borrow.route_editor.apply(RouteEdit::SetSend(send)) {
+            ui.set_engine_state(SharedString::from(error.to_string()));
+            return;
+        }
+    }
+    ui.set_engine_state(SharedString::from("已添加输出设备"));
+    drop(state_borrow);
+    sync_route_counts(ui, state);
+    submit_draft_if_ready(ui, state);
+}
+
+fn submit_draft_if_ready(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let graph = state.borrow().route_editor.draft().clone();
+    if graph.sources.is_empty() || graph.sinks.is_empty() || graph.sends.is_empty() {
+        return;
+    }
+    if let Err(error) = graph.validate() {
+        ui.set_engine_state(SharedString::from(error.to_string()));
+        return;
+    }
+    if state.borrow().engine_active {
+        ui.set_engine_phase(SharedString::from("starting"));
+        ui.set_engine_state(SharedString::from("路由草稿已更新，正在重启…"));
+        send_command(state, UiCommand::Start { graph });
+    }
+}
+
+fn sync_route_counts(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
+    let state_borrow = state.borrow();
+    ui.set_route_source_count(state_borrow.route_editor.draft().sources.len() as i32);
+    ui.set_route_output_count(state_borrow.route_editor.draft().sinks.len() as i32);
+}
+
+/// 按当前 UI 选择构造并校验路由图草稿。
+fn build_graph(state: &AppState, _ui: &MainWindow) -> Result<RouteGraph, String> {
+    let graph = state.route_editor.draft().clone();
+    if graph.sources.is_empty() {
+        return Err("请先点击音频来源列的 + 添加音源".into());
+    }
+    if graph.sinks.is_empty() {
+        return Err("请先点击输出通道列的 + 添加输出设备".into());
+    }
+    if graph.sends.is_empty() {
+        return Err("当前路由没有可用的发送连接".into());
+    }
+    graph.validate().map_err(|error| error.to_string())?;
+    Ok(graph)
 }
 
 /// 启动引擎：构建路由图并交给后台服务线程。
@@ -565,9 +737,25 @@ fn start_engine(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
             return;
         }
     };
-    let pid = state.borrow().process_pids[ui.get_source_index() as usize];
-    let sink_id = state.borrow().sink_ids[ui.get_output_index() as usize].clone();
-    state.borrow_mut().committed_route = Some((pid, sink_id));
+    let committed = {
+        let state_borrow = state.borrow();
+        state_borrow
+            .route_editor
+            .draft()
+            .sources
+            .first()
+            .and_then(|source| {
+                source.process_id.and_then(|pid| {
+                    state_borrow
+                        .route_editor
+                        .draft()
+                        .sinks
+                        .first()
+                        .map(|sink| (pid, sink.endpoint_id.0.clone()))
+                })
+            })
+    };
+    state.borrow_mut().committed_route = committed;
     ui.set_engine_phase(SharedString::from("starting"));
     ui.set_engine_state(SharedString::from("正在启动…"));
     send_command(state, UiCommand::Start { graph });
@@ -575,8 +763,29 @@ fn start_engine(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
 
 /// 应用增益：记录参数（未启动时下次启动生效）并热更新运行中的引擎。
 fn apply_gain(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>, gain_db: f32) {
-    state.borrow_mut().gain_db = gain_db;
-    send_command(state, UiCommand::ApplyGain { gain_db });
+    let updates = {
+        let mut state_borrow = state.borrow_mut();
+        state_borrow.gain_db = gain_db;
+        let sends = state_borrow.route_editor.draft().sends.clone();
+        let mut updates = Vec::with_capacity(sends.len());
+        for send in sends {
+            if state_borrow
+                .route_editor
+                .apply(RouteEdit::SetSendGain {
+                    source_id: send.source_id.clone(),
+                    sink_id: send.sink_id.clone(),
+                    gain_db,
+                })
+                .is_ok()
+            {
+                updates.push((send.source_id, send.sink_id, gain_db));
+            }
+        }
+        updates
+    };
+    if !updates.is_empty() {
+        send_command(state, UiCommand::ApplyGain { updates });
+    }
     // 提升感：UI 立即回显（引擎侧 block 边界生效）。
     if let Some(ui) = ui.upgrade() {
         ui.set_gain(gain_db);
@@ -602,8 +811,100 @@ fn toggle_monitor(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>, enabled:
 }
 
 fn apply_effective_mute(state: &Rc<RefCell<AppState>>, muted: bool) {
-    state.borrow_mut().muted = muted;
-    send_command(state, UiCommand::ApplyMuted { muted });
+    let updates = {
+        let mut state_borrow = state.borrow_mut();
+        state_borrow.muted = muted;
+        let sends = state_borrow.route_editor.draft().sends.clone();
+        let mut updates = Vec::with_capacity(sends.len());
+        for send in sends {
+            if state_borrow
+                .route_editor
+                .apply(RouteEdit::SetSendMuted {
+                    source_id: send.source_id.clone(),
+                    sink_id: send.sink_id.clone(),
+                    muted,
+                })
+                .is_ok()
+            {
+                updates.push((send.source_id, send.sink_id, muted));
+            }
+        }
+        updates
+    };
+    if !updates.is_empty() {
+        send_command(state, UiCommand::ApplyMuted { updates });
+    }
+}
+
+fn replace_source_selection(state: &mut AppState, pid: u32, display_name: String) {
+    let next_id = source_id_for_pid(pid);
+    let sources = &state.route_editor.draft().sources;
+    if sources.first().is_some_and(|source| source.id == next_id)
+        || sources.iter().skip(1).any(|source| source.id == next_id)
+    {
+        return;
+    }
+    if let Some(old) = state.route_editor.draft().sources.first().cloned() {
+        let _ = state.route_editor.apply(RouteEdit::RemoveSource(old.id));
+    }
+    let source = SourceSpec {
+        id: next_id.clone(),
+        kind: SourceKind::ProcessLoopback,
+        endpoint_id: None,
+        process_id: Some(pid),
+        display_name,
+    };
+    if state
+        .route_editor
+        .apply(RouteEdit::AddSource(source))
+        .is_err()
+    {
+        return;
+    }
+    for sink in state.route_editor.draft().sinks.clone() {
+        let _ = state.route_editor.apply(RouteEdit::SetSend(SendSpec {
+            source_id: next_id.clone(),
+            sink_id: sink.id,
+            gain_db: state.gain_db,
+            muted: state.muted,
+            enabled: true,
+            channel_map: Vec::new(),
+        }));
+    }
+}
+
+fn replace_sink_selection(state: &mut AppState, endpoint_id: String, display_name: String) {
+    let next_id = sink_id_for_endpoint(&endpoint_id);
+    let sinks = &state.route_editor.draft().sinks;
+    if sinks.first().is_some_and(|sink| sink.id == next_id)
+        || sinks.iter().skip(1).any(|sink| sink.id == next_id)
+    {
+        return;
+    }
+    if let Some(old) = state.route_editor.draft().sinks.first().cloned() {
+        let _ = state.route_editor.apply(RouteEdit::RemoveSink(old.id));
+    }
+    if state
+        .route_editor
+        .apply(RouteEdit::AddSink(SinkSpec {
+            id: next_id.clone(),
+            endpoint_id: EndpointId(endpoint_id),
+            display_name,
+        }))
+        .is_err()
+    {
+        return;
+    }
+    for source in state.route_editor.draft().sources.clone() {
+        let _ = state.route_editor.apply(RouteEdit::SetSend(SendSpec {
+            source_id: source.id,
+            sink_id: next_id.clone(),
+            gain_db: state.gain_db,
+            muted: state.muted,
+            enabled: true,
+            channel_map: Vec::new(),
+        }));
+    }
 }
 
 /// 运行中切换 source/sink 属于拓扑变化：后台自动停止并重建引擎，
@@ -612,37 +913,26 @@ fn selection_changed(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
     remember_selection(ui, state);
     let Some(ui) = ui.upgrade() else { return };
     let mut state_borrow = state.borrow_mut();
-    // degraded/reconnecting 时引擎仍在运行旧路由，同样需要重启，因此
-    // 门控用 engine_active（Running/Degraded/Reconnecting）而非 running。
-    if !state_borrow.engine_active {
-        return;
+    if let Ok((pid, name)) = selected_source(&state_borrow, &ui) {
+        replace_source_selection(&mut state_borrow, pid, name);
     }
-    let Some(pid) = state_borrow
-        .process_pids
-        .get(ui.get_source_index() as usize)
-        .copied()
-    else {
-        return;
-    };
-    let Some(sink_id) = state_borrow
-        .sink_ids
-        .get(ui.get_output_index() as usize)
-        .cloned()
-    else {
-        return;
-    };
-    if state_borrow.committed_route == Some((pid, sink_id.clone())) {
-        return; // 选择未变化，避免重复重启
+    if let Ok((endpoint_id, name)) = selected_sink(&state_borrow, &ui) {
+        replace_sink_selection(&mut state_borrow, endpoint_id, name);
     }
-    let graph = match build_graph(&state_borrow, &ui) {
-        Ok(graph) => graph,
-        Err(_) => return,
-    };
-    state_borrow.committed_route = Some((pid, sink_id));
-    ui.set_engine_phase(SharedString::from("starting"));
-    ui.set_engine_state(SharedString::from("路由变化，正在重启…"));
+    let graph = build_graph(&state_borrow, &ui).ok();
+    let should_restart = state_borrow.engine_active && graph.is_some();
     drop(state_borrow);
-    send_command(state, UiCommand::Start { graph });
+    sync_route_counts(&ui, state);
+    if should_restart {
+        ui.set_engine_phase(SharedString::from("starting"));
+        ui.set_engine_state(SharedString::from("路由变化，正在重启…"));
+        send_command(
+            state,
+            UiCommand::Start {
+                graph: graph.unwrap(),
+            },
+        );
+    }
 }
 
 /// 低频消费服务事件，更新展示模型（不轮询实时内部结构）。
@@ -709,7 +999,10 @@ fn poll_service_events(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_mute, phase_and_label, preserve_selection_index, stats_text};
+    use super::{
+        effective_mute, phase_and_label, preserve_selection_index, sink_id_for_endpoint,
+        source_id_for_pid, stats_text,
+    };
     use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats};
 
     #[test]
@@ -773,5 +1066,15 @@ mod tests {
         let stats = AudioEngineStats::default();
         let text = stats_text(&stats);
         assert!(text.contains("-120.0 dBFS"));
+    }
+
+    #[test]
+    fn route_node_ids_are_stable_for_same_backend_identity() {
+        assert_eq!(source_id_for_pid(42), source_id_for_pid(42));
+        assert_ne!(source_id_for_pid(42), source_id_for_pid(43));
+        assert_eq!(
+            sink_id_for_endpoint("{0.0.0}.{endpoint}"),
+            sink_id_for_endpoint("{0.0.0}.{endpoint}")
+        );
     }
 }
