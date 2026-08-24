@@ -1,311 +1,910 @@
-import { Button, CheckBox, ComboBox, Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
 
 component BrandMark inherits Path {
-    width: 32px;
-    height: 32px;
-    stroke: #2bb3a5;
+    width: 30px;
+    height: 30px;
+    stroke: #20a894;
     stroke-width: 3px;
     fill: transparent;
-    MoveTo { x: 3; y: 21; }
-    LineTo { x: 16; y: 13; }
-    LineTo { x: 29; y: 21; }
-    MoveTo { x: 3; y: 28; }
-    LineTo { x: 16; y: 20; }
-    LineTo { x: 29; y: 28; }
-}
-
-component PlusMark inherits Path {
-    width: 18px;
-    height: 18px;
-    stroke: #2bb3a5;
-    stroke-width: 2px;
-    fill: transparent;
-    MoveTo { x: 9; y: 2; }
-    LineTo { x: 9; y: 16; }
-    MoveTo { x: 2; y: 9; }
-    LineTo { x: 16; y: 9; }
+    MoveTo { x: 2; y: 19; }
+    LineTo { x: 15; y: 11; }
+    LineTo { x: 28; y: 19; }
+    MoveTo { x: 2; y: 26; }
+    LineTo { x: 15; y: 18; }
+    LineTo { x: 28; y: 26; }
 }
 
 component Toggle inherits Rectangle {
     in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <string> label: "开关";
     callback toggled(bool);
-    width: 44px;
-    height: 25px;
-    border-radius: 13px;
-    background: root.checked ? #2bb3a5 : #d9dde1;
-    Rectangle {
-        x: root.checked ? parent.width - 23px : 2px;
-        y: 2px;
-        width: 21px;
-        height: 21px;
-        border-radius: 11px;
-        background: #ffffff;
-        animate x { duration: 140ms; }
+
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.checked ? #20a894 : #cbd2d8;
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
     }
+
+    Rectangle {
+        x: root.checked ? parent.width - 20px : 2px;
+        y: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        animate x { duration: 120ms; }
+    }
+
     TouchArea {
+        enabled: root.enabled;
         clicked => {
             root.checked = !root.checked;
             root.toggled(root.checked);
         }
     }
-    animate background { duration: 140ms; }
-}
 
-component StatusToggle inherits Rectangle {
-    in property <bool> checked: false;
-    width: 44px;
-    height: 25px;
-    border-radius: 13px;
-    background: root.checked ? #2bb3a5 : #d9dde1;
-    Rectangle {
-        x: root.checked ? parent.width - 23px : 2px;
-        y: 2px;
-        width: 21px;
-        height: 21px;
-        border-radius: 11px;
-        background: #ffffff;
-    }
+    animate background { duration: 120ms; }
 }
 
 component LevelMeter inherits Rectangle {
     in property <float> level: 0;
-    height: 7px;
-    border-radius: 4px;
-    background: #e1e5e8;
+
+    height: 6px;
+    border-radius: 3px;
+    background: #e4e8eb;
     clip: true;
+
     Rectangle {
         width: root.level * parent.width;
         height: parent.height;
-        border-radius: 4px;
-        background: root.level > 0.9 ? #dd6969 : (root.level > 0.65 ? #e4a43e : #2bb3a5);
+        border-radius: 3px;
+        background: root.level > 0.9 ? #d95858 : (root.level > 0.68 ? #e3a233 : #20a894);
+        animate width { duration: 80ms; }
     }
 }
 
-component Port inherits Rectangle {
-    in property <bool> active: false;
-    width: 11px;
-    height: 11px;
-    border-radius: 6px;
-    background: root.active ? #2bb3a5 : #c5cbd0;
-}
-
-component ChannelLine inherits HorizontalBox {
+component StatusPill inherits Rectangle {
     in property <string> label: "";
-    in property <float> level: 0;
     in property <bool> active: false;
-    in property <bool> input-port: true;
-    in property <bool> output-port: true;
-    height: 27px;
-    padding: 0;
-    spacing: 8px;
-    Port { visible: root.input-port; active: root.active; }
-    Text { text: root.label; width: 42px; color: #626a73; font-size: 12px; vertical-alignment: center; }
-    LevelMeter { level: root.level; horizontal-stretch: 1; }
-    Port { visible: root.output-port; active: root.active; }
+
+    height: 24px;
+    width: 64px;
+    border-radius: 4px;
+    background: root.active ? #e2f5f1 : #eef1f3;
+
+    Text {
+        text: root.label;
+        color: root.active ? #147f70 : #6f7a83;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
 }
 
-component HeaderAction inherits Rectangle {
+component ActionButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> enabled: true;
     callback clicked();
-    width: 32px;
-    height: 32px;
-    border-radius: 16px;
-    background: #e7f7f4;
-    PlusMark { x: 7px; y: 7px; }
-    TouchArea { clicked => { root.clicked(); } }
+
+    width: 86px;
+    height: 34px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #d0d7de;
+    background: !root.enabled ? #f2f4f5 : (button-touch.has-hover ? #eef7f5 : #ffffff);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: root.enabled ? #42505c : #a0a8af;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    button-touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
 }
 
-component SidebarRoute inherits Rectangle {
-    in property <string> name: "";
-    in property <string> detail: "";
-    in property <bool> selected: false;
-    width: 100%;
-    height: 62px;
-    border-radius: 8px;
-    background: root.selected ? #e4e8eb : transparent;
+component SelectField inherits Rectangle {
+    in property <[string]> model: [];
+    in-out property <int> current-index: -1;
+    in property <bool> enabled: true;
+    callback selected(int);
+    private property <string> current-label: root.current-index >= 0
+        && root.current-index < root.model.length
+        ? root.model[root.current-index]
+        : "";
+
+    height: 34px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: select-touch.has-hover ? #20a894 : #d0d7de;
+    background: root.enabled ? #ffffff : #f2f4f5;
+    accessible-role: combobox;
+    accessible-label: root.current-label;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: false;
+    accessible-action-expand => { select-popup.show(); }
+    clip: true;
+
     HorizontalBox {
-        padding-left: 12px;
+        padding-left: 10px;
         padding-right: 10px;
-        spacing: 9px;
-        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.selected ? #2bb3a5 : #b7bec4; }
-        VerticalBox {
-            padding: 0;
-            spacing: 2px;
-            Text { text: root.name; color: #30363d; font-size: 13px; font-weight: 700; }
-            Text { text: root.detail; color: #879099; font-size: 11px; }
+        spacing: 8px;
+
+        Text {
+            text: root.current-label == "" ? "请选择" : root.current-label;
+            color: root.current-label == "" ? #9aa3ab : #334155;
+            font-size: 10px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Path {
+            width: 12px;
+            height: 12px;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 12;
+            viewbox-height: 12;
+            stroke: #6b7785;
+            stroke-width: 1.5px;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            fill: transparent;
+            opacity: root.enabled ? 1 : 0.45;
+            MoveTo { x: 3; y: 4.5; }
+            LineTo { x: 6; y: 7.5; }
+            LineTo { x: 9; y: 4.5; }
+        }
+    }
+
+    select-touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { select-popup.show(); }
+    }
+
+    select-popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: root.width;
+        height: min(6, root.model.length) * 30px + 8px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #c8d0d6;
+            background: #ffffff;
+            clip: true;
+
+            Flickable {
+                width: parent.width;
+                height: parent.height;
+                viewport-height: root.model.length * 30px + 8px;
+
+                option-list := VerticalBox {
+                    width: root.width;
+                    height: root.model.length * 30px + 8px;
+                    padding: 4px;
+                    spacing: 0;
+
+                    for option[index] in root.model : Rectangle {
+                        height: 30px;
+                        border-radius: 3px;
+                        background: index == root.current-index
+                            ? #e1f4f0
+                            : (option-touch.has-hover ? #f1f4f5 : #ffffff);
+                        accessible-role: list-item;
+                        accessible-label: option;
+                        accessible-action-default => {
+                            root.current-index = index;
+                            root.selected(index);
+                            select-popup.close();
+                        }
+
+                        Text {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            text: option;
+                            color: #334155;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        option-touch := TouchArea {
+                            clicked => {
+                                root.current-index = index;
+                                root.selected(index);
+                                select-popup.close();
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-component SourceCard inherits Rectangle {
+component ChevronDown inherits Path {
+    width: 12px;
+    height: 12px;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 12;
+    viewbox-height: 12;
+    stroke: #6b7785;
+    stroke-width: 1.5px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    MoveTo { x: 3; y: 4.5; }
+    LineTo { x: 6; y: 7.5; }
+    LineTo { x: 9; y: 4.5; }
+}
+
+component ChevronRight inherits Path {
+    width: 12px;
+    height: 12px;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 12;
+    viewbox-height: 12;
+    stroke: #71808c;
+    stroke-width: 1.5px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    MoveTo { x: 4.5; y: 3; }
+    LineTo { x: 7.5; y: 6; }
+    LineTo { x: 4.5; y: 9; }
+}
+
+component SourceGlyph inherits Path {
+    width: 20px;
+    height: 20px;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 20;
+    viewbox-height: 20;
+    stroke: #188f7e;
+    stroke-width: 1.8px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    MoveTo { x: 2; y: 10; }
+    LineTo { x: 5; y: 10; }
+    LineTo { x: 7; y: 5; }
+    LineTo { x: 10; y: 15; }
+    LineTo { x: 13; y: 7; }
+    LineTo { x: 15; y: 10; }
+    LineTo { x: 18; y: 10; }
+}
+
+component OutputGlyph inherits Path {
+    width: 20px;
+    height: 20px;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 20;
+    viewbox-height: 20;
+    stroke: #52606d;
+    stroke-width: 1.7px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    fill: transparent;
+    MoveTo { x: 3; y: 8; }
+    LineTo { x: 6; y: 8; }
+    LineTo { x: 10; y: 4; }
+    LineTo { x: 10; y: 16; }
+    LineTo { x: 6; y: 12; }
+    LineTo { x: 3; y: 12; }
+    Close { }
+    MoveTo { x: 13; y: 7; }
+    QuadraticTo { control-x: 17; control-y: 10; x: 13; y: 13; }
+}
+
+component RouteSocket inherits Rectangle {
+    in property <bool> active: false;
+
+    width: 14px;
+    height: 14px;
+    border-radius: 7px;
+    border-width: 2px;
+    border-color: root.active ? #29b6a2 : #9aa6b2;
+    background: #ffffff;
+
+    Rectangle {
+        x: 3px;
+        y: 3px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: root.active ? #29b6a2 : #c2cbd2;
+    }
+}
+
+component CompactMeter inherits HorizontalBox {
+    in property <float> level: 0;
+
+    height: 20px;
+    padding: 0;
+    spacing: 9px;
+
+    Text {
+        width: 20px;
+        text: "LR";
+        color: #6b7785;
+        font-size: 10px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    LevelMeter {
+        level: root.level;
+        height: 8px;
+        horizontal-stretch: 1;
+    }
+}
+
+component GainSlider inherits Rectangle {
+    in-out property <float> value: 0;
+    in property <bool> enabled: true;
+    callback changed(float);
+    private property <float> ratio: (root.value + 60) / 72;
+
+    height: 28px;
+    background: transparent;
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: slider;
+    accessible-label: "路由增益 " + root.value + " dB";
+    accessible-enabled: root.enabled;
+
+    function set-from-position(position: length) {
+        root.value = round(max(0px, min(root.width, position)) / root.width * 72 - 60);
+        root.changed(root.value);
+    }
+
+    Rectangle {
+        y: 12px;
+        width: parent.width;
+        height: 4px;
+        border-radius: 2px;
+        background: #dfe5e9;
+    }
+    Rectangle {
+        y: 12px;
+        width: max(0px, min(parent.width, root.ratio * parent.width));
+        height: 4px;
+        border-radius: 2px;
+        background: #29b6a2;
+    }
+    Rectangle {
+        x: max(0px, min(parent.width - 14px, root.ratio * (parent.width - 14px)));
+        y: 7px;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        border-width: 2px;
+        border-color: #29b6a2;
+        background: #ffffff;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000026;
+    }
+    gain-touch := TouchArea {
+        enabled: root.enabled;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.set-from-position(self.mouse-x);
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.set-from-position(self.mouse-x);
+            }
+        }
+    }
+}
+
+component SourceNode inherits Rectangle {
     in property <[string]> source-model: [];
     in-out property <int> source-index: -1;
+    in property <float> meter: 0;
     in-out property <float> gain: 0;
-    in-out property <bool> muted: false;
-    in property <float> meter-l: 0;
-    in property <float> meter-r: 0;
-    in property <bool> running: false;
-    callback apply-gain(float);
-    callback toggle-mute(bool);
+    in-out property <bool> expanded: false;
+    in-out property <bool> route-enabled: true;
     callback source-selected(int);
-    width: 260px;
-    height: 365px;
-    border-radius: 8px;
+    callback toggle-route(bool);
+    callback apply-gain(float);
+    private property <bool> has-source: root.source-index >= 0
+        && root.source-index < root.source-model.length;
+
+    width: 300px;
+    height: root.expanded ? 258px : 202px;
+    border-radius: 7px;
     border-width: 1px;
-    border-color: #d8dde1;
+    border-color: #d9e0e6;
     background: #ffffff;
-    VerticalBox {
-        padding: 16px;
-        spacing: 12px;
+    drop-shadow-blur: 8px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: #00000012;
+    animate height { duration: 140ms; }
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 55px;
+        border-radius: 7px;
+        background: #fafbfc;
+
         HorizontalBox {
-            height: 40px;
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            padding-left: 14px;
+            padding-right: 14px;
             spacing: 10px;
+
             Rectangle {
-                width: 38px;
-                height: 38px;
-                border-radius: 9px;
-                background: #e5f7f3;
-                BrandMark { width: 28px; height: 28px; x: 5px; y: 5px; }
+                width: 34px;
+                height: 34px;
+                border-radius: 7px;
+                background: #e5f6f2;
+                SourceGlyph { x: 7px; y: 7px; }
             }
             VerticalBox {
                 padding: 0;
-                spacing: 2px;
+                spacing: 1px;
                 horizontal-stretch: 1;
-                Text { text: root.source-index >= 0 ? root.source-model[root.source-index] : "未选择来源"; color: #282e35; font-size: 14px; font-weight: 700; overflow: elide; }
-                Text { text: "Process Loopback"; color: #899199; font-size: 11px; }
+                Text {
+                    text: root.has-source ? root.source-model[root.source-index] : "选择音频来源";
+                    color: #1e293b;
+                    font-size: 12px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                Text {
+                    text: "应用进程音频";
+                    color: #71808c;
+                    font-size: 10px;
+                }
             }
-            StatusToggle { checked: root.running; }
-        }
-        Rectangle { height: 1px; background: #edf0f2; }
-        ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.meter-l > 0.01; input-port: false; output-port: true; }
-        ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.meter-r > 0.01; input-port: false; output-port: true; }
-        Rectangle { height: 1px; background: #edf0f2; }
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "增益"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
-            Slider { minimum: -60; maximum: 12; value: root.gain; horizontal-stretch: 1; changed(value) => { root.gain = value; root.apply-gain(value); } }
-            Text { text: root.gain + " dB"; width: 46px; color: #626a73; font-size: 12px; vertical-alignment: center; }
-        }
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "静音"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
-            CheckBox { checked <=> root.muted; toggled => { root.toggle-mute(self.checked); } }
-        }
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "来源"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
-            ComboBox {
-                model: root.source-model;
-                current-index <=> root.source-index;
-                horizontal-stretch: 1;
-                selected(_) => { root.source-selected(root.source-index); }
-            }
-        }
-    }
-}
-
-component OutputCard inherits Rectangle {
-    in property <[string]> output-model: [];
-    in-out property <int> output-index: -1;
-    in property <float> meter-l: 0;
-    in property <float> meter-r: 0;
-    in property <bool> running: false;
-    in property <bool> route-enabled: true;
-    callback output-selected(int);
-    callback toggle-route(bool);
-    width: 230px;
-    height: 300px;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: #d8dde1;
-    background: #ffffff;
-    VerticalBox {
-        padding: 16px;
-        spacing: 10px;
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "Output Channels"; color: #282e35; font-size: 14px; font-weight: 700; }
-            Text { text: "2 Channels"; color: #899199; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
-        }
-        Rectangle { height: 1px; background: #edf0f2; }
-        ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: true; }
-        ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: true; }
-        Rectangle { height: 1px; background: #edf0f2; }
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "输出设备"; color: #626a73; font-size: 12px; vertical-alignment: center; }
-            ComboBox {
-                model: root.output-model;
-                current-index <=> root.output-index;
-                horizontal-stretch: 1;
-                selected(_) => { root.output-selected(root.output-index); }
-            }
-        }
-        Text {
-            text: root.output-index >= 0 ? root.output-model[root.output-index] : "未选择输出设备";
-            color: #626a73;
-            font-size: 11px;
-            overflow: elide;
-        }
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "路由"; color: #626a73; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
             Toggle {
-                checked: root.route-enabled;
+                checked <=> root.route-enabled;
+                enabled: root.has-source;
+                label: "启用此路由";
                 toggled(value) => { root.toggle-route(value); }
             }
         }
-    }
-}
-
-component MonitorCard inherits Rectangle {
-    in property <string> output-name: "";
-    in property <int> output-count: 0;
-    in property <float> meter-l: 0;
-    in property <float> meter-r: 0;
-    in property <bool> running: false;
-    width: 250px;
-    height: 270px;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: #d8dde1;
-    background: #ffffff;
-    VerticalBox {
-        padding: 16px;
-        spacing: 10px;
-        HorizontalBox {
-            spacing: 8px;
-            Text { text: "Monitors"; color: #282e35; font-size: 14px; font-weight: 700; }
-            Text { text: root.output-count + " Devices"; color: #899199; font-size: 11px; vertical-alignment: center; }
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            width: parent.width;
+            background: #edf0f2;
         }
-        Rectangle { height: 1px; background: #edf0f2; }
-        ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: false; }
-        ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: false; }
-        Text { text: root.output-name == "" ? "未选择输出设备" : root.output-name; color: #626a73; font-size: 11px; overflow: elide; }
+    }
+
+    VerticalBox {
+        x: 14px;
+        y: 66px;
+        width: parent.width - 28px;
+        height: parent.height - 78px;
+        padding: 0;
+        spacing: 8px;
+
+        Text { text: "音频来源"; color: #586672; font-size: 10px; font-weight: 600; }
+        SelectField {
+            model: root.source-model;
+            current-index <=> root.source-index;
+            enabled: root.source-model.length > 0;
+            height: 36px;
+            selected(index) => { root.source-selected(index); }
+        }
+        CompactMeter { level: root.route-enabled ? root.meter : 0; }
+
+        Rectangle {
+            height: 30px;
+            background: options-touch.has-hover ? #f5faf9 : transparent;
+            accessible-role: button;
+            accessible-label: root.expanded ? "收起高级设置" : "展开高级设置";
+            accessible-action-default => { root.expanded = !root.expanded; }
+
+            HorizontalBox {
+                padding-left: 2px;
+                padding-right: 2px;
+                spacing: 6px;
+                if root.expanded: ChevronDown { }
+                if !root.expanded: ChevronRight { }
+                Text {
+                    text: "高级设置";
+                    color: #596773;
+                    font-size: 10px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: round(root.gain) + " dB";
+                    color: #7a8792;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+            }
+            options-touch := TouchArea { clicked => { root.expanded = !root.expanded; } }
+        }
+
+        if root.expanded: Rectangle {
+            height: 48px;
+            border-radius: 5px;
+            border-width: 1px;
+            border-color: #e3e8ec;
+            background: #f8fafc;
+
+            GainSlider {
+                x: 9px;
+                y: 10px;
+                width: parent.width - 18px;
+                value <=> root.gain;
+                enabled: root.route-enabled;
+                changed(value) => { root.apply-gain(value); }
+            }
+        }
+    }
+
+    RouteSocket {
+        x: parent.width - 7px;
+        y: 143px;
+        active: root.route-enabled && root.has-source;
     }
 }
 
-component SignalRail inherits VerticalBox {
-    in property <bool> active: false;
-    width: 45px;
-    height: 220px;
+component OutputNode inherits Rectangle {
+    in property <[string]> output-model: [];
+    in-out property <int> output-index: -1;
+    in property <float> meter: 0;
+    in property <bool> route-enabled: true;
+    in property <bool> running: false;
+    callback output-selected(int);
+    private property <bool> has-output: root.output-index >= 0
+        && root.output-index < root.output-model.length;
+
+    width: 300px;
+    height: 202px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #d9e0e6;
+    background: #ffffff;
+    drop-shadow-blur: 8px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: #00000012;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 55px;
+        border-radius: 7px;
+        background: #fafbfc;
+
+        HorizontalBox {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 10px;
+
+            Rectangle {
+                width: 34px;
+                height: 34px;
+                border-radius: 7px;
+                background: #edf1f4;
+                OutputGlyph { x: 7px; y: 7px; }
+            }
+            VerticalBox {
+                padding: 0;
+                spacing: 1px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.has-output ? root.output-model[root.output-index] : "选择输出设备";
+                    color: #1e293b;
+                    font-size: 12px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+                Text {
+                    text: "Windows 输出设备";
+                    color: #71808c;
+                    font-size: 10px;
+                }
+            }
+            StatusPill {
+                width: 44px;
+                label: root.running ? "活动" : "待机";
+                active: root.running;
+            }
+        }
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            width: parent.width;
+            background: #edf0f2;
+        }
+    }
+
+    VerticalBox {
+        x: 14px;
+        y: 66px;
+        width: parent.width - 28px;
+        height: parent.height - 78px;
+        padding: 0;
+        spacing: 8px;
+
+        Text { text: "发送到"; color: #586672; font-size: 10px; font-weight: 600; }
+        SelectField {
+            model: root.output-model;
+            current-index <=> root.output-index;
+            enabled: root.output-model.length > 0;
+            height: 36px;
+            selected(index) => { root.output-selected(index); }
+        }
+        CompactMeter { level: root.route-enabled ? root.meter : 0; }
+        Rectangle { vertical-stretch: 1; }
+    }
+
+    RouteSocket {
+        x: -7px;
+        y: 143px;
+        active: root.route-enabled && root.has-output;
+    }
+}
+
+component MixChannelRow inherits HorizontalBox {
+    in property <string> label: "";
+    in property <float> level: 0;
+
+    height: 22px;
     padding: 0;
-    spacing: 36px;
-    alignment: center;
-    Rectangle { height: 2px; horizontal-stretch: 1; background: root.active ? #2bb3a5 : #c6cdd1; }
-    Rectangle { height: 2px; horizontal-stretch: 1; background: root.active ? #2bb3a5 : #c6cdd1; }
+    spacing: 8px;
+
+    Text {
+        width: 72px;
+        text: root.label;
+        color: #596773;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+    LevelMeter {
+        level: root.level;
+        height: 7px;
+        horizontal-stretch: 1;
+    }
+}
+
+component MixNode inherits Rectangle {
+    in property <float> meter: 0;
+    in property <bool> route-enabled: true;
+
+    width: 220px;
+    height: 202px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #d9e0e6;
+    background: #ffffff;
+    drop-shadow-blur: 8px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: #00000012;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 55px;
+        border-radius: 7px;
+        background: #fafbfc;
+
+        HorizontalBox {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 9px;
+
+            Rectangle {
+                width: 34px;
+                height: 34px;
+                border-radius: 7px;
+                background: #edf6f4;
+                Text {
+                    text: "1/2";
+                    color: #188f7e;
+                    font-size: 9px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            VerticalBox {
+                padding: 0;
+                spacing: 1px;
+                horizontal-stretch: 1;
+                Text { text: "Channels 1 & 2"; color: #1e293b; font-size: 12px; font-weight: 700; }
+                Text { text: "立体声通道组"; color: #71808c; font-size: 10px; }
+            }
+        }
+        Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: #edf0f2; }
+    }
+
+    VerticalBox {
+        x: 14px;
+        y: 66px;
+        width: parent.width - 28px;
+        height: parent.height - 78px;
+        padding: 0;
+        spacing: 6px;
+
+        Text { text: "默认立体声映射"; color: #586672; font-size: 10px; font-weight: 600; }
+        MixChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
+        MixChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+    }
+
+    RouteSocket { x: -7px; y: 143px; active: root.route-enabled; }
+    RouteSocket { x: parent.width - 7px; y: 143px; active: root.route-enabled; }
+}
+
+component TopologyRoute inherits Rectangle {
+    in property <[string]> source-model: [];
+    in property <[string]> output-model: [];
+    in-out property <int> source-index: -1;
+    in-out property <int> output-index: -1;
+    in-out property <float> gain: 0;
+    in-out property <bool> expanded: false;
+    in-out property <bool> route-enabled: true;
+    in property <bool> running: false;
+    in property <float> source-meter: 0;
+    in property <float> output-meter: 0;
+    callback source-selected(int);
+    callback output-selected(int);
+    callback toggle-route(bool);
+    callback apply-gain(float);
+    private property <bool> connected: root.route-enabled
+        && root.source-index >= 0
+        && root.output-index >= 0;
+
+    width: 960px;
+    height: root.expanded ? 278px : 222px;
+    background: transparent;
+    animate height { duration: 140ms; }
+
+    Path {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 278px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 960;
+        viewbox-height: 278;
+        stroke: root.connected ? #29b6a2 : #97a5b1;
+        stroke-width: root.connected ? 4px : 3px;
+        stroke-line-cap: round;
+        fill: transparent;
+        opacity: root.connected ? 1 : 0.7;
+        MoveTo { x: 300; y: 150; }
+        CubicTo {
+            control-1-x: 330;
+            control-1-y: 150;
+            control-2-x: 340;
+            control-2-y: 150;
+            x: 370;
+            y: 150;
+        }
+        MoveTo { x: 590; y: 150; }
+        CubicTo {
+            control-1-x: 620;
+            control-1-y: 150;
+            control-2-x: 630;
+            control-2-y: 150;
+            x: 660;
+            y: 150;
+        }
+    }
+
+    SourceNode {
+        x: 0;
+        y: 0;
+        source-model: root.source-model;
+        source-index <=> root.source-index;
+        meter: root.source-meter;
+        gain <=> root.gain;
+        expanded <=> root.expanded;
+        route-enabled <=> root.route-enabled;
+        source-selected(index) => { root.source-selected(index); }
+        toggle-route(value) => { root.toggle-route(value); }
+        apply-gain(value) => { root.apply-gain(value); }
+    }
+
+    MixNode {
+        x: 370px;
+        y: 0;
+        meter: root.source-meter;
+        route-enabled: root.connected;
+    }
+
+    OutputNode {
+        x: 660px;
+        y: 0;
+        output-model: root.output-model;
+        output-index <=> root.output-index;
+        meter: root.output-meter;
+        route-enabled: root.route-enabled;
+        running: root.running;
+        output-selected(index) => { root.output-selected(index); }
+    }
+}
+
+component SidebarItem inherits Rectangle {
+    in property <bool> selected: false;
+
+    height: 66px;
+    border-radius: 5px;
+    background: root.selected ? #e1f4f0 : transparent;
+    border-width: root.selected ? 1px : 0px;
+    border-color: #b7e1da;
+
+    HorizontalBox {
+        padding-left: 11px;
+        padding-right: 10px;
+        spacing: 10px;
+        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #20a894; }
+        VerticalBox {
+            padding: 0;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text { text: "主路由"; color: #1e293b; font-size: 12px; font-weight: 700; }
+            Text { text: "1 个声源 / 1 个输出"; color: #71808c; font-size: 10px; }
+        }
+    }
 }
 
 export component MainWindow inherits Window {
     title: "LoopMaster";
-    min-width: 1100px;
-    min-height: 820px;
-    background: #eef1f4;
+    min-width: 1260px;
+    min-height: 700px;
+    background: #e5e7eb;
+
     in-out property <[string]> source-model: [];
     in-out property <[string]> output-model: [];
     in-out property <int> source-index: -1;
     in-out property <int> output-index: -1;
     in-out property <float> gain: 0;
-    in-out property <bool> muted: false;
     in-out property <bool> running: false;
     in-out property <string> engine-state: "Stopped";
     in-out property <string> stats-text: "";
@@ -313,114 +912,182 @@ export component MainWindow inherits Window {
     in-out property <float> output-meter-l: 0;
     in-out property <float> output-meter-r: 0;
     in-out property <bool> route-enabled: true;
+    in-out property <bool> advanced-expanded: false;
+    private property <bool> route-ready: root.source-index >= 0 && root.output-index >= 0;
+    private property <bool> signal-active: root.route-ready && root.route-enabled;
+    private property <bool> engine-error: root.engine-state != "Running"
+        && root.engine-state != "Stopped"
+        && root.engine-state != "Starting";
+
     callback refresh();
     callback start-engine();
     callback stop-engine();
     callback apply-gain(float);
-    callback toggle-mute(bool);
     callback source-selected(int);
     callback output-selected(int);
     callback toggle-route(bool);
 
     VerticalBox {
-        padding: 20px;
-        spacing: 16px;
+        padding: 14px;
+        spacing: 12px;
+
         Rectangle {
-            height: 76px;
-            border-radius: 12px;
+            height: 56px;
+            border-radius: 6px;
             border-width: 1px;
-            border-color: #d6dce0;
+            border-color: #d0d7de;
             background: #ffffff;
             HorizontalBox {
-                padding-left: 20px;
-                padding-right: 20px;
-                spacing: 14px;
-                HorizontalBox {
-                    spacing: 13px;
-                    Rectangle { width: 38px; height: 38px; BrandMark { width: 32px; height: 32px; x: 3px; y: 3px; } }
-                    VerticalBox {
-                        padding: 0;
-                        spacing: 2px;
-                        Text { text: "LoopMaster"; color: #20262d; font-size: 21px; font-weight: 700; }
-                        Text { text: "虚拟音频路由设备"; color: #8a939b; font-size: 13px; }
-                    }
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 12px;
+                BrandMark { width: 30px; height: 30px; }
+                VerticalBox {
+                    width: 150px;
+                    padding: 0;
+                    spacing: 0;
+                    Text { text: "LoopMaster"; color: #1e293b; font-size: 17px; font-weight: 700; }
+                    Text { text: "Windows 音频路由器"; color: #7b8792; font-size: 10px; }
                 }
                 Rectangle { horizontal-stretch: 1; }
-                Button { text: "刷新设备"; clicked => { root.refresh(); } }
-                HeaderAction { clicked => { root.refresh(); } }
-                Rectangle { width: 1px; height: 25px; background: #e1e5e8; }
-                Text { text: root.running ? "On" : "Off"; color: root.running ? #20262d : #8a939b; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 4px;
+                    background: root.running ? #29b6a2 : #95a1ab;
+                }
+                Text {
+                    text: root.running ? "运行中" : "已停止";
+                    color: root.running ? #168878 : #65727d;
+                    font-size: 10px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                ActionButton { label: "刷新设备"; enabled: !root.running; clicked => { root.refresh(); } }
+                Rectangle { width: 1px; height: 24px; background: #e1e5e8; }
+                Text {
+                    text: "总引擎";
+                    color: #52606d;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
                 Toggle {
                     checked <=> root.running;
-                    toggled(value) => { if (value) { root.start-engine(); } else { root.stop-engine(); } }
+                    enabled: root.route-ready;
+                    label: "启动总引擎";
+                    toggled(value) => {
+                        if (value) { root.start-engine(); }
+                        else { root.stop-engine(); }
+                    }
                 }
             }
         }
+
         HorizontalBox {
-            spacing: 18px;
+            spacing: 12px;
             horizontal-stretch: 1;
             Rectangle {
-                width: 170px;
-                border-radius: 10px;
-                background: #ffffff;
+                width: 190px;
+                border-radius: 6px;
                 border-width: 1px;
-                border-color: #d6dce0;
+                border-color: #d0d7de;
+                background: #f8f9fa;
                 VerticalBox {
-                    padding: 14px;
-                    spacing: 8px;
-                    Text { text: "Devices"; color: #30363d; font-size: 15px; font-weight: 700; }
-                    Rectangle { height: 1px; background: #edf0f2; }
-                    SidebarRoute { name: "主路由"; detail: "1 App, 1 Device"; selected: true; }
-                    SidebarRoute { name: "Pass-Through"; detail: "准备添加"; selected: false; }
+                    padding: 12px;
+                    spacing: 10px;
+                    Text { text: "路由"; color: #1e293b; font-size: 12px; font-weight: 700; }
+                    Rectangle { height: 1px; background: #e3e7ea; }
+                    SidebarItem { selected: true; }
                     Rectangle { vertical-stretch: 1; }
-                    Button { text: "＋ 新建路由"; clicked => { root.refresh(); } }
+                    Text {
+                        text: "当前版本支持一条进程到设备的立体声路由。";
+                        color: #8a949d;
+                        font-size: 9px;
+                        wrap: word-wrap;
+                    }
                 }
             }
+
             Rectangle {
                 horizontal-stretch: 1;
-                background: transparent;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: #d0d7de;
+                background: #f7f8f9;
                 VerticalBox {
-                    spacing: 14px;
+                    padding: 18px;
+                    spacing: 15px;
                     HorizontalBox {
-                        height: 30px;
-                        Text { text: "Sources"; color: #30363d; font-size: 16px; font-weight: 700; }
-                        Text { text: "1 App, " + root.output-model.length + " Devices"; color: #899199; font-size: 12px; vertical-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; }
-                        HeaderAction { clicked => { root.refresh(); } }
-                    }
-                    HorizontalBox {
-                        horizontal-stretch: 1;
-                        spacing: 10px;
-                        SourceCard {
-                            source-model: root.source-model;
-                            source-index <=> root.source-index;
-                            gain <=> root.gain;
-                            muted <=> root.muted;
-                            meter-l: root.source-meter;
-                            meter-r: root.source-meter;
-                            running: root.running;
-                            apply-gain(value) => { root.apply-gain(value); }
-                            toggle-mute(value) => { root.toggle-mute(value); }
-                            source-selected(index) => { root.source-selected(index); }
+                        height: 34px;
+                        spacing: 8px;
+                        VerticalBox {
+                            padding: 0;
+                            spacing: 1px;
+                            horizontal-stretch: 1;
+                            Text { text: "主路由"; color: #1e293b; font-size: 15px; font-weight: 700; }
+                            Text { text: "选择一个进程，并将其音频发送到指定的 Windows 输出端点"; color: #7b8792; font-size: 10px; }
                         }
-                        SignalRail { active: root.running && root.source-index >= 0; }
-                        OutputCard {
+                        StatusPill {
+                            width: 72px;
+                            label: root.signal-active
+                                ? (root.running ? "正在传输" : "路由已配置")
+                                : "路由已关闭";
+                            active: root.signal-active;
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: #e1e5e8; }
+                    HorizontalBox {
+                        height: 34px;
+                        spacing: 0;
+                        Rectangle { horizontal-stretch: 1; }
+                        VerticalBox {
+                            width: 300px;
+                            padding: 0;
+                            spacing: 1px;
+                            Text { text: "音频来源"; color: #334155; font-size: 12px; font-weight: 700; }
+                            Text { text: "应用进程"; color: #87929c; font-size: 9px; }
+                        }
+                        Rectangle { width: 70px; }
+                        VerticalBox {
+                            width: 220px;
+                            padding: 0;
+                            spacing: 1px;
+                            Text { text: "Mix Channels"; color: #334155; font-size: 12px; font-weight: 700; }
+                            Text { text: "立体声通道组"; color: #87929c; font-size: 9px; }
+                        }
+                        Rectangle { width: 70px; }
+                        VerticalBox {
+                            width: 300px;
+                            padding: 0;
+                            spacing: 1px;
+                            Text { text: "输出设备"; color: #334155; font-size: 12px; font-weight: 700; }
+                            Text { text: "物理或虚拟输出端点"; color: #87929c; font-size: 9px; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+
+                    HorizontalBox {
+                        height: root.advanced-expanded ? 278px : 222px;
+                        spacing: 0;
+                        alignment: center;
+                        Rectangle { horizontal-stretch: 1; }
+                        TopologyRoute {
+                            source-model: root.source-model;
                             output-model: root.output-model;
+                            source-index <=> root.source-index;
                             output-index <=> root.output-index;
-                            meter-l: root.output-meter-l;
-                            meter-r: root.output-meter-r;
+                            gain <=> root.gain;
+                            expanded <=> root.advanced-expanded;
+                            route-enabled <=> root.route-enabled;
                             running: root.running;
-                            route-enabled: root.route-enabled;
+                            source-meter: root.source-meter;
+                            output-meter: root.output-meter-l;
+                            source-selected(index) => { root.source-selected(index); }
                             output-selected(index) => { root.output-selected(index); }
                             toggle-route(value) => { root.toggle-route(value); }
-                        }
-                        SignalRail { active: root.running && root.output-index >= 0; }
-                        MonitorCard {
-                            output-name: root.output-index >= 0 ? root.output-model[root.output-index] : "";
-                            output-count: root.output-model.length;
-                            meter-l: root.output-meter-l;
-                            meter-r: root.output-meter-r;
-                            running: root.running;
+                            apply-gain(value) => { root.apply-gain(value); }
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }
@@ -428,18 +1095,40 @@ export component MainWindow inherits Window {
                 }
             }
         }
+
         Rectangle {
-            height: 62px;
-            border-radius: 12px;
+            height: 48px;
+            border-radius: 6px;
             border-width: 1px;
-            border-color: #d6dce0;
+            border-color: #d0d7de;
             background: #ffffff;
             HorizontalBox {
-                padding-left: 18px;
-                padding-right: 18px;
-                spacing: 18px;
-                Text { text: "状态: " + root.engine-state; color: root.running ? #2bb3a5 : #6e7881; font-size: 14px; font-weight: 700; vertical-alignment: center; }
-                Text { text: root.stats-text; color: #5f6972; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 12px;
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.running ? #20a894 : (root.engine-error ? #d95858 : #8f9aa3);
+                }
+                Text {
+                    text: root.engine-state == "Running" ? "运行中"
+                        : (root.engine-state == "Stopped" ? "已停止" : root.engine-state);
+                    color: root.running ? #147f70 : (root.engine-error ? #b23f3f : #596670);
+                    font-size: 11px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 1px; height: 18px; background: #e1e5e8; }
+                Text {
+                    text: root.stats-text == "" ? "等待引擎状态" : root.stats-text;
+                    color: #697680;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
             }
         }
     }
