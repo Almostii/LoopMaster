@@ -79,13 +79,6 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
-        ui.on_toggle_mute(move |muted: bool| {
-            apply_send_change(&ui_weak, &state_rc, None, Some(muted));
-        });
-    }
-    {
-        let ui_weak = ui.as_weak();
-        let state_rc = Rc::clone(&state);
         ui.on_toggle_route(move |enabled: bool| {
             apply_send_change(&ui_weak, &state_rc, None, Some(!enabled));
         });
@@ -105,13 +98,13 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // 状态轮询（1 Hz）。
+    // 高频刷新峰值与状态，让电平表保持可读的响应速度。
     let ui_weak = ui.as_weak();
     let state_rc = Rc::clone(&state);
     let _timer = slint::Timer::default();
     _timer.start(
         slint::TimerMode::Repeated,
-        Duration::from_secs(1),
+        Duration::from_millis(100),
         move || {
             poll_status(&ui_weak, &state_rc);
         },
@@ -200,6 +193,12 @@ fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
         }
         if !errors.is_empty() {
             ui.set_engine_state(SharedString::from(errors.join("；")));
+        } else {
+            ui.set_engine_state(SharedString::from(if state_borrow.running {
+                "Running"
+            } else {
+                "Stopped"
+            }));
         }
     }
 }
@@ -361,7 +360,7 @@ fn apply_route_selection(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
 
 /// 轮询引擎状态并刷新统计文本。
 fn poll_status(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
-    let state_borrow = state.borrow();
+    let mut state_borrow = state.borrow_mut();
     let Some(ui) = ui.upgrade() else {
         return;
     };
@@ -369,6 +368,7 @@ fn poll_status(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
         let status = service.status();
         ui.set_engine_state(SharedString::from(status.state.as_str()));
         ui.set_running(status.running);
+        state_borrow.running = status.running;
         let stats = status.stats;
         let peak = stats.rendered_peak.clamp(0.0, 1.0);
         ui.set_source_meter(peak);
