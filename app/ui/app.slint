@@ -58,6 +58,46 @@ component Toggle inherits Rectangle {
     animate background { duration: 120ms; }
 }
 
+component MuteButton inherits Rectangle {
+    in property <bool> muted: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 32px;
+    height: 24px;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: root.muted ? #d7a51c : #cbd5dc;
+    background: root.muted
+        ? (mute-touch.has-hover ? #f8d56d : #f3c64d)
+        : (mute-touch.has-hover ? #e1f4f0 : #f1f5f7);
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: button;
+    accessible-label: root.muted ? "取消静音" : "静音";
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: "M";
+        color: root.muted ? #6b4d00 : #52606d;
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    mute-touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    animate background { duration: 120ms; }
+}
+
 component LevelMeter inherits Rectangle {
     in property <float> level: 0;
 
@@ -229,6 +269,17 @@ component ChevronRight inherits Path {
     MoveTo { x: 4.5; y: 3; }
     LineTo { x: 7.5; y: 6; }
     LineTo { x: 4.5; y: 9; }
+}
+
+component OptionsIcon inherits Rectangle {
+    in property <bool> expanded: false;
+
+    width: 12px;
+    height: 30px;
+    background: transparent;
+
+    if root.expanded: ChevronDown { x: 0; y: 9px; }
+    if !root.expanded: ChevronRight { x: 0; y: 9px; }
 }
 
 component SourceGlyph inherits Path {
@@ -415,16 +466,18 @@ component EngineBadge inherits Rectangle {
     in property <string> label: "音频引擎已停止";
 
     width: 252px;
-    height: 26px;
-    border-radius: 14px;
+    height: 30px;
+    border-radius: 15px;
     border-width: 1px;
     border-color: root.active ? #b7e1da : #e2e8f0;
     background: root.active ? #e8f7f4 : #f1f5f9;
 
     HorizontalBox {
+        height: root.height;
         padding-left: 10px;
         padding-right: 10px;
         spacing: 6px;
+        alignment: center;
         Rectangle {
             width: 8px;
             height: 8px;
@@ -437,7 +490,6 @@ component EngineBadge inherits Rectangle {
             font-size: 10px;
             font-weight: 600;
             vertical-alignment: center;
-            horizontal-stretch: 1;
             overflow: elide;
         }
     }
@@ -626,7 +678,7 @@ component SourceNode inherits Rectangle {
         && root.source-index < root.source-model.length;
 
     width: 280px;
-    height: root.expanded ? 278px : 222px;
+    height: root.expanded ? 292px : 222px;
     border-radius: 8px;
     border-width: 1px;
     border-color: #e2e8f0;
@@ -702,20 +754,14 @@ component SourceNode inherits Rectangle {
             SourceChannelRow { label: "2 (R)"; level: root.route-enabled ? root.meter : 0; }
         }
         Rectangle {
-            height: 28px;
+            height: 30px;
             background: options-touch.has-hover ? #f1f8f6 : transparent;
             accessible-role: button;
             accessible-label: root.expanded ? "收起高级选项" : "展开高级选项";
             accessible-action-default => { root.expanded = !root.expanded; }
-            HorizontalBox {
-                padding-left: 2px;
-                padding-right: 2px;
-                spacing: 6px;
-                if root.expanded: ChevronDown { }
-                if !root.expanded: ChevronRight { }
-                Text { text: "高级选项 (Options)"; color: #596773; font-size: 10px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-                Text { text: round(root.gain) + " dB"; color: #7a8792; font-size: 10px; vertical-alignment: center; }
-            }
+            OptionsIcon { x: 2px; y: 0px; expanded: root.expanded; }
+            Text { x: 20px; y: 6px; width: parent.width - 68px; height: 18px; text: "高级选项 (Options)"; color: #596773; font-size: 10px; font-weight: 600; vertical-alignment: center; }
+            Text { x: parent.width - 48px; y: 6px; width: 46px; height: 18px; text: round(root.gain) + " dB"; color: #7a8792; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; }
             options-touch := TouchArea { clicked => { root.expanded = !root.expanded; } }
         }
         if root.expanded: Rectangle {
@@ -733,12 +779,11 @@ component SourceNode inherits Rectangle {
                     GainSlider { horizontal-stretch: 1; value <=> root.gain; enabled: root.route-enabled; changed(value) => { root.apply-gain(value); } }
                 }
                 HorizontalBox {
-                    height: 22px;
-                    Text { text: "静音 (Mute)"; color: #64748b; font-size: 10px; vertical-alignment: center; horizontal-stretch: 1; }
-                    Toggle {
-                        checked: !root.route-enabled;
-                        label: "静音开关";
-                        toggled(value) => { root.toggle-route(!value); }
+                    height: 28px;
+                    Text { height: 28px; text: "静音 (Mute)"; color: #64748b; font-size: 10px; vertical-alignment: center; horizontal-stretch: 1; }
+                    MuteButton {
+                        muted: !root.route-enabled;
+                        clicked => { root.toggle-route(!root.route-enabled); }
                     }
                 }
             }
@@ -1094,23 +1139,17 @@ component DemoSourceCard inherits Rectangle {
         x: 14px;
         y: root.show-selector ? 154px : 116px;
         width: root.width - 28px;
-        height: 25px;
+        height: 30px;
         background: options-touch.has-hover ? #f2f8f6 : transparent;
-        HorizontalBox {
-            padding-left: 1px;
-            padding-right: 1px;
-            spacing: 5px;
-            if root.expanded: ChevronDown { }
-            if !root.expanded: ChevronRight { }
-            Text { text: "高级选项 (Options)"; color: #64748b; font-size: 10px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
-            Text { text: round(root.gain) + " dB"; color: #7a8792; font-size: 10px; vertical-alignment: center; }
-        }
+        OptionsIcon { x: 1px; y: 0px; expanded: root.expanded; }
+        Text { x: 19px; y: 6px; width: parent.width - 67px; height: 18px; text: "高级选项 (Options)"; color: #64748b; font-size: 10px; font-weight: 600; vertical-alignment: center; }
+        Text { x: parent.width - 47px; y: 6px; width: 46px; height: 18px; text: round(root.gain) + " dB"; color: #7a8792; horizontal-alignment: right; vertical-alignment: center; }
         options-touch := TouchArea { clicked => { root.expanded = !root.expanded; } }
     }
 
     if root.expanded: Rectangle {
         x: 14px;
-        y: root.show-selector ? 183px : 145px;
+        y: root.show-selector ? 188px : 150px;
         width: root.width - 28px;
         height: 90px;
         border-radius: 5px;
@@ -1126,12 +1165,11 @@ component DemoSourceCard inherits Rectangle {
                 GainSlider { horizontal-stretch: 1; value <=> root.gain; enabled: root.route-enabled; changed(value) => { root.apply-gain(value); } }
             }
             HorizontalBox {
-                height: 24px;
-                Text { height: 24px; text: "静音 (Mute)"; color: #64748b; font-size: 10px; horizontal-stretch: 1; vertical-alignment: center; }
-                Toggle {
-                    checked: !root.route-enabled;
-                    label: "静音开关";
-                    toggled(value) => { root.toggle-route(!value); }
+                height: 28px;
+                Text { height: 28px; text: "静音 (Mute)"; color: #64748b; font-size: 10px; horizontal-stretch: 1; vertical-alignment: center; }
+                MuteButton {
+                    muted: !root.route-enabled;
+                    clicked => { root.toggle-route(!root.route-enabled); }
                 }
             }
         }
@@ -1202,13 +1240,9 @@ component DemoSourcePreview inherits Rectangle {
         x: 14px;
         y: 116px;
         width: root.width - 28px;
-        height: 25px;
-        HorizontalBox {
-            padding-left: 1px;
-            spacing: 5px;
-            ChevronRight { }
-            Text { text: "高级选项 (Options)"; color: #64748b; font-size: 10px; font-weight: 600; vertical-alignment: center; }
-        }
+        height: 30px;
+        OptionsIcon { x: 1px; y: 0px; expanded: false; }
+        Text { x: 19px; y: 6px; width: parent.width - 20px; height: 18px; text: "高级选项 (Options)"; color: #64748b; font-size: 10px; font-weight: 600; vertical-alignment: center; }
     }
     RouteSocket { x: root.width - 7px; y: 85px; active: root.enabled; }
 }
@@ -1466,14 +1500,18 @@ export component MainWindow inherits Window {
                 }
                 Text { text: "LoopMaster"; color: #1e293b; font-size: 15px; font-weight: 700; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; }
-                EngineBadge { active: root.running; label: root.running ? "音频引擎运行中 (WASAPI)" : (root.engine-error ? "音频引擎异常" : "音频引擎已停止"); }
-                Rectangle { horizontal-stretch: 1; }
                 LoopbackToggle {
                     checked <=> root.running;
                     enabled: root.route-ready;
                     label: "总引擎开关";
                     toggled(value) => { if value { root.start-engine(); } else { root.stop-engine(); } }
                 }
+            }
+            EngineBadge {
+                x: (root.width - 252px) / 2;
+                y: 9px;
+                active: root.running;
+                label: root.running ? "音频引擎运行中 (WASAPI)" : (root.engine-error ? "音频引擎异常" : "音频引擎已停止");
             }
             Rectangle { x: 0; y: 47px; width: 1320px; height: 1px; background: #e2e8f0; }
         }
