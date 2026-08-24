@@ -1517,6 +1517,7 @@ export component MainWindow inherits Window {
     callback source-selected(int);
     callback output-selected(int);
     callback toggle-route(bool);
+    callback toggle-output(bool);
     callback toggle-monitor(bool);
 
     Rectangle {
@@ -1663,7 +1664,7 @@ export component MainWindow inherits Window {
                 running: root.running;
                 flow-label: "Render 输出设备";
                 output-selected(index) => { root.output-selected(index); }
-                toggle-route(value) => { root.toggle-route(value); }
+                toggle-route(value) => { root.toggle-output(value); }
             }
             if root.show-monitors: DemoMonitorCard {
                 x: 732px;
