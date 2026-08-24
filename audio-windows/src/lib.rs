@@ -7,9 +7,11 @@ use loopmaster_audio_core::{
 };
 use thiserror::Error;
 
+mod format_conversion;
 mod process_loopback;
 mod runtime;
 
+pub use format_conversion::SampleEncoding;
 pub use process_loopback::ProcessLoopbackSource;
 pub use runtime::{
     AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineState, AudioEngineStats,
@@ -55,6 +57,8 @@ pub struct EndpointFormat {
     /// extensible subformat）。这是 LoopMaster 内部格式契约的一部分，
     /// 用于在打开设备前判断该 endpoint 能否作为 source 或 sink。
     pub is_float: bool,
+    /// 样本是否为标准 PCM 整数格式。当前实时边界支持 16-bit PCM。
+    pub is_pcm: bool,
 }
 
 impl EndpointFormat {
@@ -68,20 +72,55 @@ impl EndpointFormat {
 
     /// 该格式能否作为 LoopMaster 的普通 capture source。
     ///
-    /// 要求 32-bit IEEE float、双声道；采样率与内部 48 kHz 不一致时由
-    /// CaptureResampler 在捕获边界转换（阶段 B.5），因此不要求采样率。
+    /// 支持 32-bit IEEE float 或 16-bit PCM、1 到 32 声道；采样率与内部
+    /// 48 kHz 不一致时由 CaptureResampler 转换。
     /// 不满足的 endpoint 会在打开时返回 `CaptureFormatUnsupported`，这里
     /// 提前暴露相同的判断，供诊断和 UI 标注可用性。
     pub const fn capture_compatible(self) -> bool {
-        self.is_float && self.bits_per_sample == 32 && self.channels == INTERNAL_CHANNELS as u16
+        ((self.is_float && !self.is_pcm && self.bits_per_sample == 32)
+            || (self.is_pcm && !self.is_float && self.bits_per_sample == 16))
+            && self.sample_rate > 0
+            && self.channels > 0
+            && self.channels <= 32
     }
 
     /// 该格式能否作为 LoopMaster 的 render sink。
     ///
-    /// render sink 要求 32-bit IEEE float、双声道；采样率与内部 48 kHz 不一致时
-    /// 由 [`FixedInputResampler`] 在写入边界转换，因此这里不要求采样率。
+    /// 支持 32-bit IEEE float 或 16-bit PCM、1 到 32 声道；采样率与内部
+    /// 48 kHz 不一致时由 [`FixedInputResampler`] 转换。
     pub const fn render_compatible(self) -> bool {
-        self.is_float && self.bits_per_sample == 32 && self.channels == INTERNAL_CHANNELS as u16
+        self.capture_compatible()
+    }
+
+    /// 返回实时边界实际支持的样本编码。
+    pub const fn sample_encoding(self) -> Option<SampleEncoding> {
+        if self.is_float && !self.is_pcm && self.bits_per_sample == 32 {
+            Some(SampleEncoding::Float32)
+        } else if self.is_pcm && !self.is_float && self.bits_per_sample == 16 {
+            Some(SampleEncoding::Pcm16)
+        } else {
+            None
+        }
+    }
+
+    /// 原生声道布局是否需要映射到内部双声道。
+    pub const fn requires_channel_conversion(self) -> bool {
+        self.channels != INTERNAL_CHANNELS as u16
+    }
+
+    pub const fn bytes_per_sample(self) -> Option<usize> {
+        match self.sample_encoding() {
+            Some(SampleEncoding::Float32) => Some(4),
+            Some(SampleEncoding::Pcm16) => Some(2),
+            None => None,
+        }
+    }
+
+    pub const fn block_align(self) -> Option<usize> {
+        match self.bytes_per_sample() {
+            Some(bytes) => Some(bytes * self.channels as usize),
+            None => None,
+        }
     }
 }
 
@@ -102,6 +141,8 @@ pub struct EndpointInfo {
     pub channel_mask: Option<u32>,
     /// 样本是否为 IEEE float；读取格式失败时为 `None`。
     pub is_float: Option<bool>,
+    /// 样本是否为标准 PCM 整数；读取格式失败时为 `None`。
+    pub is_pcm: Option<bool>,
 }
 
 /// 当前存在播放音频会话的进程，可直接作为 Process Loopback 的目标。
@@ -127,16 +168,22 @@ impl EndpointInfo {
             self.bits_per_sample,
             self.channel_mask,
             self.is_float,
+            self.is_pcm,
         ) {
-            (Some(format), Some(bits_per_sample), Some(channel_mask), Some(is_float)) => {
-                Some(EndpointFormat {
-                    sample_rate: format.sample_rate,
-                    bits_per_sample,
-                    channels: format.channels,
-                    channel_mask,
-                    is_float,
-                })
-            }
+            (
+                Some(format),
+                Some(bits_per_sample),
+                Some(channel_mask),
+                Some(is_float),
+                Some(is_pcm),
+            ) => Some(EndpointFormat {
+                sample_rate: format.sample_rate,
+                bits_per_sample,
+                channels: format.channels,
+                channel_mask,
+                is_float,
+                is_pcm,
+            }),
             _ => None,
         }
     }
@@ -162,7 +209,7 @@ pub enum WindowsAudioError {
         reason: String,
         endpoint_id: Option<String>,
     },
-    #[error("render endpoint 格式不满足 MVP 要求（32-bit IEEE float、2 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
+    #[error("render endpoint 格式不受支持（需 32-bit IEEE float 或 16-bit PCM，1-32 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
     RenderFormatUnsupported {
         endpoint_id: String,
         sample_rate: u32,
@@ -180,7 +227,7 @@ pub enum WindowsAudioError {
         reason: &'static str,
         endpoint_id: String,
     },
-    #[error("capture endpoint 格式不满足 MVP 要求（48 kHz、32-bit IEEE float、2 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
+    #[error("capture endpoint 格式不受支持（需 32-bit IEEE float 或 16-bit PCM，1-32 声道）: endpoint={endpoint_id}, {sample_rate} Hz, {bits_per_sample} bit, {channels} channels")]
     CaptureFormatUnsupported {
         endpoint_id: String,
         sample_rate: u32,
@@ -192,6 +239,8 @@ pub enum WindowsAudioError {
         reason: &'static str,
         endpoint_id: String,
     },
+    #[error("capture 原生格式转换失败: {reason}, endpoint={endpoint_id}")]
+    CaptureConvert { reason: String, endpoint_id: String },
     #[error("render 重采样失败: {reason}, endpoint={endpoint_id}")]
     RenderResample { reason: String, endpoint_id: String },
 }
@@ -280,6 +329,8 @@ pub struct WasapiCaptureSource {
     capture_client: windows::Win32::Media::Audio::IAudioCaptureClient,
     endpoint_id: EndpointId,
     format: EndpointFormat,
+    buffer_frames: u32,
+    converted_samples: Vec<f32>,
     // Keep COM initialized until every COM interface above has been released.
     // Rust drops struct fields in declaration order.
     #[cfg(windows)]
@@ -318,7 +369,8 @@ impl WindowsAudioError {
             Self::RenderFormatUnsupported { endpoint_id, .. }
             | Self::RenderState { endpoint_id, .. } => Some(endpoint_id),
             Self::CaptureFormatUnsupported { endpoint_id, .. }
-            | Self::CaptureState { endpoint_id, .. } => Some(endpoint_id),
+            | Self::CaptureState { endpoint_id, .. }
+            | Self::CaptureConvert { endpoint_id, .. } => Some(endpoint_id),
             Self::RenderResample { endpoint_id, .. } => Some(endpoint_id),
             _ => None,
         }
@@ -367,6 +419,8 @@ pub fn decode_mix_format(raw: &[u8]) -> Result<EndpointFormat, WindowsAudioError
     let format_tag = u16::from_le_bytes([raw[0], raw[1]]);
     let channels = u16::from_le_bytes([raw[2], raw[3]]);
     let sample_rate = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    let avg_bytes_per_sec = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
+    let block_align = u16::from_le_bytes([raw[12], raw[13]]);
     let bits_per_sample = u16::from_le_bytes([raw[14], raw[15]]);
     let cb_size = u16::from_le_bytes([raw[16], raw[17]]) as usize;
     if channels == 0 {
@@ -374,6 +428,24 @@ pub fn decode_mix_format(raw: &[u8]) -> Result<EndpointFormat, WindowsAudioError
     }
     if sample_rate == 0 {
         return Err(invalid_format("采样率为 0", None));
+    }
+    if bits_per_sample == 0 || !bits_per_sample.is_multiple_of(8) {
+        return Err(invalid_format("位深不是完整字节", None));
+    }
+    let expected_block_align = channels
+        .checked_mul(bits_per_sample / 8)
+        .ok_or_else(|| invalid_format("block align 溢出", None))?;
+    if block_align != expected_block_align {
+        return Err(invalid_format("nBlockAlign 与声道数/位深不一致", None));
+    }
+    let expected_avg_bytes = sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(|| invalid_format("nAvgBytesPerSec 溢出", None))?;
+    if avg_bytes_per_sec != expected_avg_bytes {
+        return Err(invalid_format(
+            "nAvgBytesPerSec 与采样率/block align 不一致",
+            None,
+        ));
     }
     if raw.len() < 18 + cb_size {
         return Err(invalid_format("cbSize 超出返回缓冲区", None));
@@ -395,10 +467,26 @@ pub fn decode_mix_format(raw: &[u8]) -> Result<EndpointFormat, WindowsAudioError
         0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
         0x71,
     ];
+    let extensible_valid_bits = if format_tag == 0xFFFE && cb_size >= 22 && raw.len() >= 40 {
+        Some(u16::from_le_bytes([raw[18], raw[19]]))
+    } else {
+        None
+    };
     let is_float = if format_tag == 3 {
         true
     } else if format_tag == 0xFFFE && cb_size >= 22 && raw.len() >= 40 {
-        raw[24..40] == IEEE_FLOAT_SUBFORMAT
+        raw[24..40] == IEEE_FLOAT_SUBFORMAT && extensible_valid_bits == Some(bits_per_sample)
+    } else {
+        false
+    };
+    const PCM_SUBFORMAT: [u8; 16] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+    let is_pcm = if format_tag == 1 {
+        true
+    } else if format_tag == 0xFFFE && cb_size >= 22 && raw.len() >= 40 {
+        raw[24..40] == PCM_SUBFORMAT && extensible_valid_bits == Some(bits_per_sample)
     } else {
         false
     };
@@ -408,6 +496,7 @@ pub fn decode_mix_format(raw: &[u8]) -> Result<EndpointFormat, WindowsAudioError
         channels,
         channel_mask,
         is_float,
+        is_pcm,
     })
 }
 
@@ -635,6 +724,7 @@ impl WindowsAudioBackend {
                         bits_per_sample: Some(format.bits_per_sample),
                         channel_mask: Some(format.channel_mask),
                         is_float: Some(format.is_float),
+                        is_pcm: Some(format.is_pcm),
                     });
                 }
             }
@@ -744,9 +834,10 @@ impl WindowsAudioBackend {
 
     /// 打开指定 render endpoint，初始化 WASAPI shared-mode client，并启动流。
     ///
-    /// 当前实现要求 endpoint 的 `GetMixFormat` 为 32-bit IEEE float，因而实时写入
-    /// 可以直接复制 `f32`。`block_frames` 只用于限制单次写入；设备缓冲区实际可用
-    /// frame 数仍由 `GetCurrentPadding` 决定。
+    /// endpoint 的 `GetMixFormat` 支持 32-bit IEEE float 或 16-bit PCM、1-32
+    /// 声道。写入边界会将内部 stereo f32 映射并编码为 endpoint 原生格式。
+    /// `block_frames` 只用于限制单次写入；设备缓冲区实际可用 frame 数仍由
+    /// `GetCurrentPadding` 决定。
     pub fn open_render_sink(
         &self,
         endpoint_id: &EndpointId,
@@ -781,8 +872,8 @@ impl WindowsAudioBackend {
 
     /// 打开指定 render endpoint 的 Device Loopback 捕获（该设备的播放总混音）。
     ///
-    /// 当前与普通 capture 一样要求 48 kHz / 32-bit float / 2 声道的内部契约；
-    /// 非 48 kHz 设备（如 44.1 kHz 虚拟声卡）的 loopback 重采样在阶段 B.5 补充。
+    /// endpoint 的原生 packet 支持 32-bit IEEE float 或 16-bit PCM、1-32 声道；
+    /// 读取边界会先解码并映射为内部 stereo f32，非 48 kHz 再由运行时重采样。
     pub fn open_device_loopback_source(
         &self,
         endpoint_id: &EndpointId,
@@ -805,7 +896,7 @@ impl WasapiRenderSink {
         &self.endpoint_id
     }
 
-    /// endpoint 的 f32 mix format。
+    /// endpoint 的原生 mix format；capture/render 边界会负责格式转换。
     pub const fn format(&self) -> EndpointFormat {
         self.format
     }
@@ -848,6 +939,10 @@ impl WasapiCaptureSource {
 
     pub const fn format(&self) -> EndpointFormat {
         self.format
+    }
+
+    pub const fn buffer_frames(&self) -> u32 {
+        self.buffer_frames
     }
 
     /// 读取当前全部可用 packet，并在 buffer 有效期内同步调用 `on_packet`。
@@ -1091,29 +1186,11 @@ unsafe fn inspect_render_mix_format(
         }
         other => other,
     })?;
-    let format_tag = std::ptr::read_unaligned(raw as *const u16);
-    let bits = std::ptr::read_unaligned(raw.add(14) as *const u16);
-    let is_float = if format_tag == 3 {
-        true
-    } else if format_tag == 0xFFFE && cb_size >= 22 && length >= 40 {
-        let sub_format = std::ptr::read_unaligned(raw.add(24) as *const windows::core::GUID);
-        sub_format == windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71)
-    } else {
-        false
-    };
-    if bits != 32 || !is_float {
+    if !format.render_compatible() {
         return Err(WindowsAudioError::RenderFormatUnsupported {
             endpoint_id: endpoint_id.0.clone(),
             sample_rate: format.sample_rate,
-            bits_per_sample: bits,
-            channels: format.channels,
-        });
-    }
-    if usize::from(format.channels) != INTERNAL_CHANNELS {
-        return Err(WindowsAudioError::RenderFormatUnsupported {
-            endpoint_id: endpoint_id.0.clone(),
-            sample_rate: format.sample_rate,
-            bits_per_sample: bits,
+            bits_per_sample: format.bits_per_sample,
             channels: format.channels,
         });
     }
@@ -1184,7 +1261,14 @@ fn write_render_block(
         }
         (samples, frames)
     };
-    let frame_samples = frames_to_write as usize * INTERNAL_CHANNELS;
+    let output_bytes = frames_to_write as usize
+        * sink
+            .format
+            .block_align()
+            .ok_or_else(|| WindowsAudioError::RenderResample {
+                reason: "不支持的 endpoint 样本编码".to_owned(),
+                endpoint_id: sink.endpoint_id.0.clone(),
+            })?;
     let buffer = unsafe { sink.render_client.GetBuffer(frames_to_write) }.map_err(|error| {
         hresult_error(
             "IAudioRenderClient::GetBuffer",
@@ -1198,16 +1282,23 @@ fn write_render_block(
             endpoint_id: sink.endpoint_id.0.clone(),
         });
     }
-    let input_samples = write_samples.len().min(frame_samples);
-    unsafe {
-        std::ptr::copy_nonoverlapping(write_samples.as_ptr(), buffer as *mut f32, input_samples);
-        if input_samples < frame_samples {
-            std::ptr::write_bytes(
-                (buffer as *mut f32).add(input_samples),
-                0,
-                frame_samples - input_samples,
-            );
-        }
+    let output = unsafe { std::slice::from_raw_parts_mut(buffer, output_bytes) };
+    if let Err(error) = crate::format_conversion::encode_from_stereo(
+        sink.format,
+        write_samples,
+        frames_to_write as usize,
+        output,
+    ) {
+        let _ = unsafe {
+            sink.render_client.ReleaseBuffer(
+                frames_to_write,
+                windows::Win32::Media::Audio::AUDCLNT_BUFFERFLAGS_SILENT.0 as u32,
+            )
+        };
+        return Err(WindowsAudioError::RenderResample {
+            reason: format!("{error:?}"),
+            endpoint_id: sink.endpoint_id.0.clone(),
+        });
     }
     unsafe { sink.render_client.ReleaseBuffer(frames_to_write, 0) }.map_err(|error| {
         hresult_error(
@@ -1341,6 +1432,14 @@ fn open_capture_source(endpoint_id: &EndpointId) -> Result<WasapiCaptureSource, 
             error,
         )
     })?;
+    let buffer_frames = unsafe { client.GetBufferSize() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetBufferSize(capture)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let converted_samples = vec![0.0; buffer_frames as usize * INTERNAL_CHANNELS];
     let capture_client: IAudioCaptureClient = unsafe { client.GetService() }.map_err(|error| {
         hresult_error(
             "IAudioClient::GetService(IAudioCaptureClient)",
@@ -1357,6 +1456,8 @@ fn open_capture_source(endpoint_id: &EndpointId) -> Result<WasapiCaptureSource, 
         capture_client,
         endpoint_id: endpoint_id.clone(),
         format,
+        buffer_frames,
+        converted_samples,
     })
 }
 
@@ -1473,7 +1574,7 @@ fn open_device_loopback_source(
         }
     };
     // Loopback 捕获共享模式渲染流：加 AUDCLNT_STREAMFLAGS_LOOPBACK，
-    // 数据经 IAudioCaptureClient 读取，格式契约与普通 capture 相同（48k/32float/2ch）。
+    // 数据经 IAudioCaptureClient 读取，再由统一边界转换为 stereo f32。
     let initialize_result = unsafe {
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -1494,6 +1595,14 @@ fn open_device_loopback_source(
             error,
         )
     })?;
+    let buffer_frames = unsafe { client.GetBufferSize() }.map_err(|error| {
+        hresult_error(
+            "IAudioClient::GetBufferSize(loopback)",
+            Some(endpoint_id.0.clone()),
+            error,
+        )
+    })?;
+    let converted_samples = vec![0.0; buffer_frames as usize * INTERNAL_CHANNELS];
     let capture_client: IAudioCaptureClient = unsafe { client.GetService() }.map_err(|error| {
         hresult_error(
             "IAudioClient::GetService(IAudioCaptureClient)",
@@ -1510,6 +1619,8 @@ fn open_device_loopback_source(
         capture_client,
         endpoint_id: endpoint_id.clone(),
         format,
+        buffer_frames,
+        converted_samples,
     })
 }
 
@@ -1534,24 +1645,11 @@ unsafe fn inspect_capture_mix_format(
         }
         other => other,
     })?;
-    let format_tag = std::ptr::read_unaligned(raw.cast::<u16>());
-    let bits = std::ptr::read_unaligned(raw.add(14).cast::<u16>());
-    let is_float = if format_tag == 3 {
-        true
-    } else if format_tag == 0xFFFE && cb_size >= 22 && length >= 40 {
-        let sub_format = std::ptr::read_unaligned(raw.add(24).cast::<windows::core::GUID>());
-        sub_format == windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71)
-    } else {
-        false
-    };
-    // 采样率不限：非 48 kHz 设备（如 44.1 kHz 虚拟声卡）由 capture worker
-    // 的 FixedOutputResampler 重采样到内部 48 kHz（阶段 B.5）。
-    if format.channels != loopmaster_audio_core::INTERNAL_CHANNELS as u16 || bits != 32 || !is_float
-    {
+    if !format.capture_compatible() {
         return Err(WindowsAudioError::CaptureFormatUnsupported {
             endpoint_id: endpoint_id.0.clone(),
             sample_rate: format.sample_rate,
-            bits_per_sample: bits,
+            bits_per_sample: format.bits_per_sample,
             channels: format.channels,
         });
     }
@@ -1631,9 +1729,37 @@ where
                 endpoint_id: source.endpoint_id.0.clone(),
             });
         } else {
-            let sample_count = frames as usize * usize::from(source.format.channels);
-            let samples = unsafe { std::slice::from_raw_parts(data.cast::<f32>(), sample_count) };
-            on_packet(packet, Some(samples));
+            let frames = frames as usize;
+            let output_samples = frames * INTERNAL_CHANNELS;
+            if output_samples > source.converted_samples.len() {
+                let _ = unsafe { source.capture_client.ReleaseBuffer(packet.frames) };
+                return Err(WindowsAudioError::CaptureConvert {
+                    reason: "packet frame 数超过预分配 capture buffer".to_owned(),
+                    endpoint_id: source.endpoint_id.0.clone(),
+                });
+            }
+            let Some(block_align) = source.format.block_align() else {
+                let _ = unsafe { source.capture_client.ReleaseBuffer(packet.frames) };
+                return Err(WindowsAudioError::CaptureConvert {
+                    reason: "不支持的 endpoint 样本编码".to_owned(),
+                    endpoint_id: source.endpoint_id.0.clone(),
+                });
+            };
+            let input_bytes = frames * block_align;
+            let input = unsafe { std::slice::from_raw_parts(data, input_bytes) };
+            if let Err(error) = crate::format_conversion::decode_to_stereo(
+                source.format,
+                input,
+                frames,
+                &mut source.converted_samples[..output_samples],
+            ) {
+                let _ = unsafe { source.capture_client.ReleaseBuffer(packet.frames) };
+                return Err(WindowsAudioError::CaptureConvert {
+                    reason: format!("{error:?}"),
+                    endpoint_id: source.endpoint_id.0.clone(),
+                });
+            }
+            on_packet(packet, Some(&source.converted_samples[..output_samples]));
         }
         unsafe { source.capture_client.ReleaseBuffer(frames) }.map_err(|error| {
             hresult_error(
@@ -1831,6 +1957,8 @@ mod tests {
         raw[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
         raw[2..4].copy_from_slice(&2u16.to_le_bytes());
         raw[4..8].copy_from_slice(&48_000u32.to_le_bytes());
+        raw[8..12].copy_from_slice(&384_000u32.to_le_bytes());
+        raw[12..14].copy_from_slice(&8u16.to_le_bytes());
         raw[14..16].copy_from_slice(&32u16.to_le_bytes());
         raw[16..18].copy_from_slice(&22u16.to_le_bytes());
         raw[20..24].copy_from_slice(&0x3u32.to_le_bytes());
@@ -1849,8 +1977,11 @@ mod tests {
         raw[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
         raw[2..4].copy_from_slice(&2u16.to_le_bytes());
         raw[4..8].copy_from_slice(&48_000u32.to_le_bytes());
+        raw[8..12].copy_from_slice(&384_000u32.to_le_bytes());
+        raw[12..14].copy_from_slice(&8u16.to_le_bytes());
         raw[14..16].copy_from_slice(&32u16.to_le_bytes());
         raw[16..18].copy_from_slice(&22u16.to_le_bytes());
+        raw[18..20].copy_from_slice(&32u16.to_le_bytes());
         raw[20..24].copy_from_slice(&0x3u32.to_le_bytes());
         // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: 00000003-0000-0010-8000-00AA00389B71
         raw[24..40].copy_from_slice(&[
@@ -1869,6 +2000,8 @@ mod tests {
         raw[0..2].copy_from_slice(&3u16.to_le_bytes());
         raw[2..4].copy_from_slice(&2u16.to_le_bytes());
         raw[4..8].copy_from_slice(&48_000u32.to_le_bytes());
+        raw[8..12].copy_from_slice(&384_000u32.to_le_bytes());
+        raw[12..14].copy_from_slice(&8u16.to_le_bytes());
         raw[14..16].copy_from_slice(&32u16.to_le_bytes());
         let f = decode_mix_format(&raw).unwrap();
         assert!(f.is_float);
@@ -1876,15 +2009,62 @@ mod tests {
     }
 
     #[test]
+    fn identifies_pcm16_extensible_subformat() {
+        let mut raw = vec![0u8; 40];
+        raw[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        raw[2..4].copy_from_slice(&2u16.to_le_bytes());
+        raw[4..8].copy_from_slice(&44_100u32.to_le_bytes());
+        raw[8..12].copy_from_slice(&176_400u32.to_le_bytes());
+        raw[12..14].copy_from_slice(&4u16.to_le_bytes());
+        raw[14..16].copy_from_slice(&16u16.to_le_bytes());
+        raw[16..18].copy_from_slice(&22u16.to_le_bytes());
+        raw[18..20].copy_from_slice(&16u16.to_le_bytes());
+        raw[20..24].copy_from_slice(&0x3u32.to_le_bytes());
+        raw[24..40].copy_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+        let format = decode_mix_format(&raw).unwrap();
+        assert!(format.is_pcm);
+        assert!(!format.is_float);
+        assert_eq!(format.sample_encoding(), Some(SampleEncoding::Pcm16));
+        assert!(format.capture_compatible());
+        assert!(format.render_compatible());
+    }
+
+    #[test]
+    fn rejects_malformed_block_align_and_average_byte_rate() {
+        let mut raw = vec![0u8; 18];
+        raw[0..2].copy_from_slice(&1u16.to_le_bytes());
+        raw[2..4].copy_from_slice(&2u16.to_le_bytes());
+        raw[4..8].copy_from_slice(&48_000u32.to_le_bytes());
+        raw[8..12].copy_from_slice(&192_000u32.to_le_bytes());
+        raw[12..14].copy_from_slice(&2u16.to_le_bytes());
+        raw[14..16].copy_from_slice(&16u16.to_le_bytes());
+        assert!(matches!(
+            decode_mix_format(&raw),
+            Err(WindowsAudioError::InvalidFormat { .. })
+        ));
+
+        raw[12..14].copy_from_slice(&4u16.to_le_bytes());
+        raw[8..12].copy_from_slice(&96_000u32.to_le_bytes());
+        assert!(matches!(
+            decode_mix_format(&raw),
+            Err(WindowsAudioError::InvalidFormat { .. })
+        ));
+    }
+
+    #[test]
     fn distinguishes_capture_and_render_contracts() {
         // 44.1 kHz、32-bit float、双声道：capture 与 render 均可（采样率
-        // 分别由 CaptureResampler / FixedInputResampler 转换，阶段 B.5）。
+        // 分别由 CaptureResampler / FixedInputResampler 转换）。
         let resampled = EndpointFormat {
             sample_rate: 44_100,
             bits_per_sample: 32,
             channels: 2,
             channel_mask: 0x3,
             is_float: true,
+            is_pcm: false,
         };
         assert!(resampled.render_compatible());
         assert!(resampled.capture_compatible());
@@ -1896,9 +2076,10 @@ mod tests {
             channels: 2,
             channel_mask: 0x3,
             is_float: false,
+            is_pcm: true,
         };
-        assert!(!pcm_16.capture_compatible());
-        assert!(!pcm_16.render_compatible());
+        assert!(pcm_16.capture_compatible());
+        assert!(pcm_16.render_compatible());
     }
     #[test]
     fn rejects_truncated_mix_format() {

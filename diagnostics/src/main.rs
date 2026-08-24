@@ -1,10 +1,11 @@
 use loopmaster_audio_core::{
-    fill_block, AudioFifo, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot, SendSpec, SinkId,
-    SinkSpec, SourceId, SourceKind, SourceSpec, TestToneConfig, TestToneKind, TonePhase,
+    fill_block, AudioFifo, AudioFormat, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot,
+    SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec, TestToneConfig, TestToneKind,
+    TonePhase,
 };
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineState, EndpointFlow, EndpointFormat, EndpointInfo,
-    WindowsAudioBackend,
+    SampleEncoding, WindowsAudioBackend,
 };
 use std::env;
 use std::thread;
@@ -841,40 +842,60 @@ fn print_endpoint(index: usize, endpoint: &EndpointInfo) {
     println!("  Flow: {}", endpoint.flow.as_str());
     match endpoint.endpoint_format() {
         Some(format) => {
-            println!(
-                "  Mix format: {} Hz, {} bit, {} channels{}",
-                format.sample_rate,
-                format.bits_per_sample,
-                format.channels,
-                if format.is_float { ", float" } else { "" }
-            );
-            println!("  Channel mask: 0x{:08X}", format.channel_mask);
+            println!("  原生格式: {}", endpoint_format_description(format));
+            println!("  声道掩码: 0x{:08X}", format.channel_mask);
             println!("  可用性: {}", availability_label(endpoint.flow, format));
         }
         None => {
-            println!("  Mix format: unavailable");
-            println!("  可用性: 未知（无法读取格式）");
+            println!("  原生格式: 无法读取");
+            println!("  可用性: 未知（缺少编码、采样率、位深或声道信息）");
         }
     }
 }
 
-fn availability_label(flow: EndpointFlow, format: EndpointFormat) -> &'static str {
-    match flow {
-        EndpointFlow::Capture => {
-            if format.capture_compatible() {
-                "可作为 capture source（32-bit float / 2 声道，采样率自动重采样）"
-            } else {
-                "不满足 capture 契约（需 32-bit float / 2 声道）"
-            }
-        }
-        EndpointFlow::Render => {
-            if format.render_compatible() {
-                "可作为 render sink（32-bit float / 2 声道，采样率自动重采样）"
-            } else {
-                "不满足 render 契约（需 32-bit float / 2 声道）"
-            }
-        }
+fn availability_label(flow: EndpointFlow, format: EndpointFormat) -> String {
+    let compatible = match flow {
+        EndpointFlow::Capture => format.capture_compatible(),
+        EndpointFlow::Render => format.render_compatible(),
+    };
+    let role = match flow {
+        EndpointFlow::Capture => "capture source",
+        EndpointFlow::Render => "render sink",
+    };
+    let description = endpoint_format_description(format);
+    if !compatible {
+        return format!("不兼容：当前音频边界不能将 {description} 用作 {role}");
     }
+
+    if format.audio_format() == AudioFormat::INTERNAL
+        && format.sample_encoding() == Some(SampleEncoding::Float32)
+    {
+        format!("可用（原生支持）：可直接用作 {role}")
+    } else {
+        let conversion = match flow {
+            EndpointFlow::Capture => "转换为内部 48 kHz / 32-bit IEEE float / 2 声道",
+            EndpointFlow::Render => "从内部 48 kHz / 32-bit IEEE float / 2 声道转换后写入",
+        };
+        format!("可用（需转换）：原生格式为 {description}；将{conversion}")
+    }
+}
+
+fn endpoint_format_description(format: EndpointFormat) -> String {
+    let sample_rate = if format.sample_rate.is_multiple_of(1_000) {
+        format!("{} kHz", format.sample_rate / 1_000)
+    } else if format.sample_rate.is_multiple_of(100) {
+        format!("{:.1} kHz", format.sample_rate as f64 / 1_000.0)
+    } else {
+        format!("{} Hz", format.sample_rate)
+    };
+    let encoding = match format.sample_encoding() {
+        Some(SampleEncoding::Float32) => "32-bit IEEE float".to_owned(),
+        Some(SampleEncoding::Pcm16) => "16-bit PCM".to_owned(),
+        None if format.is_float => format!("{}-bit IEEE float", format.bits_per_sample),
+        None if format.is_pcm => format!("{}-bit PCM", format.bits_per_sample),
+        None => format!("{}-bit 未知编码", format.bits_per_sample),
+    };
+    format!("{sample_rate} / {encoding} / {} 声道", format.channels)
 }
 
 /// 峰值幅度转 dBFS 显示；静音或无效峰值显示 "silence"。
@@ -900,6 +921,23 @@ fn exit_with_error(context: &str, error: loopmaster_audio_windows::WindowsAudioE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint_format(
+        sample_rate: u32,
+        bits_per_sample: u16,
+        channels: u16,
+        is_float: bool,
+        is_pcm: bool,
+    ) -> EndpointFormat {
+        EndpointFormat {
+            sample_rate,
+            bits_per_sample,
+            channels,
+            channel_mask: if channels == 2 { 3 } else { 0 },
+            is_float,
+            is_pcm,
+        }
+    }
 
     #[test]
     fn state_observation_counts_only_state_changes() {
@@ -960,5 +998,40 @@ mod tests {
         assert!(engine_run_succeeded(&status, true));
         status.stats.fifo_underflows = 1;
         assert!(!engine_run_succeeded(&status, true));
+    }
+
+    #[test]
+    fn endpoint_format_description_distinguishes_common_formats() {
+        assert_eq!(
+            endpoint_format_description(endpoint_format(44_100, 16, 1, false, true)),
+            "44.1 kHz / 16-bit PCM / 1 声道"
+        );
+        assert_eq!(
+            endpoint_format_description(endpoint_format(48_000, 32, 2, true, false)),
+            "48 kHz / 32-bit IEEE float / 2 声道"
+        );
+    }
+
+    #[test]
+    fn availability_distinguishes_native_conversion_and_unsupported() {
+        let native = availability_label(
+            EndpointFlow::Render,
+            endpoint_format(48_000, 32, 2, true, false),
+        );
+        assert!(native.contains("原生支持"));
+
+        let conversion = availability_label(
+            EndpointFlow::Capture,
+            endpoint_format(44_100, 16, 6, false, true),
+        );
+        assert!(conversion.contains("需转换"));
+        assert!(conversion.contains("44.1 kHz / 16-bit PCM / 6 声道"));
+
+        let unsupported = availability_label(
+            EndpointFlow::Render,
+            endpoint_format(48_000, 24, 2, false, true),
+        );
+        assert!(unsupported.contains("不兼容"));
+        assert!(unsupported.contains("24-bit PCM"));
     }
 }

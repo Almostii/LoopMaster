@@ -769,12 +769,29 @@ impl CaptureSource {
         }
     }
 
-    /// 原生捕获格式；`None` 表示内部格式（Process Loopback 固定 48 kHz），
-    /// 不需要重采样。
+    /// 边界转换后的 capture 格式。WASAPI 原生 packet 已先解码并映射为
+    /// 双声道 f32，因此这里只保留原生采样率供重采样器使用。
     fn source_format(&self) -> Option<crate::EndpointFormat> {
         match self {
-            Self::Device(source) | Self::Loopback(source) => Some(source.format()),
+            Self::Device(source) | Self::Loopback(source) => {
+                let native = source.format();
+                Some(crate::EndpointFormat {
+                    sample_rate: native.sample_rate,
+                    bits_per_sample: 32,
+                    channels: INTERNAL_CHANNELS as u16,
+                    channel_mask: 0x3,
+                    is_float: true,
+                    is_pcm: false,
+                })
+            }
             Self::Process(_) => None,
+        }
+    }
+
+    fn max_packet_frames(&self) -> usize {
+        match self {
+            Self::Device(source) | Self::Loopback(source) => source.buffer_frames() as usize,
+            Self::Process(_) => 0,
         }
     }
 }
@@ -793,6 +810,7 @@ impl CaptureResampler {
     fn new(
         source_format: Option<crate::EndpointFormat>,
         block_frames: usize,
+        max_packet_frames: usize,
     ) -> Result<Self, loopmaster_audio_core::ResamplerConfigError> {
         let resampler = match source_format {
             Some(format) if format.sample_rate != loopmaster_audio_core::INTERNAL_SAMPLE_RATE => {
@@ -805,11 +823,39 @@ impl CaptureResampler {
             }
             _ => None,
         };
+        let input_capacity = resampler
+            .as_ref()
+            .map(|value| {
+                max_packet_frames
+                    .saturating_add(value.input_frames().saturating_mul(2))
+                    .saturating_mul(value.channels())
+            })
+            .unwrap_or(0);
+        let mut input_buffer = Vec::with_capacity(input_capacity);
+        input_buffer.clear();
         Ok(Self {
             resampler,
-            input_buffer: Vec::new(),
+            input_buffer,
             output_block: vec![0.0f32; block_frames * INTERNAL_CHANNELS],
         })
+    }
+
+    fn append_silence(&mut self, frames: usize) -> bool {
+        let samples = frames.saturating_mul(INTERNAL_CHANNELS);
+        if self.input_buffer.len().saturating_add(samples) > self.input_buffer.capacity() {
+            return false;
+        }
+        self.input_buffer
+            .resize(self.input_buffer.len() + samples, 0.0);
+        true
+    }
+
+    fn append_samples(&mut self, samples: &[f32]) -> bool {
+        if self.input_buffer.len().saturating_add(samples.len()) > self.input_buffer.capacity() {
+            return false;
+        }
+        self.input_buffer.extend_from_slice(samples);
+        true
     }
 }
 
@@ -866,11 +912,16 @@ fn capture_worker(
         }
     };
     let silence = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
-    let mut capture_resampler = CaptureResampler::new(source.source_format(), block_frames)
-        .map_err(|e| {
-            fail(&state, &stop, &error, e.to_string());
-        })?;
+    let mut capture_resampler = CaptureResampler::new(
+        source.source_format(),
+        block_frames,
+        source.max_packet_frames(),
+    )
+    .map_err(|e| {
+        fail(&state, &stop, &error, e.to_string());
+    })?;
     let mut first_packet = true;
+    let mut conversion_failed = None::<String>;
     while !stop.load(Ordering::Acquire) {
         let result = source.drain_packets(|packet, data| {
             counters.capture_packets.fetch_add(1, Ordering::Relaxed);
@@ -895,21 +946,25 @@ fn capture_worker(
             // 数据路径与峰值统计：非 48 kHz source 先经 FixedOutputResampler
             // 重采样到内部 48 kHz（阶段 B.5），再计算峰值并写入 FIFO。
             let peak;
-            if let Some(resampler) = capture_resampler.resampler.as_mut() {
+            if capture_resampler.resampler.is_some() {
                 let frames = packet.frames as usize;
                 if packet.silent {
-                    capture_resampler.input_buffer.resize(
-                        capture_resampler.input_buffer.len() + frames * INTERNAL_CHANNELS,
-                        0.0,
-                    );
+                    if !capture_resampler.append_silence(frames) {
+                        conversion_failed = Some("capture 重采样输入缓冲区容量不足".to_owned());
+                        return;
+                    }
                 } else if let Some(samples) = data {
-                    capture_resampler.input_buffer.extend_from_slice(samples);
-                } else {
-                    capture_resampler.input_buffer.resize(
-                        capture_resampler.input_buffer.len() + frames * INTERNAL_CHANNELS,
-                        0.0,
-                    );
+                    if !capture_resampler.append_samples(samples) {
+                        conversion_failed = Some("capture 重采样输入缓冲区容量不足".to_owned());
+                        return;
+                    }
+                } else if !capture_resampler.append_silence(frames) {
+                    conversion_failed = Some("capture 重采样输入缓冲区容量不足".to_owned());
+                    return;
                 }
+                let Some(resampler) = capture_resampler.resampler.as_mut() else {
+                    return;
+                };
                 let mut cursor = 0usize;
                 let mut written = 0usize;
                 let mut expected_output = 0usize;
@@ -977,6 +1032,10 @@ fn capture_worker(
             }
             first_packet = false;
         });
+        if let Some(reason) = conversion_failed.take() {
+            fail(&state, &stop, &error, reason);
+            return Err(());
+        }
         match result {
             Ok(stats) if stats.packets == 0 => thread::sleep(Duration::from_millis(1)),
             Ok(_) => {}
@@ -1634,9 +1693,11 @@ mod tests {
             channels: INTERNAL_CHANNELS as u16,
             channel_mask: 3,
             is_float: true,
+            is_pcm: false,
         };
         for block_frames in [240, 960] {
-            let resampler = CaptureResampler::new(Some(source_format), block_frames).unwrap();
+            let resampler =
+                CaptureResampler::new(Some(source_format), block_frames, block_frames * 4).unwrap();
             assert_eq!(
                 resampler.output_block.len(),
                 block_frames * INTERNAL_CHANNELS
