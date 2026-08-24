@@ -285,6 +285,12 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
+        let state_rc = Rc::clone(&state);
+        ui.on_toggle_output(move |enabled: bool| {
+            toggle_output(&state_rc, enabled);
+        });
+    }
+    {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_toggle_monitor(move |enabled: bool| {
@@ -799,6 +805,40 @@ fn toggle_route(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>, enabled: b
         .map(|ui| ui.get_monitor_enabled())
         .unwrap_or(true);
     apply_effective_mute(state, effective_mute(enabled, monitor_enabled));
+}
+
+/// 应用输出设备开关：只影响当前输出 sink 的 incoming sends。
+fn toggle_output(state: &Rc<RefCell<AppState>>, enabled: bool) {
+    let updates = {
+        let mut state_borrow = state.borrow_mut();
+        let sink_id = state_borrow
+            .route_editor
+            .draft()
+            .sinks
+            .first()
+            .map(|sink| sink.id.clone());
+        let Some(sink_id) = sink_id else { return };
+        let sends = state_borrow.route_editor.draft().sends.clone();
+        let mut updates = Vec::new();
+        for send in sends.into_iter().filter(|send| send.sink_id == sink_id) {
+            let muted = !enabled;
+            if state_borrow
+                .route_editor
+                .apply(RouteEdit::SetSendMuted {
+                    source_id: send.source_id.clone(),
+                    sink_id: send.sink_id.clone(),
+                    muted,
+                })
+                .is_ok()
+            {
+                updates.push((send.source_id, send.sink_id, muted));
+            }
+        }
+        updates
+    };
+    if !updates.is_empty() {
+        send_command(state, UiCommand::ApplyMuted { updates });
+    }
 }
 
 /// 应用监听开关（monitor 侧）：与 route 开关合成 effective mute。
