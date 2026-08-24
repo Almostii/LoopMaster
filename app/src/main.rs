@@ -80,7 +80,32 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_toggle_route(move |enabled: bool| {
-            apply_send_change(&ui_weak, &state_rc, None, Some(!enabled));
+            let monitor_enabled = ui_weak
+                .upgrade()
+                .map(|ui| ui.get_monitor_enabled())
+                .unwrap_or(true);
+            apply_send_change(
+                &ui_weak,
+                &state_rc,
+                None,
+                Some(effective_mute(enabled, monitor_enabled)),
+            );
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_toggle_monitor(move |enabled: bool| {
+            let source_enabled = ui_weak
+                .upgrade()
+                .map(|ui| ui.get_route_enabled())
+                .unwrap_or(true);
+            apply_send_change(
+                &ui_weak,
+                &state_rc,
+                None,
+                Some(effective_mute(source_enabled, enabled)),
+            );
         });
     }
     {
@@ -110,6 +135,23 @@ fn main() -> Result<(), slint::PlatformError> {
         },
     );
     ui.run()
+}
+
+fn effective_mute(source_enabled: bool, monitor_enabled: bool) -> bool {
+    !source_enabled || !monitor_enabled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_mute;
+
+    #[test]
+    fn route_is_muted_when_either_side_is_disabled() {
+        assert!(!effective_mute(true, true));
+        assert!(effective_mute(false, true));
+        assert!(effective_mute(true, false));
+        assert!(effective_mute(false, false));
+    }
 }
 
 /// 刷新进程与 sink 设备列表。
@@ -304,8 +346,9 @@ fn apply_send_change(
         state_borrow.gain_db = gain;
     }
     if let Some(mute) = muted {
+        // Source/monitor 开关分别由 UI 双向绑定维护；这里仅保存两者合成后的
+        // effective mute，避免更新一个开关时反向改写另一个开关。
         state_borrow.muted = mute;
-        ui.set_route_enabled(!mute);
     }
     // 先构建图（结束对 state 的可变借用），再取服务应用。
     let graph = match build_graph(&mut state_borrow, &ui) {

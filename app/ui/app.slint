@@ -1003,7 +1003,7 @@ component DemoSourceCard inherits Rectangle {
         : root.title;
 
     width: 280px;
-    height: root.expanded ? (root.show-selector ? 276px : 248px)
+    height: root.expanded ? (root.show-selector ? 288px : 260px)
         : (root.show-selector ? 190px : 178px);
     border-radius: 7px;
     border-width: 1px;
@@ -1112,22 +1112,22 @@ component DemoSourceCard inherits Rectangle {
         x: 14px;
         y: root.show-selector ? 183px : 145px;
         width: root.width - 28px;
-        height: 78px;
+        height: 90px;
         border-radius: 5px;
         border-width: 1px;
         border-color: #e2e8f0;
         background: #f8fafc;
         VerticalBox {
-            padding: 7px;
-            spacing: 5px;
+            padding: 8px;
+            spacing: 6px;
             HorizontalBox {
-                height: 26px;
-                Text { text: "增益 (Gain)"; color: #64748b; font-size: 10px; vertical-alignment: center; }
+                height: 28px;
+                Text { height: 28px; text: "增益 (Gain)"; color: #64748b; font-size: 10px; vertical-alignment: center; }
                 GainSlider { horizontal-stretch: 1; value <=> root.gain; enabled: root.route-enabled; changed(value) => { root.apply-gain(value); } }
             }
             HorizontalBox {
-                height: 20px;
-                Text { text: "静音 (Mute)"; color: #64748b; font-size: 10px; horizontal-stretch: 1; vertical-alignment: center; }
+                height: 24px;
+                Text { height: 24px; text: "静音 (Mute)"; color: #64748b; font-size: 10px; horizontal-stretch: 1; vertical-alignment: center; }
                 Toggle {
                     checked: !root.route-enabled;
                     label: "静音开关";
@@ -1259,7 +1259,7 @@ component DemoMonitorCard inherits Rectangle {
     in property <float> meter: 0;
     in-out property <bool> route-enabled: true;
     callback output-selected(int);
-    callback toggle-route(bool);
+    callback toggle-monitor(bool);
     private property <bool> has-output: root.output-index >= 0
         && root.output-index < root.output-model.length;
 
@@ -1295,7 +1295,7 @@ component DemoMonitorCard inherits Rectangle {
                 Text { height: 18px; text: root.has-output ? root.output-model[root.output-index] : "选择监听设备"; color: #1e293b; font-size: 12px; font-weight: 700; vertical-alignment: center; overflow: elide; }
                 Text { height: 16px; text: "默认音频输出设备"; color: #64748b; font-size: 10px; vertical-alignment: center; overflow: elide; }
             }
-            LoopbackToggle { checked <=> root.route-enabled; enabled: root.has-output; label: "监听开关"; toggled(value) => { root.toggle-route(value); } }
+            LoopbackToggle { checked <=> root.route-enabled; enabled: root.has-output; label: "监听开关"; toggled(value) => { root.toggle-monitor(value); } }
         }
         Rectangle { y: 51px; width: root.width; height: 1px; background: #e2e8f0; }
     }
@@ -1364,6 +1364,7 @@ component DemoDeviceItem inherits Rectangle {
 component DemoWireLayer inherits Rectangle {
     in property <bool> connected: false;
     in property <bool> show-monitor: true;
+    in property <bool> expanded: false;
     width: 1030px;
     height: 520px;
     background: transparent;
@@ -1382,8 +1383,8 @@ component DemoWireLayer inherits Rectangle {
         opacity: root.connected ? 0.95 : 0.72;
         MoveTo { x: 312; y: 233; }
         CubicTo { control-1-x: 338; control-1-y: 233; control-2-x: 350; control-2-y: 180; x: 375; y: 180; }
-        MoveTo { x: 312; y: 399; }
-        CubicTo { control-1-x: 342; control-1-y: 399; control-2-x: 347; control-2-y: 180; x: 375; y: 180; }
+        MoveTo { x: 312; y: root.expanded ? 497 : 399; }
+        CubicTo { control-1-x: 342; control-1-y: root.expanded ? 497 : 399; control-2-x: 347; control-2-y: 180; x: 375; y: 180; }
     }
     if root.show-monitor: Path {
         width: parent.width;
@@ -1420,6 +1421,7 @@ export component MainWindow inherits Window {
     in-out property <float> output-meter-l: 0;
     in-out property <float> output-meter-r: 0;
     in-out property <bool> route-enabled: true;
+    in-out property <bool> monitor-enabled: true;
     in-out property <bool> advanced-expanded: false;
     in-out property <bool> show-monitors: true;
     private property <bool> route-ready: root.source-index >= 0 && root.output-index >= 0;
@@ -1434,6 +1436,7 @@ export component MainWindow inherits Window {
     callback source-selected(int);
     callback output-selected(int);
     callback toggle-route(bool);
+    callback toggle-monitor(bool);
 
     Rectangle {
         width: 1280px;
@@ -1500,7 +1503,7 @@ export component MainWindow inherits Window {
             background: #e9ecef;
             Text { x: 32px; y: 14px; text: "Virtual Mic for Zoom"; color: #1e293b; font-size: 18px; font-weight: 700; }
             Text { x: 32px; y: 39px; text: "当前活动路由"; color: #64748b; font-size: 10px; }
-            DemoWireLayer { x: 0; y: 0; connected: root.running && root.route-ready && root.route-enabled; show-monitor: root.show-monitors; }
+            DemoWireLayer { x: 0; y: 0; connected: root.running && root.route-ready && root.route-enabled && root.monitor-enabled; show-monitor: root.show-monitors; expanded: root.advanced-expanded; }
             ColumnHeader { x: 32px; y: 58px; title: "Sources 音频来源"; subtitle: root.source-model.length + " 个应用程序"; }
             ColumnHeader { x: 382px; y: 58px; title: "Output Channels 输出通道"; subtitle: "4 通道 (2 组立体声)"; }
             if root.show-monitors: ColumnHeader { x: 732px; y: 58px; title: "Monitors 监听设备"; subtitle: "1 监听设备"; }
@@ -1520,7 +1523,7 @@ export component MainWindow inherits Window {
             }
             if root.source-model.length > 1: DemoSourcePreview {
                 x: 32px;
-                y: 314px;
+                y: root.advanced-expanded ? 412px : 314px;
                 title: root.source-model[1];
                 subtitle: "进程来源";
                 meter: root.source-meter * 0.82;
@@ -1528,7 +1531,7 @@ export component MainWindow inherits Window {
                 source-index: 1;
                 selected(index) => { root.source-selected(index); }
             }
-            DemoChannelCard { x: 382px; y: 110px; title: "Channels 1 & 2"; first-label: "Channel 1 (L)"; second-label: "Channel 2 (R)"; meter: root.source-meter; connected: root.route-ready && root.route-enabled; }
+            DemoChannelCard { x: 382px; y: 110px; title: "Channels 1 & 2"; first-label: "Channel 1 (L)"; second-label: "Channel 2 (R)"; meter: root.source-meter; connected: root.route-ready && root.route-enabled && root.monitor-enabled; }
             DemoChannelCard { x: 382px; y: 248px; title: "Channels 3 & 4"; first-label: "Channel 3"; second-label: "Channel 4"; meter: 0; connected: false; }
             if root.show-monitors: DemoMonitorCard {
                 x: 732px;
@@ -1536,9 +1539,9 @@ export component MainWindow inherits Window {
                 output-model: root.output-model;
                 output-index <=> root.output-index;
                 meter: root.output-meter-l;
-                route-enabled <=> root.route-enabled;
+                route-enabled <=> root.monitor-enabled;
                 output-selected(index) => { root.output-selected(index); }
-                toggle-route(value) => { root.toggle-route(value); }
+                toggle-monitor(value) => { root.toggle-monitor(value); }
             }
             Rectangle {
                 x: 0;
