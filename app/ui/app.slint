@@ -530,6 +530,8 @@ component FooterButton inherits Rectangle {
 component ColumnHeader inherits Rectangle {
     in property <string> title: "";
     in property <string> subtitle: "";
+    in property <bool> enabled: true;
+    callback add-requested();
 
     width: 280px;
     height: 44px;
@@ -566,14 +568,22 @@ component ColumnHeader inherits Rectangle {
         border-width: 1px;
         border-color: #e2e8f0;
         background: #ffffff;
-        opacity: 0.6;
+        opacity: root.enabled ? (header-touch.has-hover ? 1 : 0.82) : 0.35;
+        accessible-role: button;
+        accessible-label: "添加" + root.title;
+        accessible-enabled: root.enabled;
+        accessible-action-default => { if root.enabled { root.add-requested(); } }
         Text {
             text: "+";
-            color: #64748b;
+            color: root.enabled ? #334155 : #94a3b8;
             font-size: 15px;
             font-weight: 600;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+        header-touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.add-requested(); }
         }
     }
     Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #d7dde3; }
@@ -1462,13 +1472,20 @@ export component MainWindow inherits Window {
     in-out property <bool> advanced-expanded: false;
     in-out property <bool> show-monitors: true;
     in-out property <bool> refreshing: false;
-    private property <bool> route-ready: root.source-index >= 0 && root.output-index >= 0;
+    private property <bool> route-ready: root.source-index >= 0
+        && root.source-index < root.source-model.length
+        && root.output-index >= 0
+        && root.output-index < root.output-model.length;
     private property <bool> engine-error: root.engine-phase == "failed";
     private property <bool> engine-degraded: root.engine-phase == "degraded" || root.engine-phase == "reconnecting";
 
     callback refresh();
     callback start-engine();
     callback stop-engine();
+    // 三列标题上的加号：由宿主决定打开相应的添加流程。
+    callback add-source();
+    callback add-output();
+    callback add-monitor();
     callback apply-gain(float);
     callback source-selected(int);
     callback output-selected(int);
@@ -1533,13 +1550,23 @@ export component MainWindow inherits Window {
             background: #f2f4f6;
             Rectangle { x: 249px; y: 0; width: 1px; height: 672px; background: #d6dbe1; }
             Text { x: 16px; y: 14px; text: "▷"; color: #64748b; font-size: 11px; }
-            Text { x: 34px; y: 13px; text: "虚拟设备 (DEVICES)"; color: #64748b; font-size: 11px; font-weight: 700; }
-            DemoDeviceItem { x: 10px; y: 45px; title: "Virtual Mic for Zoom"; subtitle: "Music, Farrago, USB Mic"; selected: true; active: root.running; route-enabled <=> root.route-enabled; toggled(value) => { root.toggle-route(value); } }
-            DemoDeviceItem { x: 10px; y: 131px; title: "Pass-Thru (系统直通)"; subtitle: "Pass-Thru 默认通道"; selected: false; route-enabled: false; }
-            DemoDeviceItem { x: 10px; y: 217px; title: "主路由 (Main Router)"; subtitle: "1 进程, 1 硬件设备"; selected: false; route-enabled: false; }
+            Text { x: 34px; y: 13px; text: "当前路由 (ROUTE)"; color: #64748b; font-size: 11px; font-weight: 700; }
+            // 这里展示当前编辑中的路由摘要，不把示例名称伪装成虚拟设备。
+            DemoDeviceItem {
+                x: 10px;
+                y: 45px;
+                title: "当前路由";
+                subtitle: root.route-ready
+                    ? (root.source-model[root.source-index] + " → " + root.output-model[root.output-index])
+                    : "尚未配置音源和输出";
+                selected: true;
+                active: root.running;
+                route-enabled <=> root.route-enabled;
+                toggled(value) => { root.toggle-route(value); }
+            }
             Rectangle { x: 0; y: 624px; width: 250px; height: 1px; background: #d6dbe1; }
-            Text { x: 24px; y: 640px; text: "+  新建虚拟设备"; color: #334155; font-size: 10px; font-weight: 600; }
-            Text { x: 220px; y: 640px; text: "—"; color: #94a3b8; font-size: 10px; horizontal-alignment: right; }
+            Text { x: 24px; y: 640px; text: "输出设备由系统提供"; color: #64748b; font-size: 10px; font-weight: 600; }
+            Text { x: 24px; y: 656px; text: "使用主界面 + 添加音源或输出"; color: #94a3b8; font-size: 9px; }
         }
 
         Rectangle {
@@ -1548,12 +1575,41 @@ export component MainWindow inherits Window {
             width: 1030px;
             height: 672px;
             background: #e9ecef;
-            Text { x: 32px; y: 14px; text: "Virtual Mic for Zoom"; color: #1e293b; font-size: 18px; font-weight: 700; }
+            Text {
+                x: 32px;
+                y: 14px;
+                width: 680px;
+                text: root.route-ready
+                    ? (root.source-model[root.source-index] + " → " + root.output-model[root.output-index])
+                    : "主路由";
+                color: #1e293b;
+                font-size: 18px;
+                font-weight: 700;
+                overflow: elide;
+            }
             Text { x: 32px; y: 39px; text: "当前活动路由"; color: #64748b; font-size: 10px; }
             DemoWireLayer { x: 0; y: 0; connected: root.running && root.route-ready && root.route-enabled && root.monitor-enabled; show-monitor: root.show-monitors; expanded: root.advanced-expanded; }
-            ColumnHeader { x: 32px; y: 58px; title: "Sources 音频来源"; subtitle: root.source-model.length + " 个应用程序"; }
-            ColumnHeader { x: 382px; y: 58px; title: "Output Channels 输出通道"; subtitle: "4 通道 (2 组立体声)"; }
-            if root.show-monitors: ColumnHeader { x: 732px; y: 58px; title: "Monitors 监听设备"; subtitle: "1 监听设备"; }
+            ColumnHeader {
+                x: 32px;
+                y: 58px;
+                title: "Sources 音频来源";
+                subtitle: "可用来源 " + root.source-model.length;
+                add-requested => { root.add-source(); }
+            }
+            ColumnHeader {
+                x: 382px;
+                y: 58px;
+                title: "Output Channels 输出通道";
+                subtitle: "可用输出设备 " + root.output-model.length;
+                add-requested => { root.add-output(); }
+            }
+            if root.show-monitors: ColumnHeader {
+                x: 732px;
+                y: 58px;
+                title: "Monitors 监听设备";
+                subtitle: root.output-model.length > 0 ? "可添加监听目标" : "暂无可用输出设备";
+                add-requested => { root.add-monitor(); }
+            }
             DemoSourceCard {
                 x: 32px;
                 y: 110px;
@@ -1567,16 +1623,6 @@ export component MainWindow inherits Window {
                 source-selected(index) => { root.source-selected(index); }
                 toggle-route(value) => { root.toggle-route(value); }
                 apply-gain(value) => { root.apply-gain(value); }
-            }
-            if root.source-model.length > 1: DemoSourcePreview {
-                x: 32px;
-                y: root.advanced-expanded ? 412px : 314px;
-                title: root.source-model[1];
-                subtitle: "进程来源";
-                meter: root.source-meter * 0.82;
-                enabled: true;
-                source-index: 1;
-                selected(index) => { root.source-selected(index); }
             }
             DemoChannelCard { x: 382px; y: 110px; title: "Channels 1 & 2"; first-label: "Channel 1 (L)"; second-label: "Channel 2 (R)"; meter: root.source-meter; connected: root.route-ready && root.route-enabled && root.monitor-enabled; }
             DemoChannelCard { x: 382px; y: 248px; title: "Channels 3 & 4"; first-label: "Channel 3"; second-label: "Channel 4"; meter: 0; connected: false; }
