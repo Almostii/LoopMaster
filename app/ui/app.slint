@@ -147,7 +147,7 @@ component SourceCard inherits Rectangle {
     callback apply-gain(float);
     callback toggle-mute(bool);
     callback source-selected(int);
-    width: 300px;
+    width: 260px;
     height: 365px;
     border-radius: 8px;
     border-width: 1px;
@@ -204,11 +204,16 @@ component SourceCard inherits Rectangle {
 }
 
 component OutputCard inherits Rectangle {
+    in property <[string]> output-model: [];
+    in-out property <int> output-index: -1;
     in property <float> meter-l: 0;
     in property <float> meter-r: 0;
     in property <bool> running: false;
-    width: 252px;
-    height: 220px;
+    in property <bool> route-enabled: true;
+    callback output-selected(int);
+    callback toggle-route(bool);
+    width: 230px;
+    height: 300px;
     border-radius: 8px;
     border-width: 1px;
     border-color: #d8dde1;
@@ -219,22 +224,46 @@ component OutputCard inherits Rectangle {
         HorizontalBox {
             spacing: 8px;
             Text { text: "Output Channels"; color: #282e35; font-size: 14px; font-weight: 700; }
-            Text { text: "2 Channels"; color: #899199; font-size: 11px; vertical-alignment: center; }
+            Text { text: "2 Channels"; color: #899199; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
         }
         Rectangle { height: 1px; background: #edf0f2; }
         ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: true; }
         ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: true; }
+        Rectangle { height: 1px; background: #edf0f2; }
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "输出设备"; color: #626a73; font-size: 12px; vertical-alignment: center; }
+            ComboBox {
+                model: root.output-model;
+                current-index <=> root.output-index;
+                horizontal-stretch: 1;
+                selected(_) => { root.output-selected(root.output-index); }
+            }
+        }
+        Text {
+            text: root.output-index >= 0 ? root.output-model[root.output-index] : "未选择输出设备";
+            color: #626a73;
+            font-size: 11px;
+            overflow: elide;
+        }
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "路由"; color: #626a73; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+            Toggle {
+                checked: root.route-enabled;
+                toggled(value) => { root.toggle-route(value); }
+            }
+        }
     }
 }
 
 component MonitorCard inherits Rectangle {
-    in property <[string]> output-model: [];
-    in-out property <int> output-index: -1;
+    in property <string> output-name: "";
+    in property <int> output-count: 0;
     in property <float> meter-l: 0;
     in property <float> meter-r: 0;
     in property <bool> running: false;
-    callback output-selected(int);
-    width: 292px;
+    width: 250px;
     height: 270px;
     border-radius: 8px;
     border-width: 1px;
@@ -246,23 +275,18 @@ component MonitorCard inherits Rectangle {
         HorizontalBox {
             spacing: 8px;
             Text { text: "Monitors"; color: #282e35; font-size: 14px; font-weight: 700; }
-            Text { text: "1 Device"; color: #899199; font-size: 11px; vertical-alignment: center; }
+            Text { text: root.output-count + " Devices"; color: #899199; font-size: 11px; vertical-alignment: center; }
         }
         Rectangle { height: 1px; background: #edf0f2; }
         ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: false; }
         ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: false; }
-        Text { text: root.output-index >= 0 ? root.output-model[root.output-index] : "未选择输出设备"; color: #626a73; font-size: 11px; overflow: elide; }
-        ComboBox {
-            model: root.output-model;
-            current-index <=> root.output-index;
-            selected(_) => { root.output-selected(root.output-index); }
-        }
+        Text { text: root.output-name == "" ? "未选择输出设备" : root.output-name; color: #626a73; font-size: 11px; overflow: elide; }
     }
 }
 
 component SignalRail inherits VerticalBox {
     in property <bool> active: false;
-    width: 100px;
+    width: 45px;
     height: 220px;
     padding: 0;
     spacing: 36px;
@@ -273,7 +297,7 @@ component SignalRail inherits VerticalBox {
 
 export component MainWindow inherits Window {
     title: "LoopMaster";
-    min-width: 1400px;
+    min-width: 1100px;
     min-height: 820px;
     background: #eef1f4;
     in-out property <[string]> source-model: [];
@@ -288,6 +312,7 @@ export component MainWindow inherits Window {
     in-out property <float> source-meter: 0;
     in-out property <float> output-meter-l: 0;
     in-out property <float> output-meter-r: 0;
+    in-out property <bool> route-enabled: true;
     callback refresh();
     callback start-engine();
     callback stop-engine();
@@ -295,6 +320,7 @@ export component MainWindow inherits Window {
     callback toggle-mute(bool);
     callback source-selected(int);
     callback output-selected(int);
+    callback toggle-route(bool);
 
     VerticalBox {
         padding: 20px;
@@ -334,7 +360,7 @@ export component MainWindow inherits Window {
             spacing: 18px;
             horizontal-stretch: 1;
             Rectangle {
-                width: 206px;
+                width: 170px;
                 border-radius: 10px;
                 background: #ffffff;
                 border-width: 1px;
@@ -358,7 +384,7 @@ export component MainWindow inherits Window {
                     HorizontalBox {
                         height: 30px;
                         Text { text: "Sources"; color: #30363d; font-size: 16px; font-weight: 700; }
-                        Text { text: "1 App, 1 Device"; color: #899199; font-size: 12px; vertical-alignment: center; }
+                        Text { text: "1 App, " + root.output-model.length + " Devices"; color: #899199; font-size: 12px; vertical-alignment: center; }
                         Rectangle { horizontal-stretch: 1; }
                         HeaderAction { clicked => { root.refresh(); } }
                     }
@@ -378,15 +404,23 @@ export component MainWindow inherits Window {
                             source-selected(index) => { root.source-selected(index); }
                         }
                         SignalRail { active: root.running && root.source-index >= 0; }
-                        OutputCard { meter-l: root.output-meter-l; meter-r: root.output-meter-r; running: root.running; }
-                        SignalRail { active: root.running && root.output-index >= 0; }
-                        MonitorCard {
+                        OutputCard {
                             output-model: root.output-model;
                             output-index <=> root.output-index;
                             meter-l: root.output-meter-l;
                             meter-r: root.output-meter-r;
                             running: root.running;
+                            route-enabled: root.route-enabled;
                             output-selected(index) => { root.output-selected(index); }
+                            toggle-route(value) => { root.toggle-route(value); }
+                        }
+                        SignalRail { active: root.running && root.output-index >= 0; }
+                        MonitorCard {
+                            output-name: root.output-index >= 0 ? root.output-model[root.output-index] : "";
+                            output-count: root.output-model.length;
+                            meter-l: root.output-meter-l;
+                            meter-r: root.output-meter-r;
+                            running: root.running;
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }
