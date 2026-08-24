@@ -852,7 +852,7 @@ component MixNode inherits Rectangle {
             height: 36px;
             padding: 0;
             spacing: 1px;
-            Text { text: "Channels 1 & 2"; color: #1e293b; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+            Text { text: "输出混音"; color: #1e293b; font-size: 13px; font-weight: 700; vertical-alignment: center; }
             Text { text: "立体声通道组"; color: #64748b; font-size: 10px; vertical-alignment: center; }
         }
         Rectangle { y: 56px; width: root.width; height: 1px; background: #e2e8f0; }
@@ -865,8 +865,8 @@ component MixNode inherits Rectangle {
         padding: 0;
         spacing: 8px;
         Text { text: "默认立体声映射"; color: #64748b; font-size: 10px; font-weight: 600; }
-        MixChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
-        MixChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+        MixChannelRow { label: "左声道"; level: root.route-enabled ? root.meter : 0; }
+        MixChannelRow { label: "右声道"; level: root.route-enabled ? root.meter : 0; }
     }
     RouteSocket { x: -7px; y: 143px; active: root.route-enabled; }
     RouteSocket { x: root.width - 7px; y: 143px; active: root.route-enabled && root.show-output; }
@@ -949,8 +949,8 @@ component OutputNode inherits Rectangle {
             height: 48px;
             padding: 0;
             spacing: 4px;
-            MonitorChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
-            MonitorChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+            MonitorChannelRow { label: "左声道"; level: root.route-enabled ? root.meter : 0; }
+            MonitorChannelRow { label: "右声道"; level: root.route-enabled ? root.meter : 0; }
         }
         Rectangle { vertical-stretch: 1; }
     }
@@ -1063,6 +1063,7 @@ component DemoSourceCard inherits Rectangle {
     callback source-selected(int);
     callback toggle-route(bool);
     callback apply-gain(float);
+    callback remove-requested();
 
     private property <bool> has-source: root.source-index >= 0
         && root.source-index < root.source-model.length;
@@ -1131,6 +1132,17 @@ component DemoSourceCard inherits Rectangle {
                 enabled: root.has-source || !root.show-selector;
                 label: "声源开关";
                 toggled(value) => { root.toggle-route(value); }
+            }
+            Rectangle {
+                width: 20px;
+                height: 24px;
+                border-radius: 4px;
+                background: remove-touch.has-hover ? #fff1f2 : transparent;
+                Text { width: parent.width; height: parent.height; text: "×"; color: #b23f3f; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                accessible-role: button;
+                accessible-label: "移除音频来源";
+                accessible-action-default => { root.remove-requested(); }
+                remove-touch := TouchArea { clicked => { root.remove-requested(); } }
             }
         }
         Rectangle { y: 51px; width: root.width; height: 1px; background: #e2e8f0; }
@@ -1205,6 +1217,66 @@ component DemoSourceCard inherits Rectangle {
     }
 }
 
+component RouteSummaryCard inherits Rectangle {
+    in property <string> title: "";
+    in property <string> kind: "音频来源";
+    in property <bool> route-enabled: true;
+    callback toggled(bool);
+    callback remove-requested();
+
+    width: 280px;
+    height: 78px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    background: #ffffff;
+    opacity: root.route-enabled ? 1 : 0.65;
+    drop-shadow-blur: 4px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: #00000012;
+
+    HorizontalBox {
+        x: 12px;
+        y: 10px;
+        width: root.width - 24px;
+        height: 30px;
+        spacing: 8px;
+        Rectangle {
+            width: 28px;
+            height: 28px;
+            border-radius: 7px;
+            background: root.kind == "输出设备" ? #f1f5f9 : #e8f7f4;
+            if root.kind == "输出设备": OutputGlyph { x: 4px; y: 4px; }
+            if root.kind != "输出设备": SourceGlyph { x: 4px; y: 4px; }
+        }
+        VerticalBox {
+            padding: 0;
+            spacing: 0;
+            horizontal-stretch: 1;
+            Text { height: 17px; text: root.title; color: #1e293b; font-size: 11px; font-weight: 700; overflow: elide; }
+            Text { height: 14px; text: root.kind; color: #64748b; font-size: 9px; overflow: elide; }
+        }
+        LoopbackToggle {
+            checked: root.route-enabled;
+            enabled: true;
+            label: root.kind + "开关";
+            toggled(value) => { root.toggled(value); }
+        }
+        Rectangle {
+            width: 20px;
+            height: 24px;
+            border-radius: 4px;
+            background: remove-touch.has-hover ? #fff1f2 : transparent;
+            Text { width: parent.width; height: parent.height; text: "×"; color: #b23f3f; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+            accessible-role: button;
+            accessible-label: "移除" + root.kind;
+            accessible-action-default => { root.remove-requested(); }
+            remove-touch := TouchArea { clicked => { root.remove-requested(); } }
+        }
+    }
+    LevelMeter { x: 12px; y: 57px; width: root.width - 24px; level: root.route-enabled ? 0.18 : 0; height: 6px; }
+}
+
 component DemoSourcePreview inherits Rectangle {
     in property <string> title: "Music";
     in property <string> subtitle: "进程来源";
@@ -1271,9 +1343,9 @@ component DemoSourcePreview inherits Rectangle {
 }
 
 component DemoChannelCard inherits Rectangle {
-    in property <string> title: "Channels 1 & 2";
-    in property <string> first-label: "Channel 1 (L)";
-    in property <string> second-label: "Channel 2 (R)";
+    in property <string> title: "输出混音";
+    in property <string> first-label: "左声道";
+    in property <string> second-label: "右声道";
     in property <float> meter: 0;
     in property <bool> connected: false;
     width: 280px;
@@ -1385,8 +1457,8 @@ component DemoMonitorCard inherits Rectangle {
         height: 48px;
         padding: 0;
         spacing: 8px;
-        MonitorChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
-        MonitorChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+        MonitorChannelRow { label: "左声道"; level: root.route-enabled ? root.meter : 0; }
+        MonitorChannelRow { label: "右声道"; level: root.route-enabled ? root.meter : 0; }
     }
     RouteSocket { x: -7px; y: 126px; active: root.route-enabled && root.has-output; }
 }
@@ -1484,6 +1556,10 @@ export component MainWindow inherits Window {
     in-out property <int> output-index: -1;
     in-out property <int> route-source-count: 0;
     in-out property <int> route-output-count: 0;
+    in-out property <[string]> route-source-extra-model: [];
+    in-out property <[bool]> route-source-extra-enabled: [];
+    in-out property <[string]> route-output-extra-model: [];
+    in-out property <[bool]> route-output-extra-enabled: [];
     in-out property <float> gain: 0;
     in-out property <bool> running: false;
     // 结构化引擎阶段：stopped|starting|running|degraded|reconnecting|failed，
@@ -1513,6 +1589,12 @@ export component MainWindow inherits Window {
     callback add-source();
     callback add-output();
     callback add-monitor();
+    callback remove-current-source();
+    callback remove-source(int);
+    callback toggle-source(int, bool);
+    callback remove-current-output();
+    callback remove-output(int);
+    callback toggle-output-node(int, bool);
     callback apply-gain(float);
     callback source-selected(int);
     callback output-selected(int);
@@ -1651,6 +1733,25 @@ export component MainWindow inherits Window {
                 source-selected(index) => { root.source-selected(index); }
                 toggle-route(value) => { root.toggle-route(value); }
                 apply-gain(value) => { root.apply-gain(value); }
+                remove-requested => { root.remove-current-source(); }
+            }
+            Flickable {
+                x: 32px;
+                y: 310px;
+                width: 280px;
+                height: 300px;
+                viewport-height: root.route-source-extra-model.length * 86px;
+                VerticalBox {
+                    width: 280px;
+                    spacing: 8px;
+                    for source[index] in root.route-source-extra-model : RouteSummaryCard {
+                        title: source;
+                        kind: "音频来源";
+                        route-enabled: root.route-source-extra-enabled[index];
+                        toggled(value) => { root.toggle-source(index + 1, value); }
+                        remove-requested => { root.remove-source(index + 1); }
+                    }
+                }
             }
             // Output Channels 对应真实 Render endpoint；不把声卡名称中的 1/2、3/4
             // 伪装成独立的虚拟通道或 bus。
@@ -1675,6 +1776,25 @@ export component MainWindow inherits Window {
                 route-enabled <=> root.monitor-enabled;
                 output-selected(index) => { root.output-selected(index); }
                 toggle-monitor(value) => { root.toggle-monitor(value); }
+                remove-requested => { root.remove-current-output(); }
+            }
+            Flickable {
+                x: 732px;
+                y: 310px;
+                width: 280px;
+                height: 300px;
+                viewport-height: root.route-output-extra-model.length * 86px;
+                VerticalBox {
+                    width: 280px;
+                    spacing: 8px;
+                    for output[index] in root.route-output-extra-model : RouteSummaryCard {
+                        title: output;
+                        kind: "输出设备";
+                        route-enabled: root.route-output-extra-enabled[index];
+                        toggled(value) => { root.toggle-output-node(index + 1, value); }
+                        remove-requested => { root.remove-output(index + 1); }
+                    }
+                }
             }
             Rectangle {
                 x: 0;

@@ -35,6 +35,9 @@ enum UiCommand {
     ApplyMuted {
         updates: Vec<(SourceId, SinkId, bool)>,
     },
+    ApplyEnabled {
+        updates: Vec<(SourceId, SinkId, bool)>,
+    },
     /// 请求服务线程退出（应用退出时发送）。
     Shutdown,
 }
@@ -154,6 +157,21 @@ fn service_loop(rx: Receiver<UiCommand>, out: Sender<UiEvent>) {
                     }
                 }
             }
+            UiCommand::ApplyEnabled { updates } => {
+                for (source_id, sink_id, enabled) in updates {
+                    if let Err(error) = service.apply(|engine| {
+                        engine
+                            .command(EngineCommand::SetSendEnabled {
+                                source_id,
+                                sink_id,
+                                enabled,
+                            })
+                            .map_err(|error| error.to_string())
+                    }) {
+                        let _ = out.send(UiEvent::Error(error));
+                    }
+                }
+            }
             UiCommand::Shutdown => break, // 实际在命令接收处处理，防御性覆盖
         }
     }
@@ -255,6 +273,46 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_add_monitor(move || {
             state_rc.borrow_mut().pending_add = Some(AddTarget::Sink);
             request_refresh(&ui_weak, &state_rc);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_remove_current_source(move || {
+            remove_source_at(&ui_weak, &state_rc, 0);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_remove_source(move |index| {
+            remove_source_at(&ui_weak, &state_rc, index);
+        });
+    }
+    {
+        let state_rc = Rc::clone(&state);
+        ui.on_toggle_source(move |index, enabled| {
+            toggle_source_at(&state_rc, index, enabled);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_remove_current_output(move || {
+            remove_sink_at(&ui_weak, &state_rc, 0);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_remove_output(move |index| {
+            remove_sink_at(&ui_weak, &state_rc, index);
+        });
+    }
+    {
+        let state_rc = Rc::clone(&state);
+        ui.on_toggle_output_node(move |index, enabled| {
+            toggle_sink_at(&state_rc, index, enabled);
         });
     }
     {
@@ -713,8 +771,179 @@ fn submit_draft_if_ready(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
 
 fn sync_route_counts(ui: &MainWindow, state: &Rc<RefCell<AppState>>) {
     let state_borrow = state.borrow();
-    ui.set_route_source_count(state_borrow.route_editor.draft().sources.len() as i32);
-    ui.set_route_output_count(state_borrow.route_editor.draft().sinks.len() as i32);
+    let graph = state_borrow.route_editor.draft();
+    ui.set_route_source_count(graph.sources.len() as i32);
+    ui.set_route_output_count(graph.sinks.len() as i32);
+    let source_names: Vec<SharedString> = graph
+        .sources
+        .iter()
+        .skip(1)
+        .map(|source| SharedString::from(source.display_name.clone()))
+        .collect();
+    let source_enabled: Vec<bool> = graph
+        .sources
+        .iter()
+        .skip(1)
+        .map(|source| {
+            graph
+                .sends
+                .iter()
+                .filter(|send| send.source_id == source.id)
+                .any(|send| send.enabled && !send.muted)
+        })
+        .collect();
+    let sink_names: Vec<SharedString> = graph
+        .sinks
+        .iter()
+        .skip(1)
+        .map(|sink| SharedString::from(sink.display_name.clone()))
+        .collect();
+    let sink_enabled: Vec<bool> = graph
+        .sinks
+        .iter()
+        .skip(1)
+        .map(|sink| {
+            graph
+                .sends
+                .iter()
+                .filter(|send| send.sink_id == sink.id)
+                .any(|send| send.enabled && !send.muted)
+        })
+        .collect();
+    ui.set_route_source_extra_model(Rc::new(VecModel::from(source_names)).into());
+    ui.set_route_source_extra_enabled(Rc::new(VecModel::from(source_enabled)).into());
+    ui.set_route_output_extra_model(Rc::new(VecModel::from(sink_names)).into());
+    ui.set_route_output_extra_enabled(Rc::new(VecModel::from(sink_enabled)).into());
+}
+
+fn restart_after_draft_edit(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
+    let Some(ui) = ui.upgrade() else { return };
+    sync_route_counts(&ui, state);
+    let graph = state.borrow().route_editor.draft().clone();
+    if graph.sources.is_empty() || graph.sinks.is_empty() || graph.sends.is_empty() {
+        send_command(state, UiCommand::Stop);
+        ui.set_engine_phase(SharedString::from("stopped"));
+        ui.set_engine_state(SharedString::from("路由已更新，等待音源和输出设备"));
+        return;
+    }
+    if !state.borrow().engine_active {
+        return;
+    }
+    ui.set_engine_phase(SharedString::from("starting"));
+    ui.set_engine_state(SharedString::from("路由已更新，正在重启…"));
+    send_command(state, UiCommand::Start { graph });
+}
+
+fn remove_source_at(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>, index: i32) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    let mut state_borrow = state.borrow_mut();
+    let Some(source) = state_borrow
+        .route_editor
+        .draft()
+        .sources
+        .get(index)
+        .cloned()
+    else {
+        return;
+    };
+    if state_borrow
+        .route_editor
+        .apply(RouteEdit::RemoveSource(source.id))
+        .is_ok()
+    {
+        drop(state_borrow);
+        restart_after_draft_edit(ui, state);
+    }
+}
+
+fn remove_sink_at(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>, index: i32) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    let mut state_borrow = state.borrow_mut();
+    let Some(sink) = state_borrow.route_editor.draft().sinks.get(index).cloned() else {
+        return;
+    };
+    if state_borrow
+        .route_editor
+        .apply(RouteEdit::RemoveSink(sink.id))
+        .is_ok()
+    {
+        drop(state_borrow);
+        restart_after_draft_edit(ui, state);
+    }
+}
+
+fn toggle_source_at(state: &Rc<RefCell<AppState>>, index: i32, enabled: bool) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    let mut state_borrow = state.borrow_mut();
+    let Some(source_id) = state_borrow
+        .route_editor
+        .draft()
+        .sources
+        .get(index)
+        .map(|source| source.id.clone())
+    else {
+        return;
+    };
+    let sends = state_borrow.route_editor.draft().sends.clone();
+    let mut updates = Vec::new();
+    for send in sends.into_iter().filter(|send| send.source_id == source_id) {
+        if state_borrow
+            .route_editor
+            .apply(RouteEdit::SetSendEnabled {
+                source_id: send.source_id.clone(),
+                sink_id: send.sink_id.clone(),
+                enabled,
+            })
+            .is_ok()
+        {
+            updates.push((send.source_id, send.sink_id, enabled));
+        }
+    }
+    drop(state_borrow);
+    if !updates.is_empty() {
+        send_command(state, UiCommand::ApplyEnabled { updates });
+    }
+}
+
+fn toggle_sink_at(state: &Rc<RefCell<AppState>>, index: i32, enabled: bool) {
+    let Ok(index) = usize::try_from(index) else {
+        return;
+    };
+    let mut state_borrow = state.borrow_mut();
+    let Some(sink_id) = state_borrow
+        .route_editor
+        .draft()
+        .sinks
+        .get(index)
+        .map(|sink| sink.id.clone())
+    else {
+        return;
+    };
+    let sends = state_borrow.route_editor.draft().sends.clone();
+    let mut updates = Vec::new();
+    for send in sends.into_iter().filter(|send| send.sink_id == sink_id) {
+        if state_borrow
+            .route_editor
+            .apply(RouteEdit::SetSendEnabled {
+                source_id: send.source_id.clone(),
+                sink_id: send.sink_id.clone(),
+                enabled,
+            })
+            .is_ok()
+        {
+            updates.push((send.source_id, send.sink_id, enabled));
+        }
+    }
+    drop(state_borrow);
+    if !updates.is_empty() {
+        send_command(state, UiCommand::ApplyEnabled { updates });
+    }
 }
 
 /// 按当前 UI 选择构造并校验路由图草稿。
