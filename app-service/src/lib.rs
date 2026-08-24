@@ -730,12 +730,14 @@ impl EngineService {
     }
 
     fn apply_route(&self, snapshot: RouteGraphSnapshot) -> Result<(), ServiceError> {
+        // 锁顺序统一为 graph → engine，与 update_send 一致，避免并发命令死锁。
+        let mut graph_guard = self.inner.graph.lock().expect("路由锁未中毒");
         self.inner
             .engine
             .lock()
             .expect("引擎锁未中毒")
             .update_graph(snapshot.clone())?;
-        *self.inner.graph.lock().expect("路由锁未中毒") = snapshot;
+        *graph_guard = snapshot;
         Ok(())
     }
 
