@@ -14,7 +14,7 @@ use loopmaster_audio_core::{EndpointId, RouteGraph, RouteGraphError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -71,14 +71,17 @@ impl AppConfig {
         Self::from_json(&bytes)
     }
 
-    /// 保存到文件：先写同目录临时文件，再原子替换目标文件。
+    /// 保存到文件：先写同目录临时文件并 `sync_all`，再原子替换目标文件。
     ///
     /// 写入中断只会留下一个不完整的 `.tmp` 残留，目标文件保持上一次
-    /// 完整内容；下一次保存会覆盖残留的 `.tmp`。
+    /// 完整内容；下一次保存会覆盖残留的 `.tmp`。`sync_all` 保证数据在
+    /// 进程崩溃/断电场景下已落盘后再替换。
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         let bytes = self.to_json()?;
         let tmp = temp_path_for(path);
-        fs::write(&tmp, &bytes)?;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -251,6 +254,19 @@ mod tests {
         assert!(matches!(
             error,
             ConfigError::Graph(RouteGraphError::InvalidGain(99.0))
+        ));
+    }
+
+    #[test]
+    fn send_referencing_missing_source_is_rejected_on_load() {
+        let mut graph = graph();
+        graph.sends[0].source_id = SourceId("ghost".into());
+        let config = AppConfig::new(graph);
+        let json = config.to_json().unwrap();
+        let error = AppConfig::from_json(&json).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::Graph(RouteGraphError::MissingSource(ref id)) if id == "ghost"
         ));
     }
 
