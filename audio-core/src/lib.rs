@@ -77,6 +77,12 @@ pub struct SendSpec {
     pub sink_id: SinkId,
     pub gain_db: f32,
     pub muted: bool,
+    /// send 是否参与混音计划。
+    ///
+    /// `enabled=false` 保留增益、静音与通道映射配置，但整条 send 从混音计划
+    /// 中跳过（等价于不存在）；`muted=true` 仍参与混音计划，只是增益被置静音。
+    /// 两者语义不同：关闭 send 后重新启用，其增益/映射配置原样恢复。
+    pub enabled: bool,
     pub channel_map: Vec<(u16, u16)>,
 }
 
