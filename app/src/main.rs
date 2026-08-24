@@ -358,6 +358,7 @@ fn build_graph(state: &mut AppState, ui: &MainWindow) -> Result<RouteGraph, Stri
             sink_id: SinkId("sink".into()),
             gain_db: state.gain_db,
             muted: state.muted,
+            enabled: true,
             channel_map: Vec::new(),
         }],
     })
