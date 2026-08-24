@@ -146,6 +146,7 @@ component SourceCard inherits Rectangle {
     in property <bool> running: false;
     callback apply-gain(float);
     callback toggle-mute(bool);
+    callback source-selected(int);
     width: 300px;
     height: 365px;
     border-radius: 8px;
@@ -192,7 +193,12 @@ component SourceCard inherits Rectangle {
         HorizontalBox {
             spacing: 8px;
             Text { text: "来源"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
-            ComboBox { model: root.source-model; current-index <=> root.source-index; horizontal-stretch: 1; }
+            ComboBox {
+                model: root.source-model;
+                current-index <=> root.source-index;
+                horizontal-stretch: 1;
+                selected(_) => { root.source-selected(root.source-index); }
+            }
         }
     }
 }
@@ -227,6 +233,7 @@ component MonitorCard inherits Rectangle {
     in property <float> meter-l: 0;
     in property <float> meter-r: 0;
     in property <bool> running: false;
+    callback output-selected(int);
     width: 292px;
     height: 270px;
     border-radius: 8px;
@@ -245,7 +252,11 @@ component MonitorCard inherits Rectangle {
         ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: false; }
         ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: false; }
         Text { text: root.output-index >= 0 ? root.output-model[root.output-index] : "未选择输出设备"; color: #626a73; font-size: 11px; overflow: elide; }
-        ComboBox { model: root.output-model; current-index <=> root.output-index; }
+        ComboBox {
+            model: root.output-model;
+            current-index <=> root.output-index;
+            selected(_) => { root.output-selected(root.output-index); }
+        }
     }
 }
 
@@ -282,6 +293,8 @@ export component MainWindow inherits Window {
     callback stop-engine();
     callback apply-gain(float);
     callback toggle-mute(bool);
+    callback source-selected(int);
+    callback output-selected(int);
 
     VerticalBox {
         padding: 20px;
@@ -362,6 +375,7 @@ export component MainWindow inherits Window {
                             running: root.running;
                             apply-gain(value) => { root.apply-gain(value); }
                             toggle-mute(value) => { root.toggle-mute(value); }
+                            source-selected(index) => { root.source-selected(index); }
                         }
                         SignalRail { active: root.running && root.source-index >= 0; }
                         OutputCard { meter-l: root.output-meter-l; meter-r: root.output-meter-r; running: root.running; }
@@ -372,6 +386,7 @@ export component MainWindow inherits Window {
                             meter-l: root.output-meter-l;
                             meter-r: root.output-meter-r;
                             running: root.running;
+                            output-selected(index) => { root.output-selected(index); }
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }

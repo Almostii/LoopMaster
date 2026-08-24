@@ -83,6 +83,20 @@ fn main() -> Result<(), slint::PlatformError> {
             apply_send_change(&ui_weak, &state_rc, None, Some(muted));
         });
     }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_source_selected(move |_| {
+            apply_route_selection(&ui_weak, &state_rc);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let state_rc = Rc::clone(&state);
+        ui.on_output_selected(move |_| {
+            apply_route_selection(&ui_weak, &state_rc);
+        });
+    }
 
     // 状态轮询（1 Hz）。
     let ui_weak = ui.as_weak();
@@ -295,6 +309,45 @@ fn apply_send_change(
         if let Err(error) = service.update_graph(graph) {
             ui.set_engine_state(SharedString::from(error.to_string()));
         }
+    }
+}
+
+/// 运行中更换 source/sink 时重建单路引擎；停止时选择结果会在下次启动使用。
+fn apply_route_selection(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
+    let mut state_borrow = state.borrow_mut();
+    if !state_borrow.running {
+        return;
+    }
+    let Some(mut old_service) = state_borrow.service.take() else {
+        state_borrow.running = false;
+        return;
+    };
+    let _ = old_service.stop();
+    state_borrow.running = false;
+
+    let Some(ui) = ui.upgrade() else {
+        return;
+    };
+    ui.set_running(false);
+
+    let graph = match build_graph(&mut state_borrow, &ui) {
+        Ok(graph) => graph,
+        Err(message) => {
+            ui.set_engine_state(SharedString::from(message));
+            return;
+        }
+    };
+    match EngineService::new(graph) {
+        Ok(mut service) => match service.start() {
+            Ok(()) => {
+                state_borrow.service = Some(service);
+                state_borrow.running = true;
+                ui.set_running(true);
+                ui.set_engine_state(SharedString::from("Running"));
+            }
+            Err(error) => ui.set_engine_state(SharedString::from(error.to_string())),
+        },
+        Err(error) => ui.set_engine_state(SharedString::from(error.to_string())),
     }
 }
 
