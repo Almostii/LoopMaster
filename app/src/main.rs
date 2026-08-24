@@ -58,14 +58,14 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
-        ui.on_start(move || {
+        ui.on_start_engine(move || {
             start_engine(&ui_weak, &state_rc);
         });
     }
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
-        ui.on_stop(move || {
+        ui.on_stop_engine(move || {
             stop_engine(&ui_weak, &state_rc);
         });
     }
@@ -160,22 +160,22 @@ fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
     };
 
     if let Some(ui) = ui.upgrade() {
-        ui.set_process_model(Rc::new(VecModel::from(process_names)).into());
-        ui.set_sink_model(Rc::new(VecModel::from(sink_names)).into());
+        ui.set_source_model(Rc::new(VecModel::from(process_names)).into());
+        ui.set_output_model(Rc::new(VecModel::from(sink_names)).into());
         // 列表刷新后确保索引仍然有效；枚举失败时清除旧索引，避免使用陈旧 ID。
         if state_borrow.process_pids.is_empty() {
-            ui.set_process_index(-1);
-        } else if ui.get_process_index() < 0
-            || ui.get_process_index() as usize >= state_borrow.process_pids.len()
+            ui.set_source_index(-1);
+        } else if ui.get_source_index() < 0
+            || ui.get_source_index() as usize >= state_borrow.process_pids.len()
         {
-            ui.set_process_index(0);
+            ui.set_source_index(0);
         }
         if state_borrow.sink_ids.is_empty() {
-            ui.set_sink_index(-1);
-        } else if ui.get_sink_index() < 0
-            || ui.get_sink_index() as usize >= state_borrow.sink_ids.len()
+            ui.set_output_index(-1);
+        } else if ui.get_output_index() < 0
+            || ui.get_output_index() as usize >= state_borrow.sink_ids.len()
         {
-            ui.set_sink_index(0);
+            ui.set_output_index(0);
         }
         if !errors.is_empty() {
             ui.set_engine_state(SharedString::from(errors.join("；")));
@@ -187,11 +187,11 @@ fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
 fn build_graph(state: &mut AppState, ui: &MainWindow) -> Result<RouteGraph, String> {
     let pid = *state
         .process_pids
-        .get(ui.get_process_index() as usize)
+        .get(ui.get_source_index() as usize)
         .ok_or("请先选择音频来源进程")?;
     let sink_id = state
         .sink_ids
-        .get(ui.get_sink_index() as usize)
+        .get(ui.get_output_index() as usize)
         .ok_or("请先选择输出设备")?;
     Ok(RouteGraph {
         sources: vec![SourceSpec {
@@ -238,10 +238,14 @@ fn start_engine(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
                 ui.set_engine_state(SharedString::from("Running"));
             }
             Err(error) => {
+                state_borrow.running = false;
+                ui.set_running(false);
                 ui.set_engine_state(SharedString::from(error.to_string()));
             }
         },
         Err(error) => {
+            state_borrow.running = false;
+            ui.set_running(false);
             ui.set_engine_state(SharedString::from(error.to_string()));
         }
     }
@@ -259,6 +263,9 @@ fn stop_engine(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
     state_borrow.running = false;
     ui.set_running(false);
     ui.set_engine_state(SharedString::from("Stopped"));
+    ui.set_source_meter(0.0);
+    ui.set_output_meter_l(0.0);
+    ui.set_output_meter_r(0.0);
 }
 
 /// 应用 send 级变更（增益或静音），运行中经 update_graph 生效。
@@ -302,6 +309,10 @@ fn poll_status(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
         ui.set_engine_state(SharedString::from(status.state.as_str()));
         ui.set_running(status.running);
         let stats = status.stats;
+        let peak = stats.rendered_peak.clamp(0.0, 1.0);
+        ui.set_source_meter(peak);
+        ui.set_output_meter_l(peak);
+        ui.set_output_meter_r(peak);
         let text = format!(
             "capture packet: {} | render writes: {} | underflow: {} | discontinuity: {} | peak: {:.1} dBFS",
             stats.capture_packets,
