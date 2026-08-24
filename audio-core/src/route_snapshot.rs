@@ -2,7 +2,7 @@ use crate::{RouteGraph, RouteGraphError};
 use std::sync::Arc;
 
 /// 已完成校验、可在实时线程只读的路由图快照。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RouteGraphSnapshot(Arc<RouteGraph>);
 
 impl RouteGraphSnapshot {

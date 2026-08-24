@@ -187,6 +187,7 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recove
             sink_id: SinkId("render".to_owned()),
             gain_db: 0.0,
             muted: false,
+            enabled: true,
             channel_map: Vec::new(),
         }],
     };
@@ -216,6 +217,7 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             sink_id: SinkId("render".to_owned()),
             gain_db: 0.0,
             muted: false,
+            enabled: true,
             channel_map: Vec::new(),
         }],
     };
@@ -241,6 +243,7 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             sink_id: SinkId("render".to_owned()),
             gain_db: 0.0,
             muted: false,
+            enabled: true,
             channel_map: Vec::new(),
         }],
     };
@@ -343,6 +346,7 @@ fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             sink_id: SinkId("render".to_owned()),
             gain_db: 0.0,
             muted,
+            enabled: true,
             channel_map: Vec::new(),
         }],
     };
@@ -510,6 +514,7 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
                 sink_id: SinkId("sink-a".to_owned()),
                 gain_db: 0.0,
                 muted: false,
+                enabled: true,
                 channel_map: Vec::new(),
             },
             SendSpec {
@@ -517,6 +522,7 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
                 sink_id: SinkId("sink-b".to_owned()),
                 gain_db: 0.0,
                 muted: false,
+                enabled: true,
                 channel_map: Vec::new(),
             },
         ],
@@ -736,6 +742,7 @@ fn run_capture_render_test(
             sink_id: SinkId("render".to_owned()),
             gain_db: 0.0,
             muted: false,
+            enabled: true,
             channel_map: Vec::new(),
         }],
     };

@@ -74,6 +74,8 @@ struct CompiledSend {
     sink_index: usize,
     gain_linear: f32,
     muted: bool,
+    /// `enabled=false` 的 send 保留配置但从不参与混音（跳过）。
+    enabled: bool,
     /// 空切片表示 identity 映射；非空切片保存 source -> sink 映射。
     channel_map: Vec<(usize, usize)>,
 }
@@ -164,6 +166,7 @@ impl MixerPlan {
                 sink_index,
                 gain_linear: db_to_linear(send.gain_db),
                 muted: send.muted,
+                enabled: send.enabled,
                 channel_map,
             });
         }
@@ -260,7 +263,7 @@ impl MixerPlan {
         }
 
         for send in &self.sends {
-            if send.muted {
+            if send.muted || !send.enabled {
                 continue;
             }
             let source = source_blocks[send.source_index];
@@ -332,6 +335,7 @@ mod tests {
             sink_id: SinkId("sink".to_owned()),
             gain_db,
             muted,
+            enabled: true,
             channel_map,
         }
     }
@@ -358,6 +362,27 @@ mod tests {
         assert_eq!(
             process(&muted_plan, &[vec![1.0, 2.0, 3.0, 4.0]]),
             vec![0.0; 4]
+        );
+    }
+
+    #[test]
+    fn disabled_send_is_skipped_but_re_enabled_restores_configuration() {
+        // enabled=false 的 send 从混音计划跳过，输出为静音。
+        let mut disabled = send("source", 0.0, false, Vec::new());
+        disabled.enabled = false;
+        let disabled_graph = graph(&["source"], vec![disabled]);
+        let disabled_plan = MixerPlan::new(&disabled_graph, 2, 2, 2).unwrap();
+        assert_eq!(
+            process(&disabled_plan, &[vec![1.0, -2.0, 3.0, -4.0]]),
+            vec![0.0; 4]
+        );
+
+        // 重新启用后增益与通道映射配置原样恢复（与 muted 的静音语义不同）。
+        let enabled_graph = graph(&["source"], vec![send("source", 0.0, false, Vec::new())]);
+        let enabled_plan = MixerPlan::new(&enabled_graph, 2, 2, 2).unwrap();
+        assert_eq!(
+            process(&enabled_plan, &[vec![1.0, -2.0, 3.0, -4.0]]),
+            vec![1.0, -2.0, 3.0, -4.0]
         );
     }
 

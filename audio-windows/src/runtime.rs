@@ -1346,6 +1346,7 @@ mod tests {
                 sink_id: SinkId("sink".into()),
                 gain_db: 0.0,
                 muted: false,
+                enabled: true,
                 channel_map: Vec::new(),
             }],
         };
@@ -1392,6 +1393,7 @@ mod tests {
                 sink_id: SinkId("sink".into()),
                 gain_db: 0.0,
                 muted: false,
+                enabled: true,
                 channel_map: Vec::new(),
             }],
         })
@@ -1417,6 +1419,7 @@ mod tests {
                 sink_id: SinkId("sink".into()),
                 gain_db: 0.0,
                 muted: false,
+                enabled: true,
                 channel_map: Vec::new(),
             }],
         })
@@ -1447,6 +1450,7 @@ mod tests {
                 sink_id: SinkId("sink".into()),
                 gain_db: 0.0,
                 muted: false,
+                enabled: true,
                 channel_map: Vec::new(),
             }],
         };
