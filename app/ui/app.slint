@@ -1449,7 +1449,10 @@ export component MainWindow inherits Window {
     in-out property <int> output-index: -1;
     in-out property <float> gain: 0;
     in-out property <bool> running: false;
-    in-out property <string> engine-state: "Stopped";
+    // 结构化引擎阶段：stopped|starting|running|degraded|reconnecting|failed，
+    // 由服务事件驱动；engine-state 是面向用户的中文显示文本。
+    in-out property <string> engine-phase: "stopped";
+    in-out property <string> engine-state: "已停止";
     in-out property <string> stats-text: "";
     in-out property <float> source-meter: 0;
     in-out property <float> output-meter-l: 0;
@@ -1460,9 +1463,8 @@ export component MainWindow inherits Window {
     in-out property <bool> show-monitors: true;
     in-out property <bool> refreshing: false;
     private property <bool> route-ready: root.source-index >= 0 && root.output-index >= 0;
-    private property <bool> engine-error: root.engine-state != "Running"
-        && root.engine-state != "Stopped"
-        && root.engine-state != "Starting";
+    private property <bool> engine-error: root.engine-phase == "failed";
+    private property <bool> engine-degraded: root.engine-phase == "degraded" || root.engine-phase == "reconnecting";
 
     callback refresh();
     callback start-engine();
@@ -1518,7 +1520,7 @@ export component MainWindow inherits Window {
                 x: (root.width - 252px) / 2;
                 y: 9px;
                 active: root.running;
-                label: root.running ? "音频引擎运行中 (WASAPI)" : (root.engine-error ? "音频引擎异常" : "音频引擎已停止");
+                label: root.running ? "音频引擎运行中 (WASAPI)" : (root.engine-error ? "音频引擎异常" : (root.engine-degraded ? "音频引擎降级/重连中" : "音频引擎已停止"));
             }
             Rectangle { x: 0; y: 47px; width: 1320px; height: 1px; background: #e2e8f0; }
         }
@@ -1595,8 +1597,8 @@ export component MainWindow inherits Window {
                 height: 48px;
                 background: #ffffff;
                 Rectangle { x: 0; y: 0; width: 1030px; height: 1px; background: #e2e8f0; }
-                Rectangle { x: 24px; y: 20px; width: 7px; height: 7px; border-radius: 4px; background: root.running ? #29b6a2 : (root.engine-error ? #ef4444 : #94a3b8); }
-                Text { x: 42px; y: 16px; text: root.engine-state == "Running" ? "音频引擎运行中" : (root.engine-state == "Stopped" ? "音频引擎已停止" : root.engine-state); color: root.running ? #1a7e70 : (root.engine-error ? #b23f3f : #64748b); font-size: 10px; font-weight: 600; }
+                Rectangle { x: 24px; y: 20px; width: 7px; height: 7px; border-radius: 4px; background: root.running ? #29b6a2 : (root.engine-error ? #ef4444 : (root.engine-degraded ? #f59e0b : #94a3b8)); }
+                Text { x: 42px; y: 16px; text: root.engine-phase == "running" ? "音频引擎运行中" : (root.engine-phase == "stopped" ? "音频引擎已停止" : root.engine-state); color: root.running ? #1a7e70 : (root.engine-error ? #b23f3f : (root.engine-degraded ? #b26a0e : #64748b)); font-size: 10px; font-weight: 600; }
                 Rectangle { x: 120px; y: 15px; width: 1px; height: 18px; background: #e2e8f0; }
                 Text { x: 132px; y: 17px; width: 560px; text: root.stats-text == "" ? "等待引擎状态" : root.stats-text; color: #64748b; font-size: 9px; overflow: elide; }
                 FooterButton { x: 710px; y: 9px; label: "删除 (Delete)"; enabled: false; }
