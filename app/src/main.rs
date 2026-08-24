@@ -14,7 +14,15 @@ use loopmaster_audio_core::{
 use slint::{SharedString, VecModel, Weak};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Duration;
+
+struct RefreshResult {
+    process_entries: Option<Vec<(u32, String)>>,
+    sink_entries: Option<Vec<(String, String)>>,
+    errors: Vec<String>,
+}
 
 /// UI 侧应用状态（Rc<RefCell> 供回调共享）。
 struct AppState {
@@ -24,6 +32,10 @@ struct AppState {
     gain_db: f32,
     muted: bool,
     running: bool,
+    refresh_receiver: Option<Receiver<RefreshResult>>,
+    refreshing: bool,
+    selected_process_pid: Option<u32>,
+    selected_sink_id: Option<String>,
 }
 
 impl AppState {
@@ -35,6 +47,10 @@ impl AppState {
             gain_db: 0.0,
             muted: false,
             running: false,
+            refresh_receiver: None,
+            refreshing: false,
+            selected_process_pid: None,
+            selected_sink_id: None,
         }
     }
 }
@@ -43,16 +59,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = MainWindow::new()?;
     let state = Rc::new(RefCell::new(AppState::new()));
 
-    // 初始填充设备/进程。
-    refresh_lists(&ui.as_weak(), &state);
+    // 初始填充设备/进程；枚举在后台线程执行，避免阻塞 UI。
+    request_refresh(&ui.as_weak(), &state);
 
     // 事件绑定。
     {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_refresh(move || {
-            refresh_lists(&ui_weak, &state_rc);
-            let _ = state_rc.borrow_mut();
+            request_refresh(&ui_weak, &state_rc);
         });
     }
     {
@@ -112,6 +127,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_source_selected(move |_| {
+            remember_selection(&ui_weak, &state_rc);
             apply_route_selection(&ui_weak, &state_rc);
         });
     }
@@ -119,6 +135,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         let state_rc = Rc::clone(&state);
         ui.on_output_selected(move |_| {
+            remember_selection(&ui_weak, &state_rc);
             apply_route_selection(&ui_weak, &state_rc);
         });
     }
@@ -131,6 +148,7 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::TimerMode::Repeated,
         Duration::from_millis(100),
         move || {
+            poll_refresh(&ui_weak, &state_rc);
             poll_status(&ui_weak, &state_rc);
         },
     );
@@ -141,94 +159,174 @@ fn effective_mute(source_enabled: bool, monitor_enabled: bool) -> bool {
     !source_enabled || !monitor_enabled
 }
 
-/// 刷新进程与 sink 设备列表。
-fn refresh_lists(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
-    let devices = DeviceRepository::new();
-    let processes = ProcessRepository::new();
-    let mut state_borrow = state.borrow_mut();
-    let mut errors = Vec::new();
+/// 记住当前稳定标识，而不是记住列表索引。
+fn remember_selection(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
+    let Some(ui) = ui.upgrade() else { return };
+    let mut state = state.borrow_mut();
+    state.selected_process_pid = state
+        .process_pids
+        .get(ui.get_source_index() as usize)
+        .copied();
+    state.selected_sink_id = state.sink_ids.get(ui.get_output_index() as usize).cloned();
+}
 
-    // 进程列表。
-    let process_names: Vec<SharedString> = match processes {
-        Ok(repo) => match repo.list_audio_processes() {
-            Ok(list) => {
-                state_borrow.process_pids = list.iter().map(|p| p.pid).collect();
-                list.iter()
-                    .map(|p| SharedString::from(format!("{} (PID {})", p.name, p.pid)))
-                    .collect()
-            }
-            Err(error) => {
-                state_borrow.process_pids.clear();
-                errors.push(format!("进程枚举失败: {error}"));
-                Vec::new()
-            }
-        },
-        Err(error) => {
-            state_borrow.process_pids.clear();
-            errors.push(format!("进程枚举失败: {error}"));
-            Vec::new()
+/// 请求异步刷新。刷新期间不会重复启动枚举线程。
+fn request_refresh(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
+    let Some(ui) = ui.upgrade() else { return };
+    let (sender, receiver) = mpsc::channel();
+    {
+        let mut state = state.borrow_mut();
+        if state.refreshing {
+            return;
         }
-    };
-    // sink 设备列表（render 且 RenderReady）。
-    let sink_names: Vec<SharedString> = match devices {
-        Ok(repo) => match repo.list_devices() {
-            Ok(list) => {
-                state_borrow.sink_ids = list
-                    .iter()
-                    .filter(|d| {
-                        d.flow == DeviceFlow::Render
-                            && d.compatibility == DeviceCompatibility::RenderReady
+        state.selected_process_pid = state
+            .process_pids
+            .get(ui.get_source_index() as usize)
+            .copied()
+            .or(state.selected_process_pid);
+        state.selected_sink_id = state
+            .sink_ids
+            .get(ui.get_output_index() as usize)
+            .cloned()
+            .or_else(|| state.selected_sink_id.clone());
+        state.refresh_receiver = Some(receiver);
+        state.refreshing = true;
+    }
+    ui.set_refreshing(true);
+    ui.set_engine_state(SharedString::from("正在刷新音源和设备"));
+
+    thread::spawn(move || {
+        let mut errors = Vec::new();
+        let process_entries =
+            match ProcessRepository::new().and_then(|repo| repo.list_audio_processes()) {
+                Ok(list) => Some(list.into_iter().map(|p| (p.pid, p.name)).collect()),
+                Err(error) => {
+                    errors.push(format!("进程枚举失败: {error}"));
+                    None
+                }
+            };
+        let sink_entries = match DeviceRepository::new().and_then(|repo| repo.list_devices()) {
+            Ok(list) => Some(
+                list.into_iter()
+                    .filter(|device| {
+                        device.flow == DeviceFlow::Render
+                            && device.compatibility == DeviceCompatibility::RenderReady
                     })
-                    .map(|d| d.id.0.clone())
-                    .collect();
-                list.iter()
-                    .filter(|d| {
-                        d.flow == DeviceFlow::Render
-                            && d.compatibility == DeviceCompatibility::RenderReady
-                    })
-                    .map(|d| SharedString::from(d.name.clone()))
-                    .collect()
-            }
+                    .map(|device| (device.id.0, device.name))
+                    .collect(),
+            ),
             Err(error) => {
-                state_borrow.sink_ids.clear();
                 errors.push(format!("输出设备枚举失败: {error}"));
-                Vec::new()
+                None
             }
-        },
-        Err(error) => {
-            state_borrow.sink_ids.clear();
-            errors.push(format!("输出设备枚举失败: {error}"));
-            Vec::new()
+        };
+        let _ = sender.send(RefreshResult {
+            process_entries,
+            sink_entries,
+            errors,
+        });
+    });
+}
+
+/// 低频检查后台枚举结果；这里不执行任何 WASAPI/进程枚举。
+fn poll_refresh(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
+    let result = {
+        let mut state = state.borrow_mut();
+        let Some(receiver) = state.refresh_receiver.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                state.refresh_receiver = None;
+                state.refreshing = false;
+                Some(result)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                state.refresh_receiver = None;
+                state.refreshing = false;
+                Some(RefreshResult {
+                    process_entries: None,
+                    sink_entries: None,
+                    errors: vec!["后台刷新线程异常退出".into()],
+                })
+            }
         }
     };
+    if let Some(result) = result {
+        apply_refresh_result(ui, state, result);
+    }
+}
 
-    if let Some(ui) = ui.upgrade() {
-        ui.set_source_model(Rc::new(VecModel::from(process_names)).into());
-        ui.set_output_model(Rc::new(VecModel::from(sink_names)).into());
-        // 列表刷新后确保索引仍然有效；枚举失败时清除旧索引，避免使用陈旧 ID。
-        if state_borrow.process_pids.is_empty() {
-            ui.set_source_index(-1);
-        } else if ui.get_source_index() < 0
-            || ui.get_source_index() as usize >= state_borrow.process_pids.len()
-        {
-            ui.set_source_index(0);
-        }
-        if state_borrow.sink_ids.is_empty() {
-            ui.set_output_index(-1);
-        } else if ui.get_output_index() < 0
-            || ui.get_output_index() as usize >= state_borrow.sink_ids.len()
-        {
-            ui.set_output_index(0);
-        }
-        if !errors.is_empty() {
-            ui.set_engine_state(SharedString::from(errors.join("；")));
-        } else {
-            ui.set_engine_state(SharedString::from(if state_borrow.running {
-                "Running"
-            } else {
-                "Stopped"
-            }));
-        }
+fn apply_refresh_result(
+    ui: &Weak<MainWindow>,
+    state: &Rc<RefCell<AppState>>,
+    result: RefreshResult,
+) {
+    let Some(ui) = ui.upgrade() else { return };
+    let mut state = state.borrow_mut();
+    if let Some(entries) = result.process_entries {
+        let ids: Vec<u32> = entries.iter().map(|(pid, _)| *pid).collect();
+        let names: Vec<SharedString> = entries
+            .iter()
+            .map(|(pid, name)| SharedString::from(format!("{name} (PID {pid})")))
+            .collect();
+        let index = preserve_selection_index(
+            state.selected_process_pid.as_ref(),
+            &ids,
+            ui.get_source_index(),
+        );
+        state.process_pids = ids;
+        state.selected_process_pid = usize::try_from(index)
+            .ok()
+            .and_then(|index| state.process_pids.get(index).copied());
+        ui.set_source_model(Rc::new(VecModel::from(names)).into());
+        ui.set_source_index(index);
+    }
+    if let Some(entries) = result.sink_entries {
+        let ids: Vec<String> = entries.iter().map(|(id, _)| id.clone()).collect();
+        let names: Vec<SharedString> = entries
+            .iter()
+            .map(|(_, name)| SharedString::from(name.clone()))
+            .collect();
+        let index =
+            preserve_selection_index(state.selected_sink_id.as_ref(), &ids, ui.get_output_index());
+        state.sink_ids = ids;
+        state.selected_sink_id = usize::try_from(index)
+            .ok()
+            .and_then(|index| state.sink_ids.get(index).cloned());
+        ui.set_output_model(Rc::new(VecModel::from(names)).into());
+        ui.set_output_index(index);
+    }
+    ui.set_refreshing(false);
+    if !result.errors.is_empty() {
+        ui.set_engine_state(SharedString::from(result.errors.join("；")));
+    } else if !state.running {
+        ui.set_engine_state(SharedString::from("Stopped"));
+    }
+}
+
+/// 根据稳定 ID 保留选择；已退出/不可用的对象返回 -1。
+fn preserve_selection_index<T: PartialEq>(
+    previous_id: Option<&T>,
+    new_ids: &[T],
+    fallback_index: i32,
+) -> i32 {
+    if let Some(previous_id) = previous_id {
+        return new_ids
+            .iter()
+            .position(|id| id == previous_id)
+            .map_or(-1, |index| index as i32);
+    }
+    if new_ids.is_empty() {
+        -1
+    } else if usize::try_from(fallback_index)
+        .ok()
+        .is_some_and(|index| index < new_ids.len())
+    {
+        fallback_index
+    } else {
+        0
     }
 }
 
@@ -424,7 +522,7 @@ fn poll_status(ui: &Weak<MainWindow>, state: &Rc<RefCell<AppState>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::effective_mute;
+    use super::{effective_mute, preserve_selection_index};
 
     #[test]
     fn route_is_muted_when_either_side_is_disabled() {
@@ -432,5 +530,30 @@ mod tests {
         assert!(effective_mute(false, true));
         assert!(effective_mute(true, false));
         assert!(effective_mute(false, false));
+    }
+
+    #[test]
+    fn refresh_preserves_existing_process_selection_by_pid() {
+        let old_pid = 7440;
+        assert_eq!(
+            preserve_selection_index(Some(&old_pid), &[19556, old_pid, 3024], 0),
+            1
+        );
+    }
+
+    #[test]
+    fn refresh_clears_selection_when_process_has_exited() {
+        let old_pid = 7440;
+        assert_eq!(
+            preserve_selection_index(Some(&old_pid), &[19556, 3024], 1),
+            -1
+        );
+    }
+
+    #[test]
+    fn refresh_uses_valid_fallback_when_no_previous_selection_exists() {
+        assert_eq!(preserve_selection_index::<u32>(None, &[19556, 3024], 1), 1);
+        assert_eq!(preserve_selection_index::<u32>(None, &[19556, 3024], 8), 0);
+        assert_eq!(preserve_selection_index::<u32>(None, &[], -1), -1);
     }
 }

@@ -1458,6 +1458,7 @@ export component MainWindow inherits Window {
     in-out property <bool> monitor-enabled: true;
     in-out property <bool> advanced-expanded: false;
     in-out property <bool> show-monitors: true;
+    in-out property <bool> refreshing: false;
     private property <bool> route-ready: root.source-index >= 0 && root.output-index >= 0;
     private property <bool> engine-error: root.engine-state != "Running"
         && root.engine-state != "Stopped"
@@ -1500,6 +1501,12 @@ export component MainWindow inherits Window {
                 }
                 Text { text: "LoopMaster"; color: #1e293b; font-size: 15px; font-weight: 700; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; }
+                FooterButton {
+                    width: 110px;
+                    label: root.refreshing ? "刷新中..." : "刷新音源";
+                    enabled: !root.refreshing;
+                    clicked => { root.refresh(); }
+                }
                 LoopbackToggle {
                     checked <=> root.running;
                     enabled: root.route-ready;
