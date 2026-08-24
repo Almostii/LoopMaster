@@ -75,57 +75,6 @@ component LevelMeter inherits Rectangle {
     }
 }
 
-component StatusPill inherits Rectangle {
-    in property <string> label: "";
-    in property <bool> active: false;
-
-    height: 24px;
-    width: 64px;
-    border-radius: 4px;
-    background: root.active ? #e2f5f1 : #eef1f3;
-
-    Text {
-        text: root.label;
-        color: root.active ? #147f70 : #6f7a83;
-        font-size: 11px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-component ActionButton inherits Rectangle {
-    in property <string> label: "";
-    in property <bool> enabled: true;
-    callback clicked();
-
-    width: 86px;
-    height: 34px;
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: #d0d7de;
-    background: !root.enabled ? #f2f4f5 : (button-touch.has-hover ? #eef7f5 : #ffffff);
-    accessible-role: button;
-    accessible-label: root.label;
-    accessible-enabled: root.enabled;
-    accessible-action-default => {
-        if (root.enabled) { root.clicked(); }
-    }
-
-    Text {
-        text: root.label;
-        color: root.enabled ? #42505c : #a0a8af;
-        font-size: 11px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    button-touch := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
-}
-
 component SelectField inherits Rectangle {
     in property <[string]> model: [];
     in-out property <int> current-index: -1;
@@ -346,33 +295,11 @@ component RouteSocket inherits Rectangle {
     }
 }
 
-component CompactMeter inherits HorizontalBox {
-    in property <float> level: 0;
-
-    height: 20px;
-    padding: 0;
-    spacing: 9px;
-
-    Text {
-        width: 20px;
-        text: "LR";
-        color: #6b7785;
-        font-size: 10px;
-        font-weight: 600;
-        vertical-alignment: center;
-    }
-    LevelMeter {
-        level: root.level;
-        height: 8px;
-        horizontal-stretch: 1;
-    }
-}
-
 component GainSlider inherits Rectangle {
     in-out property <float> value: 0;
     in property <bool> enabled: true;
     callback changed(float);
-    private property <float> ratio: (root.value + 60) / 72;
+    private property <float> ratio: (root.value + 24) / 36;
 
     height: 28px;
     background: transparent;
@@ -382,7 +309,7 @@ component GainSlider inherits Rectangle {
     accessible-enabled: root.enabled;
 
     function set-from-position(position: length) {
-        root.value = round(max(0px, min(root.width, position)) / root.width * 72 - 60);
+        root.value = round(max(0px, min(root.width, position)) / root.width * 36 - 24);
         root.changed(root.value);
     }
 
@@ -428,6 +355,263 @@ component GainSlider inherits Rectangle {
     }
 }
 
+component LoopbackToggle inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <string> label: "开关";
+    callback toggled(bool);
+
+    width: 46px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.checked ? #29b6a2 : #d5dce2;
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: switch;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if root.enabled {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+
+    Text {
+        x: root.checked ? 4px : 24px;
+        width: 18px;
+        text: root.checked ? "On" : "Off";
+        color: root.checked ? #ffffff : #52606d;
+        font-size: 8px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: root.checked ? 26px : 2px;
+        y: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #ffffff;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000026;
+        animate x { duration: 120ms; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+    animate background { duration: 120ms; }
+}
+
+component EngineBadge inherits Rectangle {
+    in property <bool> active: false;
+    in property <string> label: "音频引擎已停止";
+
+    width: 252px;
+    height: 26px;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: root.active ? #b7e1da : #e2e8f0;
+    background: root.active ? #e8f7f4 : #f1f5f9;
+
+    HorizontalBox {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.active ? #29b6a2 : #94a3b8;
+        }
+        Text {
+            text: root.label;
+            color: root.active ? #1a7e70 : #64748b;
+            font-size: 10px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+component FooterButton inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked();
+
+    width: 138px;
+    height: 30px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: root.enabled ? #d0d7de : #e5e7eb;
+    background: root.active ? #e8f7f4 : (root.enabled ? #ffffff : #f8fafc);
+    opacity: root.enabled ? 1 : 0.55;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    Text {
+        text: root.label;
+        color: root.active ? #1a7e70 : (root.enabled ? #52606d : #94a3b8);
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component ColumnHeader inherits Rectangle {
+    in property <string> title: "";
+    in property <string> subtitle: "";
+
+    width: 280px;
+    height: 44px;
+
+    VerticalBox {
+        x: 0;
+        y: 0;
+        width: parent.width - 34px;
+        height: parent.height - 7px;
+        padding: 0;
+        spacing: 1px;
+        Text {
+            text: root.title;
+            color: #1e293b;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            text: root.subtitle;
+            color: #64748b;
+            font-size: 10px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    Rectangle {
+        x: parent.width - 26px;
+        y: 0;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        border-width: 1px;
+        border-color: #e2e8f0;
+        background: #ffffff;
+        opacity: 0.6;
+        Text {
+            text: "+";
+            color: #64748b;
+            font-size: 15px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #d7dde3; }
+}
+
+component DeviceItem inherits Rectangle {
+    in-out property <bool> route-enabled: true;
+    in property <bool> running: false;
+    callback toggled(bool);
+
+    height: 84px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #dfe5ea;
+    background: #ffffff;
+    drop-shadow-blur: 2px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: #0000000d;
+
+    VerticalBox {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 9px;
+        spacing: 7px;
+        HorizontalBox {
+            height: 30px;
+            spacing: 8px;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 6px;
+                background: #e5f6f2;
+                SourceGlyph { x: 4px; y: 4px; }
+            }
+            VerticalBox {
+                padding: 0;
+                spacing: 1px;
+                horizontal-stretch: 1;
+                Text { text: "主路由"; color: #1e293b; font-size: 12px; font-weight: 700; }
+                Text { text: root.running ? "引擎运行中" : "1 个进程 / 1 个输出"; color: #64748b; font-size: 10px; overflow: elide; }
+            }
+            LoopbackToggle {
+                checked <=> root.route-enabled;
+                enabled: true;
+                label: "侧栏路由开关";
+                toggled(value) => { root.toggled(value); }
+            }
+        }
+        LevelMeter { level: root.route-enabled ? (root.running ? 0.38 : 0) : 0; height: 7px; }
+    }
+}
+
+component SourceChannelRow inherits HorizontalBox {
+    in property <string> label: "";
+    in property <float> level: 0;
+
+    height: 20px;
+    spacing: 8px;
+    Text {
+        width: 38px;
+        height: 20px;
+        text: root.label;
+        color: #1e293b;
+        font-size: 10px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    LevelMeter { level: root.level; height: 9px; horizontal-stretch: 1; }
+}
+
+component MonitorChannelRow inherits HorizontalBox {
+    in property <string> label: "";
+    in property <float> level: 0;
+
+    height: 20px;
+    spacing: 8px;
+    LevelMeter { level: root.level; height: 9px; horizontal-stretch: 1; }
+    Text {
+        width: 86px;
+        height: 20px;
+        text: root.label;
+        color: #1e293b;
+        font-size: 10px;
+        font-weight: 600;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
 component SourceNode inherits Rectangle {
     in property <[string]> source-model: [];
     in-out property <int> source-index: -1;
@@ -441,40 +625,37 @@ component SourceNode inherits Rectangle {
     private property <bool> has-source: root.source-index >= 0
         && root.source-index < root.source-model.length;
 
-    width: 300px;
-    height: root.expanded ? 258px : 202px;
-    border-radius: 7px;
+    width: 280px;
+    height: root.expanded ? 278px : 222px;
+    border-radius: 8px;
     border-width: 1px;
-    border-color: #d9e0e6;
+    border-color: #e2e8f0;
     background: #ffffff;
-    drop-shadow-blur: 8px;
+    drop-shadow-blur: 7px;
     drop-shadow-offset-y: 3px;
-    drop-shadow-color: #00000012;
+    drop-shadow-color: #00000014;
+    opacity: root.route-enabled ? 1 : 0.82;
     animate height { duration: 140ms; }
 
     Rectangle {
         x: 0;
         y: 0;
-        width: parent.width;
-        height: 55px;
-        border-radius: 7px;
+        width: root.width;
+        height: 57px;
+        border-radius: 8px;
         background: #fafbfc;
-
         HorizontalBox {
-            x: 0;
-            y: 0;
-            width: parent.width;
-            height: parent.height;
+            width: root.width;
+            height: 57px;
             padding-left: 14px;
             padding-right: 14px;
             spacing: 10px;
-
             Rectangle {
-                width: 34px;
-                height: 34px;
-                border-radius: 7px;
-                background: #e5f6f2;
-                SourceGlyph { x: 7px; y: 7px; }
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: #e8f7f4;
+                SourceGlyph { x: 6px; y: 6px; }
             }
             VerticalBox {
                 padding: 0;
@@ -487,296 +668,225 @@ component SourceNode inherits Rectangle {
                     font-weight: 700;
                     overflow: elide;
                 }
-                Text {
-                    text: "应用进程音频";
-                    color: #71808c;
-                    font-size: 10px;
-                }
+                Text { text: "进程回环音频"; color: #64748b; font-size: 10px; }
             }
-            Toggle {
+            LoopbackToggle {
                 checked <=> root.route-enabled;
                 enabled: root.has-source;
-                label: "启用此路由";
+                label: "声源开关";
                 toggled(value) => { root.toggle-route(value); }
             }
         }
-        Rectangle {
-            y: parent.height - 1px;
-            height: 1px;
-            width: parent.width;
-            background: #edf0f2;
-        }
+        Rectangle { y: 56px; width: root.width; height: 1px; background: #e2e8f0; }
     }
 
     VerticalBox {
         x: 14px;
-        y: 66px;
-        width: parent.width - 28px;
-        height: parent.height - 78px;
+        y: 67px;
+        width: root.width - 28px;
+        height: root.height - 78px;
         padding: 0;
-        spacing: 8px;
-
-        Text { text: "音频来源"; color: #586672; font-size: 10px; font-weight: 600; }
+        spacing: 6px;
         SelectField {
             model: root.source-model;
             current-index <=> root.source-index;
             enabled: root.source-model.length > 0;
-            height: 36px;
+            height: 30px;
             selected(index) => { root.source-selected(index); }
         }
-        CompactMeter { level: root.route-enabled ? root.meter : 0; }
-
+        VerticalBox {
+            height: 48px;
+            padding: 0;
+            spacing: 4px;
+            SourceChannelRow { label: "1 (L)"; level: root.route-enabled ? root.meter : 0; }
+            SourceChannelRow { label: "2 (R)"; level: root.route-enabled ? root.meter : 0; }
+        }
         Rectangle {
-            height: 30px;
-            background: options-touch.has-hover ? #f5faf9 : transparent;
+            height: 28px;
+            background: options-touch.has-hover ? #f1f8f6 : transparent;
             accessible-role: button;
-            accessible-label: root.expanded ? "收起高级设置" : "展开高级设置";
+            accessible-label: root.expanded ? "收起高级选项" : "展开高级选项";
             accessible-action-default => { root.expanded = !root.expanded; }
-
             HorizontalBox {
                 padding-left: 2px;
                 padding-right: 2px;
                 spacing: 6px;
                 if root.expanded: ChevronDown { }
                 if !root.expanded: ChevronRight { }
-                Text {
-                    text: "高级设置";
-                    color: #596773;
-                    font-size: 10px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                Text {
-                    text: round(root.gain) + " dB";
-                    color: #7a8792;
-                    font-size: 10px;
-                    vertical-alignment: center;
-                }
+                Text { text: "高级选项 (Options)"; color: #596773; font-size: 10px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                Text { text: round(root.gain) + " dB"; color: #7a8792; font-size: 10px; vertical-alignment: center; }
             }
             options-touch := TouchArea { clicked => { root.expanded = !root.expanded; } }
         }
-
         if root.expanded: Rectangle {
-            height: 48px;
+            height: 88px;
             border-radius: 5px;
             border-width: 1px;
-            border-color: #e3e8ec;
+            border-color: #e2e8f0;
             background: #f8fafc;
-
-            GainSlider {
-                x: 9px;
-                y: 10px;
-                width: parent.width - 18px;
-                value <=> root.gain;
-                enabled: root.route-enabled;
-                changed(value) => { root.apply-gain(value); }
+            VerticalBox {
+                padding: 8px;
+                spacing: 6px;
+                HorizontalBox {
+                    height: 28px;
+                    Text { text: "增益 (Gain)"; color: #64748b; font-size: 10px; vertical-alignment: center; }
+                    GainSlider { horizontal-stretch: 1; value <=> root.gain; enabled: root.route-enabled; changed(value) => { root.apply-gain(value); } }
+                }
+                HorizontalBox {
+                    height: 22px;
+                    Text { text: "静音 (Mute)"; color: #64748b; font-size: 10px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Toggle {
+                        checked: !root.route-enabled;
+                        label: "静音开关";
+                        toggled(value) => { root.toggle-route(!value); }
+                    }
+                }
             }
         }
     }
+    RouteSocket { x: root.width - 7px; y: 143px; active: root.route-enabled && root.has-source; }
+}
 
-    RouteSocket {
-        x: parent.width - 7px;
-        y: 143px;
-        active: root.route-enabled && root.has-source;
+component MixChannelRow inherits HorizontalBox {
+    in property <string> label: "";
+    in property <float> level: 0;
+    height: 20px;
+    spacing: 8px;
+    Text { width: 86px; height: 20px; text: root.label; color: #1e293b; font-size: 10px; font-weight: 600; vertical-alignment: center; overflow: elide; }
+    LevelMeter { level: root.level; height: 9px; horizontal-stretch: 1; }
+}
+
+component MixNode inherits Rectangle {
+    in property <float> meter: 0;
+    in property <bool> route-enabled: true;
+    in property <bool> show-output: true;
+
+    width: 280px;
+    height: 222px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    background: #ffffff;
+    drop-shadow-blur: 7px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: #00000014;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: 57px;
+        border-radius: 8px;
+        background: #fafbfc;
+        VerticalBox {
+            x: 14px;
+            y: 10px;
+            width: root.width - 28px;
+            height: 36px;
+            padding: 0;
+            spacing: 1px;
+            Text { text: "Channels 1 & 2"; color: #1e293b; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+            Text { text: "立体声通道组"; color: #64748b; font-size: 10px; vertical-alignment: center; }
+        }
+        Rectangle { y: 56px; width: root.width; height: 1px; background: #e2e8f0; }
     }
+    VerticalBox {
+        x: 14px;
+        y: 67px;
+        width: root.width - 28px;
+        height: root.height - 78px;
+        padding: 0;
+        spacing: 8px;
+        Text { text: "默认立体声映射"; color: #64748b; font-size: 10px; font-weight: 600; }
+        MixChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
+        MixChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+    }
+    RouteSocket { x: -7px; y: 143px; active: root.route-enabled; }
+    RouteSocket { x: root.width - 7px; y: 143px; active: root.route-enabled && root.show-output; }
 }
 
 component OutputNode inherits Rectangle {
     in property <[string]> output-model: [];
     in-out property <int> output-index: -1;
     in property <float> meter: 0;
-    in property <bool> route-enabled: true;
+    in-out property <bool> route-enabled: true;
     in property <bool> running: false;
     callback output-selected(int);
+    callback toggle-route(bool);
     private property <bool> has-output: root.output-index >= 0
         && root.output-index < root.output-model.length;
 
-    width: 300px;
-    height: 202px;
-    border-radius: 7px;
+    width: 280px;
+    height: 222px;
+    border-radius: 8px;
     border-width: 1px;
-    border-color: #d9e0e6;
+    border-color: #e2e8f0;
     background: #ffffff;
-    drop-shadow-blur: 8px;
+    drop-shadow-blur: 7px;
     drop-shadow-offset-y: 3px;
-    drop-shadow-color: #00000012;
+    drop-shadow-color: #00000014;
+    opacity: root.route-enabled ? 1 : 0.82;
 
     Rectangle {
         x: 0;
         y: 0;
-        width: parent.width;
-        height: 55px;
-        border-radius: 7px;
+        width: root.width;
+        height: 57px;
+        border-radius: 8px;
         background: #fafbfc;
-
         HorizontalBox {
-            x: 0;
-            y: 0;
-            width: parent.width;
-            height: parent.height;
+            width: root.width;
+            height: 57px;
             padding-left: 14px;
             padding-right: 14px;
             spacing: 10px;
-
             Rectangle {
-                width: 34px;
-                height: 34px;
-                border-radius: 7px;
-                background: #edf1f4;
-                OutputGlyph { x: 7px; y: 7px; }
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: #f1f5f9;
+                OutputGlyph { x: 6px; y: 6px; }
             }
             VerticalBox {
                 padding: 0;
                 spacing: 1px;
                 horizontal-stretch: 1;
-                Text {
-                    text: root.has-output ? root.output-model[root.output-index] : "选择输出设备";
-                    color: #1e293b;
-                    font-size: 12px;
-                    font-weight: 700;
-                    overflow: elide;
-                }
-                Text {
-                    text: "Windows 输出设备";
-                    color: #71808c;
-                    font-size: 10px;
-                }
+                Text { text: root.has-output ? root.output-model[root.output-index] : "选择监听设备"; color: #1e293b; font-size: 12px; font-weight: 700; overflow: elide; }
+                Text { text: "默认音频输出设备"; color: #64748b; font-size: 10px; }
             }
-            StatusPill {
-                width: 44px;
-                label: root.running ? "活动" : "待机";
-                active: root.running;
+            LoopbackToggle {
+                checked <=> root.route-enabled;
+                enabled: root.has-output;
+                label: "监听开关";
+                toggled(value) => { root.toggle-route(value); }
             }
         }
-        Rectangle {
-            y: parent.height - 1px;
-            height: 1px;
-            width: parent.width;
-            background: #edf0f2;
-        }
+        Rectangle { y: 56px; width: root.width; height: 1px; background: #e2e8f0; }
     }
-
     VerticalBox {
         x: 14px;
-        y: 66px;
-        width: parent.width - 28px;
-        height: parent.height - 78px;
+        y: 67px;
+        width: root.width - 28px;
+        height: root.height - 78px;
         padding: 0;
-        spacing: 8px;
-
-        Text { text: "发送到"; color: #586672; font-size: 10px; font-weight: 600; }
+        spacing: 6px;
         SelectField {
             model: root.output-model;
             current-index <=> root.output-index;
             enabled: root.output-model.length > 0;
-            height: 36px;
+            height: 30px;
             selected(index) => { root.output-selected(index); }
         }
-        CompactMeter { level: root.route-enabled ? root.meter : 0; }
+        VerticalBox {
+            height: 48px;
+            padding: 0;
+            spacing: 4px;
+            MonitorChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
+            MonitorChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+        }
         Rectangle { vertical-stretch: 1; }
     }
-
-    RouteSocket {
-        x: -7px;
-        y: 143px;
-        active: root.route-enabled && root.has-output;
-    }
-}
-
-component MixChannelRow inherits HorizontalBox {
-    in property <string> label: "";
-    in property <float> level: 0;
-
-    height: 22px;
-    padding: 0;
-    spacing: 8px;
-
-    Text {
-        width: 72px;
-        text: root.label;
-        color: #596773;
-        font-size: 10px;
-        vertical-alignment: center;
-    }
-    LevelMeter {
-        level: root.level;
-        height: 7px;
-        horizontal-stretch: 1;
-    }
-}
-
-component MixNode inherits Rectangle {
-    in property <float> meter: 0;
-    in property <bool> route-enabled: true;
-
-    width: 220px;
-    height: 202px;
-    border-radius: 7px;
-    border-width: 1px;
-    border-color: #d9e0e6;
-    background: #ffffff;
-    drop-shadow-blur: 8px;
-    drop-shadow-offset-y: 3px;
-    drop-shadow-color: #00000012;
-
-    Rectangle {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: 55px;
-        border-radius: 7px;
-        background: #fafbfc;
-
-        HorizontalBox {
-            x: 0;
-            y: 0;
-            width: parent.width;
-            height: parent.height;
-            padding-left: 14px;
-            padding-right: 14px;
-            spacing: 9px;
-
-            Rectangle {
-                width: 34px;
-                height: 34px;
-                border-radius: 7px;
-                background: #edf6f4;
-                Text {
-                    text: "1/2";
-                    color: #188f7e;
-                    font-size: 9px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-            VerticalBox {
-                padding: 0;
-                spacing: 1px;
-                horizontal-stretch: 1;
-                Text { text: "Channels 1 & 2"; color: #1e293b; font-size: 12px; font-weight: 700; }
-                Text { text: "立体声通道组"; color: #71808c; font-size: 10px; }
-            }
-        }
-        Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: #edf0f2; }
-    }
-
-    VerticalBox {
-        x: 14px;
-        y: 66px;
-        width: parent.width - 28px;
-        height: parent.height - 78px;
-        padding: 0;
-        spacing: 6px;
-
-        Text { text: "默认立体声映射"; color: #586672; font-size: 10px; font-weight: 600; }
-        MixChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
-        MixChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
-    }
-
-    RouteSocket { x: -7px; y: 143px; active: root.route-enabled; }
-    RouteSocket { x: parent.width - 7px; y: 143px; active: root.route-enabled; }
+    RouteSocket { x: -7px; y: 143px; active: root.route-enabled && root.has-output; }
 }
 
 component TopologyRoute inherits Rectangle {
@@ -790,6 +900,7 @@ component TopologyRoute inherits Rectangle {
     in property <bool> running: false;
     in property <float> source-meter: 0;
     in property <float> output-meter: 0;
+    in property <bool> show-output: true;
     callback source-selected(int);
     callback output-selected(int);
     callback toggle-route(bool);
@@ -798,7 +909,7 @@ component TopologyRoute inherits Rectangle {
         && root.source-index >= 0
         && root.output-index >= 0;
 
-    width: 960px;
+    width: 980px;
     height: root.expanded ? 278px : 222px;
     background: transparent;
     animate height { duration: 140ms; }
@@ -810,31 +921,32 @@ component TopologyRoute inherits Rectangle {
         height: 278px;
         viewbox-x: 0;
         viewbox-y: 0;
-        viewbox-width: 960;
+        viewbox-width: 980;
         viewbox-height: 278;
         stroke: root.connected ? #29b6a2 : #97a5b1;
-        stroke-width: root.connected ? 4px : 3px;
+        stroke-width: root.connected ? 4.5px : 3px;
         stroke-line-cap: round;
         fill: transparent;
         opacity: root.connected ? 1 : 0.7;
-        MoveTo { x: 300; y: 150; }
-        CubicTo {
-            control-1-x: 330;
-            control-1-y: 150;
-            control-2-x: 340;
-            control-2-y: 150;
-            x: 370;
-            y: 150;
-        }
-        MoveTo { x: 590; y: 150; }
-        CubicTo {
-            control-1-x: 620;
-            control-1-y: 150;
-            control-2-x: 630;
-            control-2-y: 150;
-            x: 660;
-            y: 150;
-        }
+        MoveTo { x: 280; y: 150; }
+        CubicTo { control-1-x: 310; control-1-y: 150; control-2-x: 320; control-2-y: 150; x: 350; y: 150; }
+    }
+    if root.show-output: Path {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 278px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 980;
+        viewbox-height: 278;
+        stroke: root.connected ? #29b6a2 : #97a5b1;
+        stroke-width: root.connected ? 4.5px : 3px;
+        stroke-line-cap: round;
+        fill: transparent;
+        opacity: root.connected ? 1 : 0.7;
+        MoveTo { x: 630; y: 150; }
+        CubicTo { control-1-x: 660; control-1-y: 150; control-2-x: 670; control-2-y: 150; x: 700; y: 150; }
     }
 
     SourceNode {
@@ -850,16 +962,15 @@ component TopologyRoute inherits Rectangle {
         toggle-route(value) => { root.toggle-route(value); }
         apply-gain(value) => { root.apply-gain(value); }
     }
-
     MixNode {
-        x: 370px;
+        x: 350px;
         y: 0;
         meter: root.source-meter;
         route-enabled: root.connected;
+        show-output: root.show-output;
     }
-
-    OutputNode {
-        x: 660px;
+    if root.show-output: OutputNode {
+        x: 700px;
         y: 0;
         output-model: root.output-model;
         output-index <=> root.output-index;
@@ -867,37 +978,434 @@ component TopologyRoute inherits Rectangle {
         route-enabled: root.route-enabled;
         running: root.running;
         output-selected(index) => { root.output-selected(index); }
+        toggle-route(value) => { root.toggle-route(value); }
     }
 }
 
-component SidebarItem inherits Rectangle {
-    in property <bool> selected: false;
+component DemoSourceCard inherits Rectangle {
+    in property <string> title: "音频来源";
+    in property <string> subtitle: "进程回环音频";
+    in property <[string]> source-model: [];
+    in-out property <int> source-index: -1;
+    in property <float> meter: 0;
+    in-out property <float> gain: 0;
+    in-out property <bool> expanded: false;
+    in-out property <bool> route-enabled: true;
+    in property <bool> show-selector: false;
+    callback source-selected(int);
+    callback toggle-route(bool);
+    callback apply-gain(float);
 
-    height: 66px;
-    border-radius: 5px;
-    background: root.selected ? #e1f4f0 : transparent;
-    border-width: root.selected ? 1px : 0px;
-    border-color: #b7e1da;
+    private property <bool> has-source: root.source-index >= 0
+        && root.source-index < root.source-model.length;
+    private property <string> display-title: root.show-selector && root.has-source
+        ? root.source-model[root.source-index]
+        : root.title;
 
-    HorizontalBox {
-        padding-left: 11px;
-        padding-right: 10px;
-        spacing: 10px;
-        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #20a894; }
-        VerticalBox {
-            padding: 0;
-            spacing: 2px;
-            horizontal-stretch: 1;
-            Text { text: "主路由"; color: #1e293b; font-size: 12px; font-weight: 700; }
-            Text { text: "1 个声源 / 1 个输出"; color: #71808c; font-size: 10px; }
+    width: 280px;
+    height: root.expanded ? (root.show-selector ? 276px : 248px)
+        : (root.show-selector ? 190px : 178px);
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    background: #ffffff;
+    opacity: root.route-enabled ? 1 : 0.82;
+    drop-shadow-blur: 5px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: #00000016;
+    clip: false;
+    animate height { duration: 140ms; }
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: 52px;
+        border-radius: 7px;
+        background: #fafbfc;
+        HorizontalBox {
+            x: 14px;
+            y: 0;
+            width: root.width - 28px;
+            height: 52px;
+            spacing: 9px;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: #e8f7f4;
+                SourceGlyph { x: 6px; y: 6px; }
+            }
+            VerticalBox {
+                padding: 0;
+                spacing: 0;
+                horizontal-stretch: 1;
+                Text {
+                    height: 18px;
+                    text: root.display-title;
+                    color: #1e293b;
+                    font-size: 12px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    height: 16px;
+                    text: root.subtitle;
+                    color: #64748b;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            LoopbackToggle {
+                checked <=> root.route-enabled;
+                enabled: root.has-source || !root.show-selector;
+                label: "声源开关";
+                toggled(value) => { root.toggle-route(value); }
+            }
         }
+        Rectangle { y: 51px; width: root.width; height: 1px; background: #e2e8f0; }
+    }
+
+    if root.show-selector: SelectField {
+        x: 14px;
+        y: 61px;
+        width: root.width - 28px;
+        model: root.source-model;
+        current-index <=> root.source-index;
+        enabled: root.source-model.length > 0;
+        height: 30px;
+        selected(index) => { root.source-selected(index); }
+    }
+
+    VerticalBox {
+        x: 14px;
+        y: root.show-selector ? 101px : 63px;
+        width: root.width - 28px;
+        height: 48px;
+        padding: 0;
+        spacing: 8px;
+        SourceChannelRow { label: "1 (L)"; level: root.route-enabled ? root.meter : 0; }
+        SourceChannelRow { label: "2 (R)"; level: root.route-enabled ? root.meter : 0; }
+    }
+
+    Rectangle {
+        x: 14px;
+        y: root.show-selector ? 154px : 116px;
+        width: root.width - 28px;
+        height: 25px;
+        background: options-touch.has-hover ? #f2f8f6 : transparent;
+        HorizontalBox {
+            padding-left: 1px;
+            padding-right: 1px;
+            spacing: 5px;
+            if root.expanded: ChevronDown { }
+            if !root.expanded: ChevronRight { }
+            Text { text: "高级选项 (Options)"; color: #64748b; font-size: 10px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+            Text { text: round(root.gain) + " dB"; color: #7a8792; font-size: 10px; vertical-alignment: center; }
+        }
+        options-touch := TouchArea { clicked => { root.expanded = !root.expanded; } }
+    }
+
+    if root.expanded: Rectangle {
+        x: 14px;
+        y: root.show-selector ? 183px : 145px;
+        width: root.width - 28px;
+        height: 78px;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: #e2e8f0;
+        background: #f8fafc;
+        VerticalBox {
+            padding: 7px;
+            spacing: 5px;
+            HorizontalBox {
+                height: 26px;
+                Text { text: "增益 (Gain)"; color: #64748b; font-size: 10px; vertical-alignment: center; }
+                GainSlider { horizontal-stretch: 1; value <=> root.gain; enabled: root.route-enabled; changed(value) => { root.apply-gain(value); } }
+            }
+            HorizontalBox {
+                height: 20px;
+                Text { text: "静音 (Mute)"; color: #64748b; font-size: 10px; horizontal-stretch: 1; vertical-alignment: center; }
+                Toggle {
+                    checked: !root.route-enabled;
+                    label: "静音开关";
+                    toggled(value) => { root.toggle-route(!value); }
+                }
+            }
+        }
+    }
+
+    RouteSocket {
+        x: root.width - 7px;
+        y: root.show-selector ? 123px : 85px;
+        active: root.route-enabled && root.has-source;
+    }
+}
+
+component DemoSourcePreview inherits Rectangle {
+    in property <string> title: "Music";
+    in property <string> subtitle: "进程来源";
+    in property <float> meter: 0;
+    in property <bool> enabled: true;
+    in property <int> source-index: -1;
+    callback selected(int);
+    width: 280px;
+    height: 178px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    background: #ffffff;
+    opacity: root.enabled ? 1 : 0.82;
+    drop-shadow-blur: 5px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: #00000016;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: 52px;
+        border-radius: 7px;
+        background: #fafbfc;
+        TouchArea { clicked => { root.selected(root.source-index); } }
+        HorizontalBox {
+            x: 14px;
+            y: 0;
+            width: root.width - 28px;
+            height: 52px;
+            spacing: 9px;
+            Rectangle { width: 32px; height: 32px; border-radius: 8px; background: #fff1f2; SourceGlyph { x: 6px; y: 6px; } }
+            VerticalBox {
+                padding: 0;
+                spacing: 0;
+                horizontal-stretch: 1;
+                Text { height: 18px; text: root.title; color: #1e293b; font-size: 12px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                Text { height: 16px; text: root.subtitle; color: #64748b; font-size: 10px; vertical-alignment: center; overflow: elide; }
+            }
+            LoopbackToggle { checked: root.enabled; enabled: false; label: "备用声源"; }
+        }
+        Rectangle { y: 51px; width: root.width; height: 1px; background: #e2e8f0; }
+    }
+    VerticalBox {
+        x: 14px;
+        y: 63px;
+        width: root.width - 28px;
+        height: 48px;
+        padding: 0;
+        spacing: 8px;
+        SourceChannelRow { label: "1 (L)"; level: root.enabled ? root.meter : 0; }
+        SourceChannelRow { label: "2 (R)"; level: root.enabled ? root.meter : 0; }
+    }
+    Rectangle {
+        x: 14px;
+        y: 116px;
+        width: root.width - 28px;
+        height: 25px;
+        HorizontalBox {
+            padding-left: 1px;
+            spacing: 5px;
+            ChevronRight { }
+            Text { text: "高级选项 (Options)"; color: #64748b; font-size: 10px; font-weight: 600; vertical-alignment: center; }
+        }
+    }
+    RouteSocket { x: root.width - 7px; y: 85px; active: root.enabled; }
+}
+
+component DemoChannelCard inherits Rectangle {
+    in property <string> title: "Channels 1 & 2";
+    in property <string> first-label: "Channel 1 (L)";
+    in property <string> second-label: "Channel 2 (R)";
+    in property <float> meter: 0;
+    in property <bool> connected: false;
+    width: 280px;
+    height: 124px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    background: #ffffff;
+    drop-shadow-blur: 5px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: #00000016;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: 46px;
+        border-radius: 7px;
+        background: #fafbfc;
+        Text { x: 14px; y: 0; width: root.width - 28px; height: 46px; text: root.title; color: #1e293b; font-size: 12px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+        Rectangle { y: 45px; width: root.width; height: 1px; background: #e2e8f0; }
+    }
+    VerticalBox {
+        x: 20px;
+        y: 60px;
+        width: root.width - 40px;
+        height: 48px;
+        padding: 0;
+        spacing: 8px;
+        MixChannelRow { label: root.first-label; level: root.connected ? root.meter : 0; }
+        MixChannelRow { label: root.second-label; level: root.connected ? root.meter : 0; }
+    }
+    RouteSocket { x: -7px; y: 70px; active: root.connected; }
+    RouteSocket { x: root.width - 7px; y: 70px; active: root.connected; }
+}
+
+component DemoMonitorCard inherits Rectangle {
+    in property <[string]> output-model: [];
+    in-out property <int> output-index: -1;
+    in property <float> meter: 0;
+    in-out property <bool> route-enabled: true;
+    callback output-selected(int);
+    callback toggle-route(bool);
+    private property <bool> has-output: root.output-index >= 0
+        && root.output-index < root.output-model.length;
+
+    width: 280px;
+    height: 190px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #e2e8f0;
+    background: #ffffff;
+    opacity: root.route-enabled ? 1 : 0.82;
+    drop-shadow-blur: 5px;
+    drop-shadow-offset-y: 2px;
+    drop-shadow-color: #00000016;
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: 52px;
+        border-radius: 7px;
+        background: #fafbfc;
+        HorizontalBox {
+            x: 14px;
+            y: 0;
+            width: root.width - 28px;
+            height: 52px;
+            spacing: 9px;
+            Rectangle { width: 32px; height: 32px; border-radius: 8px; background: #f1f5f9; OutputGlyph { x: 6px; y: 6px; } }
+            VerticalBox {
+                padding: 0;
+                spacing: 0;
+                horizontal-stretch: 1;
+                Text { height: 18px; text: root.has-output ? root.output-model[root.output-index] : "选择监听设备"; color: #1e293b; font-size: 12px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+                Text { height: 16px; text: "默认音频输出设备"; color: #64748b; font-size: 10px; vertical-alignment: center; overflow: elide; }
+            }
+            LoopbackToggle { checked <=> root.route-enabled; enabled: root.has-output; label: "监听开关"; toggled(value) => { root.toggle-route(value); } }
+        }
+        Rectangle { y: 51px; width: root.width; height: 1px; background: #e2e8f0; }
+    }
+    SelectField {
+        x: 14px;
+        y: 61px;
+        width: root.width - 28px;
+        model: root.output-model;
+        current-index <=> root.output-index;
+        enabled: root.output-model.length > 0;
+        height: 30px;
+        selected(index) => { root.output-selected(index); }
+    }
+    VerticalBox {
+        x: 20px;
+        y: 103px;
+        width: root.width - 40px;
+        height: 48px;
+        padding: 0;
+        spacing: 8px;
+        MonitorChannelRow { label: "Channel 1 (L)"; level: root.route-enabled ? root.meter : 0; }
+        MonitorChannelRow { label: "Channel 2 (R)"; level: root.route-enabled ? root.meter : 0; }
+    }
+    RouteSocket { x: -7px; y: 126px; active: root.route-enabled && root.has-output; }
+}
+
+component DemoDeviceItem inherits Rectangle {
+    in property <string> title: "主路由";
+    in property <string> subtitle: "1 进程, 1 硬件设备";
+    in-out property <bool> route-enabled: false;
+    in property <bool> selected: false;
+    in property <bool> active: false;
+    callback toggled(bool);
+    width: 230px;
+    height: 78px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.selected ? #e2e8f0 : transparent;
+    background: root.selected ? #ffffff : transparent;
+    drop-shadow-blur: root.selected ? 3px : 0px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: #0000000d;
+    VerticalBox {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 9px;
+        padding-bottom: 8px;
+        spacing: 7px;
+        HorizontalBox {
+            height: 30px;
+            spacing: 8px;
+            Rectangle { width: 28px; height: 28px; border-radius: 6px; background: root.selected ? #e5f6f2 : #e2e8f0; SourceGlyph { x: 4px; y: 4px; } }
+            VerticalBox {
+                padding: 0;
+                spacing: 0;
+                horizontal-stretch: 1;
+                Text { height: 17px; text: root.title; color: #1e293b; font-size: 11px; font-weight: 700; overflow: elide; }
+                Text { height: 14px; text: root.subtitle; color: #64748b; font-size: 9px; overflow: elide; }
+            }
+            LoopbackToggle { checked <=> root.route-enabled; enabled: root.selected; label: "设备路由开关"; toggled(value) => { root.toggled(value); } }
+        }
+        LevelMeter { level: root.route-enabled && root.active ? 0.55 : 0; height: 6px; }
+    }
+}
+
+component DemoWireLayer inherits Rectangle {
+    in property <bool> connected: false;
+    in property <bool> show-monitor: true;
+    width: 1030px;
+    height: 520px;
+    background: transparent;
+
+    Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 1030;
+        viewbox-height: 520;
+        stroke: root.connected ? #29b6a2 : #94a3b8;
+        stroke-width: root.connected ? 4px : 3px;
+        stroke-line-cap: round;
+        fill: transparent;
+        opacity: root.connected ? 0.95 : 0.72;
+        MoveTo { x: 312; y: 233; }
+        CubicTo { control-1-x: 338; control-1-y: 233; control-2-x: 350; control-2-y: 180; x: 375; y: 180; }
+        MoveTo { x: 312; y: 399; }
+        CubicTo { control-1-x: 342; control-1-y: 399; control-2-x: 347; control-2-y: 180; x: 375; y: 180; }
+    }
+    if root.show-monitor: Path {
+        width: parent.width;
+        height: parent.height;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 1030;
+        viewbox-height: 520;
+        stroke: root.connected ? #29b6a2 : #94a3b8;
+        stroke-width: root.connected ? 4px : 3px;
+        stroke-line-cap: round;
+        fill: transparent;
+        opacity: root.connected ? 0.95 : 0.72;
+        MoveTo { x: 669; y: 180; }
+        CubicTo { control-1-x: 694; control-1-y: 180; control-2-x: 705; control-2-y: 236; x: 725; y: 236; }
     }
 }
 
 export component MainWindow inherits Window {
     title: "LoopMaster";
-    min-width: 1260px;
-    min-height: 700px;
+    width: 1280px;
+    height: 720px;
     background: #e5e7eb;
 
     in-out property <[string]> source-model: [];
@@ -913,8 +1421,8 @@ export component MainWindow inherits Window {
     in-out property <float> output-meter-r: 0;
     in-out property <bool> route-enabled: true;
     in-out property <bool> advanced-expanded: false;
+    in-out property <bool> show-monitors: true;
     private property <bool> route-ready: root.source-index >= 0 && root.output-index >= 0;
-    private property <bool> signal-active: root.route-ready && root.route-enabled;
     private property <bool> engine-error: root.engine-state != "Running"
         && root.engine-state != "Stopped"
         && root.engine-state != "Starting";
@@ -927,208 +1435,124 @@ export component MainWindow inherits Window {
     callback output-selected(int);
     callback toggle-route(bool);
 
-    VerticalBox {
-        padding: 14px;
-        spacing: 12px;
+    Rectangle {
+        width: 1280px;
+        height: 720px;
+        background: #e5e7eb;
 
         Rectangle {
-            height: 56px;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: #d0d7de;
+            x: 0;
+            y: 0;
+            width: 1280px;
+            height: 48px;
             background: #ffffff;
             HorizontalBox {
+                x: 0;
+                y: 0;
+                width: 1280px;
+                height: 48px;
                 padding-left: 16px;
                 padding-right: 16px;
-                spacing: 12px;
-                BrandMark { width: 30px; height: 30px; }
-                VerticalBox {
-                    width: 150px;
-                    padding: 0;
-                    spacing: 0;
-                    Text { text: "LoopMaster"; color: #1e293b; font-size: 17px; font-weight: 700; }
-                    Text { text: "Windows 音频路由器"; color: #7b8792; font-size: 10px; }
-                }
-                Rectangle { horizontal-stretch: 1; }
+                spacing: 10px;
                 Rectangle {
-                    width: 7px;
-                    height: 7px;
-                    border-radius: 4px;
-                    background: root.running ? #29b6a2 : #95a1ab;
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 6px;
+                    background: #e8f7f4;
+                    BrandMark { x: 0; y: 0; width: 26px; height: 26px; }
                 }
-                Text {
-                    text: root.running ? "运行中" : "已停止";
-                    color: root.running ? #168878 : #65727d;
-                    font-size: 10px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-                ActionButton { label: "刷新设备"; enabled: !root.running; clicked => { root.refresh(); } }
-                Rectangle { width: 1px; height: 24px; background: #e1e5e8; }
-                Text {
-                    text: "总引擎";
-                    color: #52606d;
-                    font-size: 11px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-                Toggle {
+                Text { text: "LoopMaster"; color: #1e293b; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                EngineBadge { active: root.running; label: root.running ? "音频引擎运行中 (WASAPI)" : (root.engine-error ? "音频引擎异常" : "音频引擎已停止"); }
+                Rectangle { horizontal-stretch: 1; }
+                LoopbackToggle {
                     checked <=> root.running;
                     enabled: root.route-ready;
-                    label: "启动总引擎";
-                    toggled(value) => {
-                        if (value) { root.start-engine(); }
-                        else { root.stop-engine(); }
-                    }
+                    label: "总引擎开关";
+                    toggled(value) => { if value { root.start-engine(); } else { root.stop-engine(); } }
                 }
             }
-        }
-
-        HorizontalBox {
-            spacing: 12px;
-            horizontal-stretch: 1;
-            Rectangle {
-                width: 190px;
-                border-radius: 6px;
-                border-width: 1px;
-                border-color: #d0d7de;
-                background: #f8f9fa;
-                VerticalBox {
-                    padding: 12px;
-                    spacing: 10px;
-                    Text { text: "路由"; color: #1e293b; font-size: 12px; font-weight: 700; }
-                    Rectangle { height: 1px; background: #e3e7ea; }
-                    SidebarItem { selected: true; }
-                    Rectangle { vertical-stretch: 1; }
-                    Text {
-                        text: "当前版本支持一条进程到设备的立体声路由。";
-                        color: #8a949d;
-                        font-size: 9px;
-                        wrap: word-wrap;
-                    }
-                }
-            }
-
-            Rectangle {
-                horizontal-stretch: 1;
-                border-radius: 6px;
-                border-width: 1px;
-                border-color: #d0d7de;
-                background: #f7f8f9;
-                VerticalBox {
-                    padding: 18px;
-                    spacing: 15px;
-                    HorizontalBox {
-                        height: 34px;
-                        spacing: 8px;
-                        VerticalBox {
-                            padding: 0;
-                            spacing: 1px;
-                            horizontal-stretch: 1;
-                            Text { text: "主路由"; color: #1e293b; font-size: 15px; font-weight: 700; }
-                            Text { text: "选择一个进程，并将其音频发送到指定的 Windows 输出端点"; color: #7b8792; font-size: 10px; }
-                        }
-                        StatusPill {
-                            width: 72px;
-                            label: root.signal-active
-                                ? (root.running ? "正在传输" : "路由已配置")
-                                : "路由已关闭";
-                            active: root.signal-active;
-                        }
-                    }
-
-                    Rectangle { height: 1px; background: #e1e5e8; }
-                    HorizontalBox {
-                        height: 34px;
-                        spacing: 0;
-                        Rectangle { horizontal-stretch: 1; }
-                        VerticalBox {
-                            width: 300px;
-                            padding: 0;
-                            spacing: 1px;
-                            Text { text: "音频来源"; color: #334155; font-size: 12px; font-weight: 700; }
-                            Text { text: "应用进程"; color: #87929c; font-size: 9px; }
-                        }
-                        Rectangle { width: 70px; }
-                        VerticalBox {
-                            width: 220px;
-                            padding: 0;
-                            spacing: 1px;
-                            Text { text: "Mix Channels"; color: #334155; font-size: 12px; font-weight: 700; }
-                            Text { text: "立体声通道组"; color: #87929c; font-size: 9px; }
-                        }
-                        Rectangle { width: 70px; }
-                        VerticalBox {
-                            width: 300px;
-                            padding: 0;
-                            spacing: 1px;
-                            Text { text: "输出设备"; color: #334155; font-size: 12px; font-weight: 700; }
-                            Text { text: "物理或虚拟输出端点"; color: #87929c; font-size: 9px; }
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-
-                    HorizontalBox {
-                        height: root.advanced-expanded ? 278px : 222px;
-                        spacing: 0;
-                        alignment: center;
-                        Rectangle { horizontal-stretch: 1; }
-                        TopologyRoute {
-                            source-model: root.source-model;
-                            output-model: root.output-model;
-                            source-index <=> root.source-index;
-                            output-index <=> root.output-index;
-                            gain <=> root.gain;
-                            expanded <=> root.advanced-expanded;
-                            route-enabled <=> root.route-enabled;
-                            running: root.running;
-                            source-meter: root.source-meter;
-                            output-meter: root.output-meter-l;
-                            source-selected(index) => { root.source-selected(index); }
-                            output-selected(index) => { root.output-selected(index); }
-                            toggle-route(value) => { root.toggle-route(value); }
-                            apply-gain(value) => { root.apply-gain(value); }
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                    }
-                    Rectangle { vertical-stretch: 1; }
-                }
-            }
+            Rectangle { x: 0; y: 47px; width: 1320px; height: 1px; background: #e2e8f0; }
         }
 
         Rectangle {
-            height: 48px;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: #d0d7de;
-            background: #ffffff;
-            HorizontalBox {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 12px;
-                Rectangle {
-                    width: 8px;
-                    height: 8px;
-                    border-radius: 4px;
-                    background: root.running ? #20a894 : (root.engine-error ? #d95858 : #8f9aa3);
-                }
-                Text {
-                    text: root.engine-state == "Running" ? "运行中"
-                        : (root.engine-state == "Stopped" ? "已停止" : root.engine-state);
-                    color: root.running ? #147f70 : (root.engine-error ? #b23f3f : #596670);
-                    font-size: 11px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
-                Rectangle { width: 1px; height: 18px; background: #e1e5e8; }
-                Text {
-                    text: root.stats-text == "" ? "等待引擎状态" : root.stats-text;
-                    color: #697680;
-                    font-size: 10px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
+            x: 0;
+            y: 48px;
+            width: 250px;
+            height: 672px;
+            background: #f2f4f6;
+            Rectangle { x: 249px; y: 0; width: 1px; height: 672px; background: #d6dbe1; }
+            Text { x: 16px; y: 14px; text: "▷"; color: #64748b; font-size: 11px; }
+            Text { x: 34px; y: 13px; text: "虚拟设备 (DEVICES)"; color: #64748b; font-size: 11px; font-weight: 700; }
+            DemoDeviceItem { x: 10px; y: 45px; title: "Virtual Mic for Zoom"; subtitle: "Music, Farrago, USB Mic"; selected: true; active: root.running; route-enabled <=> root.route-enabled; toggled(value) => { root.toggle-route(value); } }
+            DemoDeviceItem { x: 10px; y: 131px; title: "Pass-Thru (系统直通)"; subtitle: "Pass-Thru 默认通道"; selected: false; route-enabled: false; }
+            DemoDeviceItem { x: 10px; y: 217px; title: "主路由 (Main Router)"; subtitle: "1 进程, 1 硬件设备"; selected: false; route-enabled: false; }
+            Rectangle { x: 0; y: 624px; width: 250px; height: 1px; background: #d6dbe1; }
+            Text { x: 24px; y: 640px; text: "+  新建虚拟设备"; color: #334155; font-size: 10px; font-weight: 600; }
+            Text { x: 220px; y: 640px; text: "—"; color: #94a3b8; font-size: 10px; horizontal-alignment: right; }
+        }
+
+        Rectangle {
+            x: 250px;
+            y: 48px;
+            width: 1030px;
+            height: 672px;
+            background: #e9ecef;
+            Text { x: 32px; y: 14px; text: "Virtual Mic for Zoom"; color: #1e293b; font-size: 18px; font-weight: 700; }
+            Text { x: 32px; y: 39px; text: "当前活动路由"; color: #64748b; font-size: 10px; }
+            DemoWireLayer { x: 0; y: 0; connected: root.running && root.route-ready && root.route-enabled; show-monitor: root.show-monitors; }
+            ColumnHeader { x: 32px; y: 58px; title: "Sources 音频来源"; subtitle: root.source-model.length + " 个应用程序"; }
+            ColumnHeader { x: 382px; y: 58px; title: "Output Channels 输出通道"; subtitle: "4 通道 (2 组立体声)"; }
+            if root.show-monitors: ColumnHeader { x: 732px; y: 58px; title: "Monitors 监听设备"; subtitle: "1 监听设备"; }
+            DemoSourceCard {
+                x: 32px;
+                y: 110px;
+                source-model: root.source-model;
+                source-index <=> root.source-index;
+                gain <=> root.gain;
+                expanded <=> root.advanced-expanded;
+                route-enabled <=> root.route-enabled;
+                meter: root.source-meter;
+                show-selector: true;
+                source-selected(index) => { root.source-selected(index); }
+                toggle-route(value) => { root.toggle-route(value); }
+                apply-gain(value) => { root.apply-gain(value); }
+            }
+            if root.source-model.length > 1: DemoSourcePreview {
+                x: 32px;
+                y: 314px;
+                title: root.source-model[1];
+                subtitle: "进程来源";
+                meter: root.source-meter * 0.82;
+                enabled: true;
+                source-index: 1;
+                selected(index) => { root.source-selected(index); }
+            }
+            DemoChannelCard { x: 382px; y: 110px; title: "Channels 1 & 2"; first-label: "Channel 1 (L)"; second-label: "Channel 2 (R)"; meter: root.source-meter; connected: root.route-ready && root.route-enabled; }
+            DemoChannelCard { x: 382px; y: 248px; title: "Channels 3 & 4"; first-label: "Channel 3"; second-label: "Channel 4"; meter: 0; connected: false; }
+            if root.show-monitors: DemoMonitorCard {
+                x: 732px;
+                y: 110px;
+                output-model: root.output-model;
+                output-index <=> root.output-index;
+                meter: root.output-meter-l;
+                route-enabled <=> root.route-enabled;
+                output-selected(index) => { root.output-selected(index); }
+                toggle-route(value) => { root.toggle-route(value); }
+            }
+            Rectangle {
+                x: 0;
+                y: 624px;
+                width: 1030px;
+                height: 48px;
+                background: #ffffff;
+                Rectangle { x: 0; y: 0; width: 1030px; height: 1px; background: #e2e8f0; }
+                Rectangle { x: 24px; y: 20px; width: 7px; height: 7px; border-radius: 4px; background: root.running ? #29b6a2 : (root.engine-error ? #ef4444 : #94a3b8); }
+                Text { x: 42px; y: 16px; text: root.engine-state == "Running" ? "音频引擎运行中" : (root.engine-state == "Stopped" ? "音频引擎已停止" : root.engine-state); color: root.running ? #1a7e70 : (root.engine-error ? #b23f3f : #64748b); font-size: 10px; font-weight: 600; }
+                Rectangle { x: 120px; y: 15px; width: 1px; height: 18px; background: #e2e8f0; }
+                Text { x: 132px; y: 17px; width: 560px; text: root.stats-text == "" ? "等待引擎状态" : root.stats-text; color: #64748b; font-size: 9px; overflow: elide; }
+                FooterButton { x: 710px; y: 9px; label: "删除 (Delete)"; enabled: false; }
+                FooterButton { x: 864px; y: 9px; label: "显示监听 (Show Monitors)"; enabled: true; active: root.show-monitors; clicked => { root.show-monitors = !root.show-monitors; } }
             }
         }
     }
