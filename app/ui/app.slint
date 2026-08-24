@@ -1,130 +1,396 @@
-import { Button, ComboBox, Slider, VerticalBox, HorizontalBox, CheckBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+component BrandMark inherits Path {
+    width: 32px;
+    height: 32px;
+    stroke: #2bb3a5;
+    stroke-width: 3px;
+    fill: transparent;
+    MoveTo { x: 3; y: 21; }
+    LineTo { x: 16; y: 13; }
+    LineTo { x: 29; y: 21; }
+    MoveTo { x: 3; y: 28; }
+    LineTo { x: 16; y: 20; }
+    LineTo { x: 29; y: 28; }
+}
+
+component PlusMark inherits Path {
+    width: 18px;
+    height: 18px;
+    stroke: #2bb3a5;
+    stroke-width: 2px;
+    fill: transparent;
+    MoveTo { x: 9; y: 2; }
+    LineTo { x: 9; y: 16; }
+    MoveTo { x: 2; y: 9; }
+    LineTo { x: 16; y: 9; }
+}
+
+component Toggle inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+    width: 44px;
+    height: 25px;
+    border-radius: 13px;
+    background: root.checked ? #2bb3a5 : #d9dde1;
+    Rectangle {
+        x: root.checked ? parent.width - 23px : 2px;
+        y: 2px;
+        width: 21px;
+        height: 21px;
+        border-radius: 11px;
+        background: #ffffff;
+        animate x { duration: 140ms; }
+    }
+    TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+    animate background { duration: 140ms; }
+}
+
+component StatusToggle inherits Rectangle {
+    in property <bool> checked: false;
+    width: 44px;
+    height: 25px;
+    border-radius: 13px;
+    background: root.checked ? #2bb3a5 : #d9dde1;
+    Rectangle {
+        x: root.checked ? parent.width - 23px : 2px;
+        y: 2px;
+        width: 21px;
+        height: 21px;
+        border-radius: 11px;
+        background: #ffffff;
+    }
+}
+
+component LevelMeter inherits Rectangle {
+    in property <float> level: 0;
+    height: 7px;
+    border-radius: 4px;
+    background: #e1e5e8;
+    clip: true;
+    Rectangle {
+        width: root.level * parent.width;
+        height: parent.height;
+        border-radius: 4px;
+        background: root.level > 0.9 ? #dd6969 : (root.level > 0.65 ? #e4a43e : #2bb3a5);
+    }
+}
+
+component Port inherits Rectangle {
+    in property <bool> active: false;
+    width: 11px;
+    height: 11px;
+    border-radius: 6px;
+    background: root.active ? #2bb3a5 : #c5cbd0;
+}
+
+component ChannelLine inherits HorizontalBox {
+    in property <string> label: "";
+    in property <float> level: 0;
+    in property <bool> active: false;
+    in property <bool> input-port: true;
+    in property <bool> output-port: true;
+    height: 27px;
+    padding: 0;
+    spacing: 8px;
+    Port { visible: root.input-port; active: root.active; }
+    Text { text: root.label; width: 42px; color: #626a73; font-size: 12px; vertical-alignment: center; }
+    LevelMeter { level: root.level; horizontal-stretch: 1; }
+    Port { visible: root.output-port; active: root.active; }
+}
+
+component HeaderAction inherits Rectangle {
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 16px;
+    background: #e7f7f4;
+    PlusMark { x: 7px; y: 7px; }
+    TouchArea { clicked => { root.clicked(); } }
+}
+
+component SidebarRoute inherits Rectangle {
+    in property <string> name: "";
+    in property <string> detail: "";
+    in property <bool> selected: false;
+    width: 100%;
+    height: 62px;
+    border-radius: 8px;
+    background: root.selected ? #e4e8eb : transparent;
+    HorizontalBox {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 9px;
+        Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.selected ? #2bb3a5 : #b7bec4; }
+        VerticalBox {
+            padding: 0;
+            spacing: 2px;
+            Text { text: root.name; color: #30363d; font-size: 13px; font-weight: 700; }
+            Text { text: root.detail; color: #879099; font-size: 11px; }
+        }
+    }
+}
+
+component SourceCard inherits Rectangle {
+    in property <[string]> source-model: [];
+    in-out property <int> source-index: -1;
+    in-out property <float> gain: 0;
+    in-out property <bool> muted: false;
+    in property <float> meter-l: 0;
+    in property <float> meter-r: 0;
+    in property <bool> running: false;
+    callback apply-gain(float);
+    callback toggle-mute(bool);
+    width: 300px;
+    height: 365px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #d8dde1;
+    background: #ffffff;
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+        HorizontalBox {
+            height: 40px;
+            spacing: 10px;
+            Rectangle {
+                width: 38px;
+                height: 38px;
+                border-radius: 9px;
+                background: #e5f7f3;
+                BrandMark { width: 28px; height: 28px; x: 5px; y: 5px; }
+            }
+            VerticalBox {
+                padding: 0;
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text { text: root.source-index >= 0 ? root.source-model[root.source-index] : "未选择来源"; color: #282e35; font-size: 14px; font-weight: 700; overflow: elide; }
+                Text { text: "Process Loopback"; color: #899199; font-size: 11px; }
+            }
+            StatusToggle { checked: root.running; }
+        }
+        Rectangle { height: 1px; background: #edf0f2; }
+        ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.meter-l > 0.01; input-port: false; output-port: true; }
+        ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.meter-r > 0.01; input-port: false; output-port: true; }
+        Rectangle { height: 1px; background: #edf0f2; }
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "增益"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
+            Slider { minimum: -60; maximum: 12; value: root.gain; horizontal-stretch: 1; changed(value) => { root.gain = value; root.apply-gain(value); } }
+            Text { text: root.gain + " dB"; width: 46px; color: #626a73; font-size: 12px; vertical-alignment: center; }
+        }
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "静音"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
+            CheckBox { checked <=> root.muted; toggled => { root.toggle-mute(self.checked); } }
+        }
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "来源"; width: 34px; color: #626a73; font-size: 12px; vertical-alignment: center; }
+            ComboBox { model: root.source-model; current-index <=> root.source-index; horizontal-stretch: 1; }
+        }
+    }
+}
+
+component OutputCard inherits Rectangle {
+    in property <float> meter-l: 0;
+    in property <float> meter-r: 0;
+    in property <bool> running: false;
+    width: 252px;
+    height: 220px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #d8dde1;
+    background: #ffffff;
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "Output Channels"; color: #282e35; font-size: 14px; font-weight: 700; }
+            Text { text: "2 Channels"; color: #899199; font-size: 11px; vertical-alignment: center; }
+        }
+        Rectangle { height: 1px; background: #edf0f2; }
+        ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: true; }
+        ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: true; }
+    }
+}
+
+component MonitorCard inherits Rectangle {
+    in property <[string]> output-model: [];
+    in-out property <int> output-index: -1;
+    in property <float> meter-l: 0;
+    in property <float> meter-r: 0;
+    in property <bool> running: false;
+    width: 292px;
+    height: 270px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #d8dde1;
+    background: #ffffff;
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "Monitors"; color: #282e35; font-size: 14px; font-weight: 700; }
+            Text { text: "1 Device"; color: #899199; font-size: 11px; vertical-alignment: center; }
+        }
+        Rectangle { height: 1px; background: #edf0f2; }
+        ChannelLine { label: "1 (L)"; level: root.meter-l; active: root.running; input-port: true; output-port: false; }
+        ChannelLine { label: "2 (R)"; level: root.meter-r; active: root.running; input-port: true; output-port: false; }
+        Text { text: root.output-index >= 0 ? root.output-model[root.output-index] : "未选择输出设备"; color: #626a73; font-size: 11px; overflow: elide; }
+        ComboBox { model: root.output-model; current-index <=> root.output-index; }
+    }
+}
+
+component SignalRail inherits VerticalBox {
+    in property <bool> active: false;
+    width: 100px;
+    height: 220px;
+    padding: 0;
+    spacing: 36px;
+    alignment: center;
+    Rectangle { height: 2px; horizontal-stretch: 1; background: root.active ? #2bb3a5 : #c6cdd1; }
+    Rectangle { height: 2px; horizontal-stretch: 1; background: root.active ? #2bb3a5 : #c6cdd1; }
+}
 
 export component MainWindow inherits Window {
     title: "LoopMaster";
-    min-width: 900px;
-    min-height: 640px;
-
-    // Rust 侧填充的属性
-    in-out property <[string]> process-model: [];
-    in-out property <[string]> sink-model: [];
-    in-out property <int> process-index: -1;
-    in-out property <int> sink-index: -1;
+    min-width: 1400px;
+    min-height: 820px;
+    background: #eef1f4;
+    in-out property <[string]> source-model: [];
+    in-out property <[string]> output-model: [];
+    in-out property <int> source-index: -1;
+    in-out property <int> output-index: -1;
     in-out property <float> gain: 0;
     in-out property <bool> muted: false;
-    in-out property <string> engine-state: "Stopped";
     in-out property <bool> running: false;
+    in-out property <string> engine-state: "Stopped";
     in-out property <string> stats-text: "";
-
-    // Rust 侧处理的事件
+    in-out property <float> source-meter: 0;
+    in-out property <float> output-meter-l: 0;
+    in-out property <float> output-meter-r: 0;
     callback refresh();
-    callback start();
-    callback stop();
+    callback start-engine();
+    callback stop-engine();
     callback apply-gain(float);
     callback toggle-mute(bool);
 
     VerticalBox {
-        padding: 16px;
-        spacing: 12px;
-
-        // 顶部：标题 + 状态 + 操作
+        padding: 20px;
+        spacing: 16px;
+        Rectangle {
+            height: 76px;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #d6dce0;
+            background: #ffffff;
+            HorizontalBox {
+                padding-left: 20px;
+                padding-right: 20px;
+                spacing: 14px;
+                HorizontalBox {
+                    spacing: 13px;
+                    Rectangle { width: 38px; height: 38px; BrandMark { width: 32px; height: 32px; x: 3px; y: 3px; } }
+                    VerticalBox {
+                        padding: 0;
+                        spacing: 2px;
+                        Text { text: "LoopMaster"; color: #20262d; font-size: 21px; font-weight: 700; }
+                        Text { text: "虚拟音频路由设备"; color: #8a939b; font-size: 13px; }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "刷新设备"; clicked => { root.refresh(); } }
+                HeaderAction { clicked => { root.refresh(); } }
+                Rectangle { width: 1px; height: 25px; background: #e1e5e8; }
+                Text { text: root.running ? "On" : "Off"; color: root.running ? #20262d : #8a939b; font-size: 13px; font-weight: 700; vertical-alignment: center; }
+                Toggle {
+                    checked <=> root.running;
+                    toggled(value) => { if (value) { root.start-engine(); } else { root.stop-engine(); } }
+                }
+            }
+        }
         HorizontalBox {
-            spacing: 12px;
+            spacing: 18px;
+            horizontal-stretch: 1;
             Rectangle {
-                height: 44px;
-                border-radius: 6px;
-                background: root.running ? #e8f5e9 : #fbe9e7;
-                HorizontalBox {
-                    padding: 10px;
-                    Text {
-                        text: "引擎状态: " + root.engine-state;
-                        font-weight: 700;
-                    }
+                width: 206px;
+                border-radius: 10px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #d6dce0;
+                VerticalBox {
+                    padding: 14px;
+                    spacing: 8px;
+                    Text { text: "Devices"; color: #30363d; font-size: 15px; font-weight: 700; }
+                    Rectangle { height: 1px; background: #edf0f2; }
+                    SidebarRoute { name: "主路由"; detail: "1 App, 1 Device"; selected: true; }
+                    SidebarRoute { name: "Pass-Through"; detail: "准备添加"; selected: false; }
+                    Rectangle { vertical-stretch: 1; }
+                    Button { text: "＋ 新建路由"; clicked => { root.refresh(); } }
                 }
             }
-            Button {
-                text: "刷新设备/进程";
-                clicked => { root.refresh(); }
-            }
-            Button {
-                text: root.running ? "停止" : "启动";
-                primary: true;
-                clicked => {
-                    if (root.running) {
-                        root.stop();
-                    } else {
-                        root.start();
+            Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;
+                VerticalBox {
+                    spacing: 14px;
+                    HorizontalBox {
+                        height: 30px;
+                        Text { text: "Sources"; color: #30363d; font-size: 16px; font-weight: 700; }
+                        Text { text: "1 App, 1 Device"; color: #899199; font-size: 12px; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        HeaderAction { clicked => { root.refresh(); } }
                     }
+                    HorizontalBox {
+                        horizontal-stretch: 1;
+                        spacing: 10px;
+                        SourceCard {
+                            source-model: root.source-model;
+                            source-index <=> root.source-index;
+                            gain <=> root.gain;
+                            muted <=> root.muted;
+                            meter-l: root.source-meter;
+                            meter-r: root.source-meter;
+                            running: root.running;
+                            apply-gain(value) => { root.apply-gain(value); }
+                            toggle-mute(value) => { root.toggle-mute(value); }
+                        }
+                        SignalRail { active: root.running && root.source-index >= 0; }
+                        OutputCard { meter-l: root.output-meter-l; meter-r: root.output-meter-r; running: root.running; }
+                        SignalRail { active: root.running && root.output-index >= 0; }
+                        MonitorCard {
+                            output-model: root.output-model;
+                            output-index <=> root.output-index;
+                            meter-l: root.output-meter-l;
+                            meter-r: root.output-meter-r;
+                            running: root.running;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    Rectangle { vertical-stretch: 1; }
                 }
             }
         }
-
-        // 路由配置
         Rectangle {
+            height: 62px;
+            border-radius: 12px;
             border-width: 1px;
-            border-color: #d7d9df;
-            border-radius: 6px;
-            background: #f7f8fa;
-            VerticalBox {
-                padding: 14px;
-                spacing: 10px;
-
-                Text { text: "路由配置"; font-size: 16px; font-weight: 700; }
-
-                HorizontalBox {
-                    spacing: 8px;
-                    Text { text: "音频来源（进程）: "; vertical-alignment: center; }
-                    ComboBox {
-                        model: root.process-model;
-                        current-index <=> root.process-index;
-                    }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    Text { text: "输出目标（设备）: "; vertical-alignment: center; }
-                    ComboBox {
-                        model: root.sink-model;
-                        current-index <=> root.sink-index;
-                    }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    Text { text: "增益: "; vertical-alignment: center; }
-                    Slider {
-                        minimum: -60;
-                        maximum: 12;
-                        value: root.gain;
-                        changed(value) => {
-                            root.gain = value;
-                            root.apply-gain(value);
-                        }
-                    }
-                    Text { text: root.gain + " dB"; vertical-alignment: center; }
-                }
-                HorizontalBox {
-                    spacing: 8px;
-                    Text { text: "静音: "; vertical-alignment: center; }
-                    CheckBox {
-                        checked: root.muted;
-                        toggled => {
-                            root.muted = self.checked;
-                            root.toggle-mute(self.checked);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 统计区
-        Rectangle {
-            border-width: 1px;
-            border-color: #d7d9df;
-            border-radius: 6px;
-            background: #f7f8fa;
-            VerticalBox {
-                padding: 12px;
-                Text { text: "引擎统计"; font-size: 16px; font-weight: 700; }
-                Text { text: root.stats-text; color: #40444f; }
+            border-color: #d6dce0;
+            background: #ffffff;
+            HorizontalBox {
+                padding-left: 18px;
+                padding-right: 18px;
+                spacing: 18px;
+                Text { text: "状态: " + root.engine-state; color: root.running ? #2bb3a5 : #6e7881; font-size: 14px; font-weight: 700; vertical-alignment: center; }
+                Text { text: root.stats-text; color: #5f6972; font-size: 13px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
             }
         }
     }
