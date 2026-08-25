@@ -4,10 +4,13 @@
 //! 只维护展示模型和用户意图；WASAPI 枚举、引擎控制都在 Tauri command 执行
 //! 的后台线程完成，不阻塞 UI 主线程，也不把实时音频结构暴露给前端。
 //!
-//! 本阶段（阶段 B）实现命令/事件闭环：
+//! 本阶段（阶段 B/C）实现命令/事件闭环：
 //! - 只读命令：`list_devices`、`list_audio_processes`、`get_route_snapshot`；
 //! - 引擎控制：`start_engine`、`stop_engine`、`request_reconnect`、
 //!   `apply_route_edit`（拓扑变化会返回“需要重启”）；
+//! - 路由增强（阶段 C）：`set_source_name`、`set_output_channel_name`、
+//!   `set_external_output_name`（节点重命名，在壳层通过重建编辑图实现）、
+//!   `set_send_channel_map`（send 通道映射）；
 //! - 事件：`engine-state-changed`、`engine-stats-changed`、
 //!   `device-lost`、`device-restored`、`service-error`。
 
@@ -21,8 +24,8 @@ use loopmaster_app_service::{
     ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent,
 };
 use loopmaster_audio_core::{
-    BusId, BusSpec, EndpointId, RouteGraph, SendId, SendSpec, SinkId, SinkSpec, SourceId,
-    SourceKind, SourceSpec,
+    BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
+    SourceId, SourceKind, SourceSpec,
 };
 use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineStatus};
 use tauri::Emitter;
@@ -181,6 +184,22 @@ enum RouteEditRequest {
     SetSendGain {
         id: String,
         gain_db: f32,
+    },
+    SetSourceName {
+        id: String,
+        display_name: String,
+    },
+    SetOutputChannelName {
+        id: String,
+        display_name: String,
+    },
+    SetExternalOutputName {
+        id: String,
+        display_name: String,
+    },
+    SetSendChannelMap {
+        id: String,
+        channel_map: Vec<[u16; 2]>,
     },
 }
 
@@ -385,14 +404,94 @@ fn apply_route_edit(
     state: tauri::State<'_, Arc<AppState>>,
     request: RouteEditRequest,
 ) -> Result<(), ServiceErrorBrief> {
-    let edit = request_to_route_edit(request).map_err(ServiceErrorBrief::graph)?;
     let mut editor = state
         .editor
         .lock()
         .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
-    editor
-        .apply(edit)
-        .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+    // 节点重命名在壳层处理：app-service 的 RouteEdit 不直接支持 display_name
+    // 覆盖，故重建编辑图（仅改 display_name，不影响拓扑）。其余 op 走标准映射。
+    match request {
+        RouteEditRequest::SetSourceName { id, display_name } => {
+            apply_rename(&mut editor, RenameTarget::Source, &id, display_name)
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+        RouteEditRequest::SetOutputChannelName { id, display_name } => {
+            apply_rename(&mut editor, RenameTarget::OutputChannel, &id, display_name)
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+        RouteEditRequest::SetExternalOutputName { id, display_name } => {
+            apply_rename(&mut editor, RenameTarget::ExternalOutput, &id, display_name)
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+        _ => {
+            let edit = request_to_route_edit(request).map_err(ServiceErrorBrief::graph)?;
+            editor
+                .apply(edit)
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+    }
+}
+
+/// 可重命名节点类型。
+#[derive(Clone, Copy)]
+enum RenameTarget {
+    Source,
+    OutputChannel,
+    ExternalOutput,
+}
+
+/// 重命名节点：在编辑图副本上覆盖 `display_name` 并整体校验后重建编辑器。
+///
+/// app-service 的 `RouteEdit` 没有覆盖节点 `display_name` 的变体，且根 workspace
+/// 契约不可修改，因此此处通过 `RouteEditor::new` 重建编辑图（仅显示字段变化，
+/// 不改变拓扑与 send 关系）。
+fn apply_rename(
+    editor: &mut RouteEditor,
+    target: RenameTarget,
+    id: &str,
+    display_name: String,
+) -> Result<(), RouteGraphError> {
+    let mut graph = editor.draft().clone();
+    let mut found = false;
+    match target {
+        RenameTarget::Source => {
+            for source in graph.sources.iter_mut() {
+                if source.id.0 == id {
+                    source.display_name = display_name;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        RenameTarget::OutputChannel => {
+            for bus in graph.buses.iter_mut() {
+                if bus.id.0 == id {
+                    bus.display_name = display_name;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        RenameTarget::ExternalOutput => {
+            for sink in graph.sinks.iter_mut() {
+                if sink.id.0 == id {
+                    sink.display_name = display_name;
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !found {
+        return Err(match target {
+            RenameTarget::Source => RouteGraphError::MissingSource(id.to_owned()),
+            RenameTarget::OutputChannel => RouteGraphError::MissingBus(id.to_owned()),
+            RenameTarget::ExternalOutput => RouteGraphError::MissingSink(id.to_owned()),
+        });
+    }
+    graph.validate()?;
+    *editor = RouteEditor::new(graph);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +803,20 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             send_id: SendId(id),
             gain_db,
         },
+        RouteEditRequest::SetSendChannelMap { id, channel_map } => RouteEdit::SetSendChannelMap {
+            send_id: SendId(id),
+            channel_map: channel_map
+                .into_iter()
+                .map(|[input, output]| (input, output))
+                .collect(),
+        },
+        // 节点重命名（SetSourceName / SetOutputChannelName / SetExternalOutputName）
+        // 在 apply_route_edit 中单独处理，不走此函数。
+        RouteEditRequest::SetSourceName { .. }
+        | RouteEditRequest::SetOutputChannelName { .. }
+        | RouteEditRequest::SetExternalOutputName { .. } => {
+            unreachable!("重命名 op 应在 apply_route_edit 中提前处理")
+        }
     })
 }
 
@@ -898,6 +1011,79 @@ mod tests {
             )
             .unwrap();
         assert!(editor.draft().sources.is_empty());
+    }
+
+    #[test]
+    fn set_send_channel_map_maps_to_route_editor() {
+        let mut editor = RouteEditor::new(sample_graph());
+        editor
+            .apply(
+                request_to_route_edit(RouteEditRequest::SetSendChannelMap {
+                    id: "s1".into(),
+                    channel_map: vec![[0, 1], [1, 0]],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let s1 = editor
+            .draft()
+            .sends
+            .iter()
+            .find(|s| s.id() == &SendId("s1".into()))
+            .unwrap();
+        assert_eq!(s1.channel_map(), &[(0, 1), (1, 0)]);
+    }
+
+    #[test]
+    fn rename_source_rebuilds_editor_display_name() {
+        let mut editor = RouteEditor::new(sample_graph());
+        apply_rename(
+            &mut editor,
+            RenameTarget::Source,
+            "src-a",
+            "改名应用".into(),
+        )
+        .unwrap();
+        let graph = editor.draft();
+        assert_eq!(graph.sources.len(), 1);
+        assert_eq!(graph.sources[0].display_name, "改名应用");
+        // 拓扑与 send 关系保持不变
+        assert_eq!(graph.sends.len(), 2);
+        assert_eq!(graph.buses[0].id, BusId("ch-1".into()));
+    }
+
+    #[test]
+    fn rename_output_channel_and_external_output_rebuild_display_name() {
+        let mut editor = RouteEditor::new(sample_graph());
+        apply_rename(
+            &mut editor,
+            RenameTarget::OutputChannel,
+            "ch-1",
+            "主通道".into(),
+        )
+        .unwrap();
+        assert_eq!(editor.draft().buses[0].display_name, "主通道");
+
+        apply_rename(
+            &mut editor,
+            RenameTarget::ExternalOutput,
+            "out-1",
+            "主扬声器".into(),
+        )
+        .unwrap();
+        assert_eq!(editor.draft().sinks[0].display_name, "主扬声器");
+        // 三条 send 均保留
+        assert_eq!(editor.draft().sends.len(), 2);
+    }
+
+    #[test]
+    fn rename_missing_node_is_rejected_without_replacing_editor() {
+        let mut editor = RouteEditor::new(sample_graph());
+        let before = editor.draft().clone();
+        let error =
+            apply_rename(&mut editor, RenameTarget::Source, "ghost", "x".into()).unwrap_err();
+        assert_eq!(error, RouteGraphError::MissingSource("ghost".into()));
+        assert_eq!(editor.draft(), &before);
     }
 
     #[test]
