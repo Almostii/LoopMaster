@@ -1,0 +1,10 @@
+[package]
+name = "loopmaster-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+loopmaster-audio-core = { path = "../audio-core" }
+loopmaster-audio-windows = { path = "../audio-windows" }

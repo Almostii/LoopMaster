@@ -1,0 +1,33 @@
+# 本地参考项目，不属于 LoopMaster Git 仓库
+/Library/
+/Doc/old
+
+# 本地依赖核对和临时验证目录
+/.tmp-*/
+
+# Rust 构建产物
+**/target/
+
+# Tauri/React 前端依赖和构建产物
+**/node_modules/
+**/dist/
+**/.tauri/
+
+# 安装包输出目录（由 build:installer 脚本生成到仓库根目录）
+/dist-installer/
+
+# Windows/.NET/IDE 生成物
+**/bin/
+**/obj/
+.vs/
+.idea/
+
+# 本地配置和日志
+*.user
+*.suo
+*.local
+*.log
+
+# WorkBuddy 本地记忆、输出和运行状态，不属于项目 Git
+/.workbuddy/
+/.codebuddy/

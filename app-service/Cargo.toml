@@ -1,0 +1,13 @@
+[package]
+name = "loopmaster-app-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+loopmaster-audio-core = { path = "../audio-core" }
+loopmaster-audio-windows = { path = "../audio-windows" }
+serde.workspace = true
+serde_json = "1"
+thiserror.workspace = true

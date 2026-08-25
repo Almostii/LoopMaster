@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "app-service",
+    "audio-core",
+    "audio-windows",
+    "diagnostics",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "CC-BY-NC-4.0"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
