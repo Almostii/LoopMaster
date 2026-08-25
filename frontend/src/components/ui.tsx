@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 /** Loopback 风格红/青胶囊 On-Off 开关 */
 export function LoopToggle({
@@ -30,31 +30,66 @@ export function VuMeter({
   label,
   align = "left",
   labelClass,
+  peakHoldMs = 300,
+  attack = 0.55,
+  decay = 0.12,
 }: {
   level: number; // 0..100
   label?: string;
   align?: "left" | "right";
   /** 自定义标签样式类（如输出通道的宽标签 "Channel 1 (L)"） */
   labelClass?: string;
+  peakHoldMs?: number;
+  attack?: number;
+  decay?: number;
 }) {
-  const [shown, setShown] = useState(0);
-  const rafRef = useRef<number | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const stateRef = useRef({
+    current: 0,
+    peak: 0,
+    peakTime: 0,
+    target: 0,
+  });
 
   useEffect(() => {
-    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    const target = Math.min(100, Math.max(0, level));
-    rafRef.current = requestAnimationFrame(() => {
-      // 使用阻尼衰减，让电平表有实时动画质感
-      setShown((prev) => {
-        const diff = target - prev;
-        const next = Math.abs(diff) < 0.5 ? target : prev + diff * 0.35;
-        return next;
-      });
-    });
-    return () => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    };
+    stateRef.current.target = Math.min(100, Math.max(0, level));
   }, [level]);
+
+  useEffect(() => {
+    let raf = 0;
+    const step = () => {
+      const state = stateRef.current;
+      const { target, current, peak, peakTime } = state;
+      const now = performance.now();
+
+      // Attack: 快速跟上新增峰值；Decay: 电平回落时较慢平滑下降。
+      const movingUp = target > current;
+      const factor = movingUp ? attack : decay;
+      let next = current + (target - current) * factor;
+      if (Math.abs(target - next) < 0.3) next = target;
+      state.current = Math.min(100, Math.max(0, next));
+
+      // Peak hold：新峰值立即刷新；旧峰值保持一段时间后跟随当前电平缓慢衰减。
+      if (target > peak) {
+        state.peak = target;
+        state.peakTime = now;
+      } else if (now - peakTime > peakHoldMs) {
+        const peakNext = peak + (current - peak) * 0.12;
+        state.peak = Math.max(current, Math.max(0, peakNext));
+      }
+
+      const bar = barRef.current;
+      if (bar) {
+        bar.style.width = `${state.current}%`;
+      }
+
+      raf = requestAnimationFrame(step);
+    };
+
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [attack, decay, peakHoldMs]);
 
   const defaultLeft = "label-source";
   const defaultRight = "label-monitor";
@@ -62,12 +97,15 @@ export function VuMeter({
   const rightCls = labelClass ?? defaultRight;
 
   return (
-    <div className={`channel-row ${align === "right" ? "channel-row-right" : ""}`}>
+    <div
+      ref={wrapRef}
+      className={`channel-row ${align === "right" ? "channel-row-right" : ""}`}
+    >
       {label && align === "left" && (
         <span className={`channel-label ${leftCls}`}>{label}</span>
       )}
       <div className="vu-meter-wrap">
-        <div className="vu-meter-bar" style={{ width: `${shown}%` }} />
+        <div ref={barRef} className="vu-meter-bar" style={{ width: "0%" }} />
       </div>
       {label && align === "right" && (
         <span className={`channel-label ${rightCls}`}>{label}</span>
