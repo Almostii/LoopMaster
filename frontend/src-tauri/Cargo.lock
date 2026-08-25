@@ -2043,6 +2043,8 @@ name = "loopmaster-frontend"
 version = "0.1.0"
 dependencies = [
  "loopmaster-app-service",
+ "loopmaster-audio-core",
+ "loopmaster-audio-windows",
  "serde",
  "serde_json",
  "tauri",
