@@ -219,6 +219,51 @@ button:disabled {
   gap: 12px;
 }
 
+/* ---------------- 自定义窗口控制按钮 ---------------- */
+.titlebar-app-name {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text-main);
+  letter-spacing: 0.01em;
+  user-select: none;
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  margin-left: 4px;
+  gap: 0;
+}
+
+.win-btn {
+  width: 46px;
+  height: var(--header-height);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+  padding: 0;
+}
+
+.win-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-main);
+}
+
+.win-btn-close:hover {
+  background: var(--accent-red);
+  color: #ffffff;
+}
+
+.win-btn svg {
+  display: block;
+}
+
 /* ---------------- 画布容器 ---------------- */
 .router-canvas-wrap {
   flex: 1;
