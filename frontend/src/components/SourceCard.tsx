@@ -3,28 +3,32 @@ import { formatDb, sendsForSource } from "../lib";
 import type { RouteProfileSnapshot, SourceBrief } from "../types";
 import { LoopToggle, VuMeter } from "./ui";
 
+function stopProp(e: React.MouseEvent) {
+  e.stopPropagation();
+}
+
 export default function SourceCard({
   source,
   route,
   meterLevel,
-  meterHint = "全局捕获峰值",
   icon,
   isOn,
+  isSelected,
   onToggle,
-  onRemove,
   onSetGain,
   onSetMuted,
+  onSelect,
 }: {
   source: SourceBrief;
   route: RouteProfileSnapshot;
   meterLevel: number;
-  meterHint?: string;
   icon?: string | null;
   isOn: boolean;
+  isSelected: boolean;
   onToggle: (sourceId: string, on: boolean) => void;
-  onRemove: (sourceId: string) => void;
   onSetGain: (sendId: string, gainDb: number) => void;
   onSetMuted: (sendId: string, muted: boolean) => void;
+  onSelect: () => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
   const sends = sendsForSource(route, source.id);
@@ -32,7 +36,13 @@ export default function SourceCard({
   const primarySend = sends[0];
 
   return (
-    <div className={`node-card ${isOn ? "" : "is-disabled"}`}>
+    <div
+      className={`node-card ${isOn ? "" : "is-disabled"} ${isSelected ? "is-selected" : ""}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect();
+      }}
+    >
       <div className="node-card-body">
         <div className="node-top-row">
           <div className="node-info-left">
@@ -57,24 +67,18 @@ export default function SourceCard({
             </div>
             <div className="node-title-group">
               <span className="node-title">{source.display_name}</span>
-              <span className="node-subtext">
-                {source.process_id != null
-                  ? `进程 PID ${source.process_id}`
-                  : source.kind === "device_loopback"
-                    ? "设备回环"
-                    : "音频来源"}
-              </span>
             </div>
           </div>
-          <LoopToggle
-            checked={isOn}
-            title="切换音源开关"
-            onChange={(v) => onToggle(source.id, v)}
-          />
+          <div onClick={stopProp}>
+            <LoopToggle
+              checked={isOn}
+              title="切换音源开关"
+              onChange={(v) => onToggle(source.id, v)}
+            />
+          </div>
         </div>
 
         <div className="node-content-padding">
-        <div className="meter-hint">{meterHint}</div>
         <div className="node-channels-wrapper">
           <div className="node-channels-list">
             <VuMeter level={meterLevel} label="1 (L)" align="left" />
@@ -86,12 +90,16 @@ export default function SourceCard({
               data-node-type="source"
               data-node-id={source.id}
               title="拖拽立体声连线到输出通道"
+              onClick={stopProp}
             />
           </div>
 
           <div
             className={`node-options-toggle ${optionsOpen ? "open" : ""}`}
-            onClick={() => setOptionsOpen((v) => !v)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOptionsOpen((v) => !v);
+            }}
           >
             <svg
               width="12"
@@ -103,9 +111,9 @@ export default function SourceCard({
             >
               <polyline points="9 18 15 12 9 6" />
             </svg>
-            <span>高级选项 (Options)</span>
+            <span>Options</span>
           </div>
-          <div className={`node-options-content ${optionsOpen ? "show" : ""}`}>
+          <div className={`node-options-content ${optionsOpen ? "show" : ""}`} onClick={stopProp}>
             {primarySend ? (
               <>
                 <div className="option-row">
@@ -137,9 +145,6 @@ export default function SourceCard({
             ) : (
               <span className="option-hint">尚未连线，无法设置增益/静音</span>
             )}
-            <button className="btn-remove-card" onClick={() => onRemove(source.id)}>
-              移除音源
-            </button>
           </div>
         </div>
       </div>

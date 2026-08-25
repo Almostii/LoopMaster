@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 export interface PickerOption {
   value: string;
@@ -32,22 +33,72 @@ export default function PickerMenu({
   loading?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<{ top: number; left: number }>({
+    top: 0,
+    left: 0,
+  });
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
+      const target = e.target as Node;
+      if (
+        triggerRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
       }
+      setOpen(false);
     }
     document.addEventListener("mousedown", onClickOutside);
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, []);
 
+  useEffect(() => {
+    function onResize() {
+      if (!open) return;
+      setOpen(false);
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onScroll(e: Event) {
+      if (
+        e.target instanceof Node &&
+        (triggerRef.current?.contains(e.target) ||
+          menuRef.current?.contains(e.target))
+      ) {
+        return;
+      }
+      setOpen(false);
+    }
+    window.addEventListener("scroll", onScroll, true);
+    return () => window.removeEventListener("scroll", onScroll, true);
+  }, [open]);
+
+  function computePosition() {
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const menuWidth = Math.min(360, window.innerWidth - 32);
+    let left = rect.left;
+    if (left + menuWidth > window.innerWidth - 16) {
+      left = Math.max(16, window.innerWidth - menuWidth - 16);
+    }
+    setMenuStyle({ top: rect.bottom + 4, left });
+  }
+
   function toggle() {
     const next = !open;
+    if (next) {
+      computePosition();
+      if (onOpen) onOpen();
+    }
     setOpen(next);
-    if (next && onOpen) onOpen();
   }
 
   const resolvedGroups: PickerGroup[] = groups ?? [
@@ -76,30 +127,49 @@ export default function PickerMenu({
     );
   }
 
+  const menu = open && (
+    <div
+      className="dropdown-menu show"
+      ref={menuRef}
+      style={{
+        position: "fixed",
+        top: menuStyle.top,
+        left: menuStyle.left,
+        right: "auto",
+      }}
+    >
+      {loading ? (
+        <div className="dropdown-item muted">加载中…</div>
+      ) : allEmpty ? (
+        <div className="dropdown-item muted">暂无可用项</div>
+      ) : (
+        resolvedGroups.map((group, i) => (
+          <div key={group.title} className="dropdown-group">
+            {i > 0 && <div className="dropdown-divider" />}
+            <div className="dropdown-section-title">{group.title}</div>
+            {group.options.length === 0 ? (
+              <div className="dropdown-item muted">—</div>
+            ) : (
+              group.options.map(renderOption)
+            )}
+          </div>
+        ))
+      )}
+    </div>
+  );
+
   return (
     <div className="picker-root" ref={rootRef}>
-      <div onClick={toggle}>{trigger}</div>
-      {open && (
-        <div className="dropdown-menu show">
-          {loading ? (
-            <div className="dropdown-item muted">加载中…</div>
-          ) : allEmpty ? (
-            <div className="dropdown-item muted">暂无可用项</div>
-          ) : (
-            resolvedGroups.map((group, i) => (
-              <div key={group.title} className="dropdown-group">
-                {i > 0 && <div className="dropdown-divider" />}
-                <div className="dropdown-section-title">{group.title}</div>
-                {group.options.length === 0 ? (
-                  <div className="dropdown-item muted">—</div>
-                ) : (
-                  group.options.map(renderOption)
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      )}
+      <div
+        ref={triggerRef}
+        onClick={(e) => {
+          e.stopPropagation();
+          toggle();
+        }}
+      >
+        {trigger}
+      </div>
+      {menu && createPortal(menu, document.body)}
     </div>
   );
 }
