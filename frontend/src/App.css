@@ -1274,3 +1274,34 @@ button:disabled {
   color: var(--text-muted);
   margin-top: 12px;
 }
+
+.setting-update-result {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.setting-update-new {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary-active);
+}
+.setting-update-ok {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.btn-download {
+  border-color: var(--primary);
+  color: var(--primary-active);
+}
+.btn-download:hover {
+  background: var(--primary-light);
+  border-color: var(--primary);
+}
+.setting-update-error {
+  font-size: 12px;
+  color: var(--accent-red);
+  margin-top: 8px;
+}

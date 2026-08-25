@@ -355,6 +355,12 @@ fn greet(name: &str) -> String {
     format!("Hello, {name}! You've been greeted from Rust!")
 }
 
+/// 返回当前应用版本号（来自 Cargo.toml，与 tauri.conf.json 保持一致）。
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// 枚举设备（后台执行，不阻塞 UI）。
 #[tauri::command]
 fn list_devices() -> Result<Vec<DeviceBrief>, ServiceErrorBrief> {
@@ -1218,6 +1224,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            get_app_version,
             list_devices,
             list_audio_processes,
             get_route_snapshot,
