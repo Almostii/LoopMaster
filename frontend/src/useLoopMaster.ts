@@ -121,25 +121,42 @@ export function useLoopMaster() {
     "remove_send",
   ]);
 
+  // send 级热更新（enabled/muted/gain）：直接下发给运行中的引擎，不需重启，
+  // 彼此独立。因此绕过 busyRef 串行锁，避免并发调用被静默丢弃（一个节点
+  // 可能有多条 send，开关需全部生效）。
+  const SEND_OPS = new Set<string>([
+    "set_send_enabled",
+    "set_send_muted",
+    "set_send_gain",
+  ]);
+
   const runEdit = useCallback(
     async (req: RouteEditRequest, okMessage: string) => {
-      if (busyRef.current) return;
-      busyRef.current = true;
+      const isSend = SEND_OPS.has(req.op);
+      if (!isSend) {
+        if (busyRef.current) return;
+        busyRef.current = true;
+      }
       try {
         await applyRouteEdit(req);
-        const isTopology = TOPOLOGY_OPS.has(req.op);
-        if (isTopology && engineStateRef.current.running) {
-          // 拓扑变更需重启引擎才生效，明确告知并自动重启。
-          showNotice(`${okMessage}；引擎已重启以应用拓扑`);
-          await stopEngine();
-          await startEngine();
-        } else {
+        if (isSend) {
+          // send 级热更新：草稿与运行中引擎已同步，无需重启。
           showNotice(okMessage);
+        } else {
+          const isTopology = TOPOLOGY_OPS.has(req.op);
+          if (isTopology && engineStateRef.current.running) {
+            // 拓扑变更需重启引擎才生效，明确告知并自动重启。
+            showNotice(`${okMessage}；引擎已重启以应用拓扑`);
+            await stopEngine();
+            await startEngine();
+          } else {
+            showNotice(okMessage);
+          }
         }
       } catch (e) {
         showNotice(formatError(e), "error");
       } finally {
-        busyRef.current = false;
+        if (!isSend) busyRef.current = false;
         await refreshRoute();
         await refreshEngineState();
       }
@@ -185,17 +202,20 @@ export function useLoopMaster() {
   // ---------- 拓扑编辑 ----------
 
 
-  const addSource = useCallback(
-    async (process: ProcessBrief) => {
+  /** 新增音源并自动连到第一个输出通道（若该音源尚无连线）。 */
+  const addSourceWithAutoConnect = useCallback(
+    async (
+      req: { kind: "process_loopback" | "device_capture" | "device_loopback"; display_name: string; endpoint_id: string | null; process_id: number | null },
+    ) => {
       const srcId = freshId("src");
       await runEdit(
         {
           op: "add_source",
           id: srcId,
-          kind: "process_loopback",
-          display_name: `${process.name}（PID ${process.pid}）`,
-          endpoint_id: null,
-          process_id: process.pid,
+          kind: req.kind,
+          display_name: req.display_name,
+          endpoint_id: req.endpoint_id,
+          process_id: req.process_id,
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
@@ -215,6 +235,33 @@ export function useLoopMaster() {
       }
     },
     [runEdit],
+  );
+
+  /** 从进程回环添加音源（Process Loopback）。 */
+  const addSourceFromProcess = useCallback(
+    async (process: ProcessBrief) => {
+      await addSourceWithAutoConnect({
+        kind: "process_loopback",
+        display_name: `${process.name}（PID ${process.pid}）`,
+        endpoint_id: null,
+        process_id: process.pid,
+      });
+    },
+    [addSourceWithAutoConnect],
+  );
+
+  /** 从设备添加音源：麦克风（device_capture）或设备回环（device_loopback）。 */
+  const addSourceFromDevice = useCallback(
+    async (device: DeviceBrief, kind: "device_capture" | "device_loopback") => {
+      const label = kind === "device_capture" ? "麦克风" : "设备回环";
+      await addSourceWithAutoConnect({
+        kind,
+        display_name: `${label} · ${device.name}`,
+        endpoint_id: device.id,
+        process_id: null,
+      });
+    },
+    [addSourceWithAutoConnect],
   );
 
   const addOutputChannel = useCallback(async () => {
@@ -320,12 +367,21 @@ export function useLoopMaster() {
    * 当路由完全为空（无任何 source / output_channel / external_output）时，
    * 自动建立默认拓扑：仅默认创建 1 个输出通道，方便用户在此基础上添加音源
    * （自动连线）与手动添加外部输出。外部输出需用户选择真实设备，故不自动创建。
-   * 仅在首启且路由为空时执行一次。
+   * 仅在首启且路由为空时执行一次，避免每次启动重复追加通道。
    */
   const ensureDefaultTopology = useCallback(async () => {
     if (defaultInitRef.current) return;
     defaultInitRef.current = true;
     try {
+      // 以实时快照判断路由是否已非空，防止已有配置下重复创建通道。
+      const snap = await getRouteSnapshot();
+      if (
+        snap.sources.length > 0 ||
+        snap.output_channels.length > 0 ||
+        snap.external_outputs.length > 0
+      ) {
+        return;
+      }
       await addOutputChannel();
     } catch (e) {
       showNotice(formatError(e), "error");
@@ -379,7 +435,9 @@ export function useLoopMaster() {
     })();
 
     const unState = onEngineStateChanged((payload) => {
-      setEngineState((prev) => ({ ...prev, state: payload.state, running: payload.running }));
+      // 状态事件仅携带 state/running；failed/last_error 等完整失败详情
+      // 需重新拉取引擎状态快照，确保失败界面正确刷新。
+      void refreshEngineState();
       setNotice({ text: `引擎状态：${payload.running ? "运行中" : "已停止"}`, kind: "info" });
     });
     const unStats = onEngineStatsChanged((payload) => setStats(payload));
@@ -396,7 +454,7 @@ export function useLoopMaster() {
       void unLost.then((fn) => fn());
       void unRestored.then((fn) => fn());
     };
-  }, [refreshAll]);
+  }, [refreshAll, refreshEngineState]);
 
   const meterLevel = useMemo(() => {
     if (!stats) return 0;
@@ -422,7 +480,8 @@ export function useLoopMaster() {
     doStartEngine,
     doStopEngine,
     doReconnect,
-    addSource,
+    addSourceFromProcess,
+    addSourceFromDevice,
     addOutputChannel,
     addExternalOutput,
     removeSource,

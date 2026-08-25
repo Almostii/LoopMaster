@@ -10,7 +10,9 @@ export default function TitleBar({
   const badgeClass = `engine-status-badge ${
     engineState.running ? "active" : ""
   }`;
-  const dotClass = `status-dot status-${engineState.state}`;
+  // 后端 as_str() 返回首字母大写（"Stopped" 等），前端匹配需大小写不敏感。
+  const stateKey = engineState.state.toLowerCase();
+  const dotClass = `status-dot status-${stateKey}`;
   const stateLabel =
     {
       stopped: "已停止",
@@ -18,7 +20,7 @@ export default function TitleBar({
       degraded: "降级",
       reconnecting: "重连中",
       failed: "失败",
-    }[engineState.state] ?? engineState.state;
+    }[stateKey] ?? engineState.state;
 
   return (
     <header className="titlebar">

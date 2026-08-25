@@ -7,6 +7,7 @@ export default function SourceCard({
   source,
   route,
   meterLevel,
+  meterHint = "全局捕获峰值",
   isOn,
   onToggle,
   onRemove,
@@ -16,6 +17,7 @@ export default function SourceCard({
   source: SourceBrief;
   route: RouteProfileSnapshot;
   meterLevel: number;
+  meterHint?: string;
   isOn: boolean;
   onToggle: (sourceId: string, on: boolean) => void;
   onRemove: (sourceId: string) => void;
@@ -66,9 +68,10 @@ export default function SourceCard({
         </div>
 
         <div className="node-content-padding">
-          <div className="node-channels-wrapper">
-            <div className="node-channels-list">
-              <VuMeter level={meterLevel} label="1 (L)" align="left" />
+        <div className="meter-hint">{meterHint}</div>
+        <div className="node-channels-wrapper">
+          <div className="node-channels-list">
+            <VuMeter level={meterLevel} label="1 (L)" align="left" />
               <VuMeter level={meterLevel} label="2 (R)" align="left" />
             </div>
             <div
