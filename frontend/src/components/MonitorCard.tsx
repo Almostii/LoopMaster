@@ -2,7 +2,7 @@ import { useState } from "react";
 import { formatDb, sendsForExternal } from "../lib";
 import { DEVICE_STATUS_LABEL } from "../types";
 import type { DeviceBrief, ExternalOutputBrief, RouteProfileSnapshot } from "../types";
-import { ChannelMapEditor, LoopToggle, VuMeter } from "./ui";
+import { LoopToggle, VuMeter } from "./ui";
 
 function stopProp(e: React.MouseEvent) {
   e.stopPropagation();
@@ -32,7 +32,6 @@ export default function MonitorCard({
   onToggle: (externalId: string, on: boolean) => void;
   onSetGain: (sendId: string, gainDb: number) => void;
   onRename: (externalId: string, name: string) => void;
-  onSetChannelMap: (sendId: string, channelMap: [number, number][]) => void;
   onSelect: () => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -41,9 +40,6 @@ export default function MonitorCard({
   const statusLabel = device ? DEVICE_STATUS_LABEL[device.status] : "未知";
   const sends = sendsForExternal(route, external.id);
   const primarySend = sends[0];
-  const [cmDraft, setCmDraft] = useState<[number, number][]>(
-    primarySend?.channel_map ?? [],
-  );
 
   function commitName() {
     const next = nameDraft.trim();
@@ -180,20 +176,7 @@ export default function MonitorCard({
                     <span className="option-val">{formatDb(primarySend.gain_db)}</span>
                   </div>
                 </div>
-                <div className="option-row">
-                  <span className="option-label">通道映射</span>
-                  <ChannelMapEditor channelMap={cmDraft} onChange={setCmDraft} />
-                </div>
-                <button
-                  type="button"
-                  className="btn-apply"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSetChannelMap(primarySend.id, cmDraft);
-                  }}
-                >
-                  应用通道映射
-                </button>
+
               </>
             ) : (
               <span className="option-hint">尚未连线，无法设置增益</span>
