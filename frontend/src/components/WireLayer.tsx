@@ -211,6 +211,10 @@ export default function WireLayer({
             className={cls}
             d={d}
             data-wire-id={wire.id}
+            onClick={(e) => {
+              e.stopPropagation();
+              onWireClick(wire.id);
+            }}
             onMouseEnter={() => {
               fromEl.classList.add("connected");
               toEl.classList.add("connected");

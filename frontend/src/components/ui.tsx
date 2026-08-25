@@ -18,8 +18,6 @@ export function LoopToggle({
         onChange={(e) => onChange(e.target.checked)}
       />
       <span className="toggle-pill">
-        <span className="toggle-text toggle-text-on">On</span>
-        <span className="toggle-text toggle-text-off">Off</span>
         <span className="toggle-knob" />
       </span>
     </label>
@@ -64,7 +62,7 @@ export function VuMeter({
   const rightCls = labelClass ?? defaultRight;
 
   return (
-    <div className="channel-row">
+    <div className={`channel-row ${align === "right" ? "channel-row-right" : ""}`}>
       {label && align === "left" && (
         <span className={`channel-label ${leftCls}`}>{label}</span>
       )}

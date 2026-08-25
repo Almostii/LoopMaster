@@ -285,13 +285,13 @@ button:disabled {
   background: #ffffff;
   border: 1px solid var(--border-card);
   color: var(--text-main);
-  display: inline-flex;
+  display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   box-shadow: var(--shadow-sm);
   transition: all 0.15s ease;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 400;
   line-height: 1;
   padding: 0;
@@ -340,14 +340,19 @@ button:disabled {
   box-shadow: var(--shadow-card);
   border: 1px solid var(--border-light);
   position: relative;
-  transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
+  transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s, border-color 0.15s;
   overflow: visible;
+  cursor: pointer;
 }
 .node-card:hover {
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.07), 0 6px 14px rgba(0, 0, 0, 0.04);
 }
 .node-card.is-disabled {
   opacity: 0.82;
+}
+.node-card.is-selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light), 0 4px 14px rgba(41, 182, 162, 0.18);
 }
 
 .node-card-body {
@@ -467,9 +472,14 @@ button:disabled {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.channel-label.label-source { width: 30px; text-align: left; }
-.channel-label.label-channel { width: 68px; text-align: left; }
-.channel-label.label-monitor { width: 72px; text-align: right; margin-right: 2px; }
+.channel-label.label-source { width: 28px; text-align: left; }
+.channel-label.label-channel { width: 76px; text-align: left; padding-left: 10px; }
+.channel-label.label-monitor { width: 72px; text-align: right; padding-right: 10px; }
+
+.channel-row-right {
+  padding-right: 10px;
+  padding-left: 8px;
+}
 
 .vu-meter-wrap {
   flex: 1;
@@ -477,10 +487,10 @@ button:disabled {
   background: var(--bg-meter-track);
   border-radius: 2px;
   overflow: hidden;
-  margin: 0 7px;
+  margin: 0 2px 0 0;
   position: relative;
   border: 1px solid rgba(0, 0, 0, 0.04);
-  min-width: 50px;
+  min-width: 36px;
 }
 
 .vu-meter-bar {
@@ -605,13 +615,13 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
-  width: 38px;
+  width: 36px;
   height: 20px;
   border-radius: 10px;
   background: #e2e8f0;
   position: relative;
   transition: all 0.2s ease;
-  padding: 0 4px;
+  padding: 0;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 .toggle-knob {
@@ -625,22 +635,11 @@ button:disabled {
   transition: transform 0.2s ease;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
-.toggle-text {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: white;
-  z-index: 1;
-}
-.toggle-text-on { display: none; margin-left: 5px; }
-.toggle-text-off { display: block; margin-left: 18px; color: #ffffff; }
 
 .loopback-toggle input:not(:checked) + .toggle-pill { background: #ef4444; }
 .loopback-toggle input:not(:checked) + .toggle-pill .toggle-knob { transform: translateX(0); }
 .loopback-toggle input:checked + .toggle-pill { background: var(--primary); }
-.loopback-toggle input:checked + .toggle-pill .toggle-knob { transform: translateX(18px); }
-.loopback-toggle input:checked + .toggle-pill .toggle-text-on { display: block; }
-.loopback-toggle input:checked + .toggle-pill .toggle-text-off { display: none; }
+.loopback-toggle input:checked + .toggle-pill .toggle-knob { transform: translateX(16px); }
 
 /* ---------------- 高级选项 ---------------- */
 .node-options-toggle {
@@ -727,16 +726,18 @@ button:disabled {
 }
 
 .btn-remove-icon {
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  background: transparent;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border-card);
+  background: #ffffff;
   color: var(--text-muted);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.15s ease;
 }
 .btn-remove-icon:hover {
   background: #fee2e2;

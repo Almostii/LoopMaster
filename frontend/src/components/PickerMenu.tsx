@@ -160,7 +160,13 @@ export default function PickerMenu({
 
   return (
     <div className="picker-root" ref={rootRef}>
-      <div ref={triggerRef} onClick={toggle}>
+      <div
+        ref={triggerRef}
+        onClick={(e) => {
+          e.stopPropagation();
+          toggle();
+        }}
+      >
         {trigger}
       </div>
       {menu && createPortal(menu, document.body)}
