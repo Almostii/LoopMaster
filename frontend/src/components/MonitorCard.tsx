@@ -38,12 +38,12 @@ export default function MonitorCard({
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(external.display_name);
-  const [cmDraft, setCmDraft] = useState<[number, number][]>(
-    primarySend?.channel_map ?? [],
-  );
   const statusLabel = device ? DEVICE_STATUS_LABEL[device.status] : "未知";
   const sends = sendsForExternal(route, external.id);
   const primarySend = sends[0];
+  const [cmDraft, setCmDraft] = useState<[number, number][]>(
+    primarySend?.channel_map ?? [],
+  );
 
   function commitName() {
     const next = nameDraft.trim();

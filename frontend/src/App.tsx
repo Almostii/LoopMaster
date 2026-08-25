@@ -50,7 +50,6 @@ function App() {
     route,
     engineState,
     notice,
-    meterLevel,
     nodeMeter,
     sourceSendIds,
     externalSendIds,
@@ -367,7 +366,7 @@ function App() {
                     onSelect={() => setSelectedCard({ type: "source", id: s.id })}
                   />
                   );
-                })}
+                })
               )}
             </Column>
 
@@ -395,7 +394,7 @@ function App() {
                     onSelect={() => setSelectedCard({ type: "channel", id: ch.id })}
                   />
                   );
-                })}
+                })
               )}
             </Column>
 
@@ -440,7 +439,7 @@ function App() {
                     onSelect={() => setSelectedCard({ type: "external", id: ext.id })}
                   />
                   );
-                })}
+                })
               )}
             </Column>
           </div>
