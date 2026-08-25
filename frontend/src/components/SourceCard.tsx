@@ -8,6 +8,7 @@ export default function SourceCard({
   route,
   meterLevel,
   meterHint = "全局捕获峰值",
+  icon,
   isOn,
   onToggle,
   onRemove,
@@ -18,6 +19,7 @@ export default function SourceCard({
   route: RouteProfileSnapshot;
   meterLevel: number;
   meterHint?: string;
+  icon?: string | null;
   isOn: boolean;
   onToggle: (sourceId: string, on: boolean) => void;
   onRemove: (sourceId: string) => void;
@@ -35,19 +37,23 @@ export default function SourceCard({
         <div className="node-top-row">
           <div className="node-info-left">
             <div className="node-app-icon">
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-              </svg>
+              {icon ? (
+                <img src={icon} alt="" />
+              ) : (
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                </svg>
+              )}
             </div>
             <div className="node-title-group">
               <span className="node-title">{source.display_name}</span>

@@ -16,8 +16,8 @@ use windows::Win32::Graphics::GdiPlus::{
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SHELLICONSIZE,
-    SHGFI_USEFILEATTRIBUTES,
+    ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+    SHGFI_SHELLICONSIZE, SHGFI_USEFILEATTRIBUTES,
 };
 use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
 
@@ -37,27 +37,8 @@ fn extract_icon_base64(_path: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn extract_icon_base64(path: &str) -> Option<String> {
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut info = SHFILEINFOW {
-        hIcon: Default::default(),
-        iIcon: 0,
-        dwAttributes: 0,
-        szDisplayName: [0; MAX_PATH as usize],
-        szTypeName: [0; 80],
-    };
-    let hr = unsafe {
-        SHGetFileInfoW(
-            PCWSTR(wide.as_ptr()),
-            FILE_ATTRIBUTE_NORMAL,
-            Some(&mut info),
-            std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE | SHGFI_USEFILEATTRIBUTES,
-        )
-    };
-    if hr == 0 || info.hIcon.is_invalid() {
-        return None;
-    }
-    let hicon = info.hIcon;
+    // 优先从可执行文件本身取第一个图标，失败再回退到 SHGetFileInfo（按扩展名取文件类型图标）。
+    let hicon = extract_first_icon_from_exe(path).or_else(|| extract_shell_icon(path))?;
 
     let mut gdiplus_token: usize = 0;
     let startup_input = GdiplusStartupInput {
@@ -111,9 +92,71 @@ fn extract_icon_base64(path: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
+fn extract_first_icon_from_exe(path: &str) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use windows::Win32::UI::WindowsAndMessaging::HICON;
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut large: [HICON; 1] = [HICON(ptr::null_mut())];
+    let mut small: [HICON; 1] = [HICON(ptr::null_mut())];
+    let count = unsafe {
+        ExtractIconExW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            Some(large.as_mut_ptr() as *mut HICON),
+            Some(small.as_mut_ptr() as *mut HICON),
+            1,
+        )
+    };
+    // large 优先，否则 small；都取不到时放弃。
+    if count > 0 && !large[0].is_invalid() {
+        let _ = unsafe { DestroyIcon(small[0]) };
+        Some(large[0])
+    } else if count > 0 && !small[0].is_invalid() {
+        Some(small[0])
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn extract_shell_icon(path: &str) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut info = SHFILEINFOW {
+        hIcon: Default::default(),
+        iIcon: 0,
+        dwAttributes: 0,
+        szDisplayName: [0; MAX_PATH as usize],
+        szTypeName: [0; 80],
+    };
+    let hr = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    if hr == 0 || info.hIcon.is_invalid() {
+        None
+    } else {
+        Some(info.hIcon)
+    }
+}
+
+#[cfg(windows)]
 fn read_stream_to_end(
     stream: &windows::Win32::System::Com::IStream,
 ) -> Option<Vec<u8>> {
+    use windows::Win32::System::Com::STREAM_SEEK_SET;
+
+    // GdipSaveImageToStream 写完后流指针在末尾，必须 seek 到开头再读。
+    let mut new_pos: u64 = 0;
+    unsafe {
+        stream
+            .Seek(0, STREAM_SEEK_SET, Some(&mut new_pos as *mut u64))
+            .ok()?;
+    }
+
     let mut out = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
