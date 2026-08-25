@@ -153,32 +153,6 @@ function App() {
     ],
     [],
   );
-  const sidebarBottomItems: SidebarItem[] = useMemo(
-    () => [
-      {
-        key: "report",
-        label: "报错核对",
-        icon: (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="9" />
-            <path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4" />
-            <line x1="12" y1="17" x2="12" y2="17.01" />
-          </svg>
-        ),
-      },
-      {
-        key: "lock",
-        label: "开启应用锁",
-        icon: (
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="5" y="11" width="14" height="10" rx="2" />
-            <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-          </svg>
-        ),
-      },
-    ],
-    [],
-  );
 
   // 所有音频来源按用途分组到同一个 Picker：进程、麦克风、设备回环、虚拟设备。
   // 每个 capture 设备只按其后端分类（category）出现在其中一个组里，避免重复。
@@ -384,7 +358,12 @@ function App() {
 
   return (
     <div className="app-container mode-stereo">
-      <TitleBar engineState={engineState} onToggleEngine={handleToggleEngine} />
+      <TitleBar
+        engineState={engineState}
+        onToggleEngine={handleToggleEngine}
+        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+        sidebarCollapsed={sidebarCollapsed}
+      />
 
       {notice && (
         <div className={`toast-msg show toast-${notice.kind}`} onClick={() => setNotice(null)}>
@@ -395,16 +374,9 @@ function App() {
       <div className="app-main">
         <Sidebar
           collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed((v) => !v)}
           activeKey={activeView}
           onSelect={setActiveView}
           topItems={sidebarTopItems}
-          bottomItems={sidebarBottomItems}
-          brandText="LoopMaster"
-          user={{
-            name: "未登录",
-            sub: "点击登录",
-          }}
         />
 
         {activeView === "router" ? (
@@ -577,7 +549,6 @@ function App() {
             <div className="placeholder-view-inner">
               <div className="placeholder-view-title">
                 {sidebarTopItems.find((i) => i.key === activeView)?.label
-                  ?? sidebarBottomItems.find((i) => i.key === activeView)?.label
                   ?? "未知页面"}
               </div>
               <div className="placeholder-view-hint">

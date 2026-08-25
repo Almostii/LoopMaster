@@ -4,9 +4,13 @@ import type { EngineStateBrief } from "../types";
 export default function TitleBar({
   engineState,
   onToggleEngine,
+  onToggleSidebar,
+  sidebarCollapsed,
 }: {
   engineState: EngineStateBrief;
   onToggleEngine: (running: boolean) => void;
+  onToggleSidebar?: () => void;
+  sidebarCollapsed?: boolean;
 }) {
   // 后端 as_str() 返回首字母大写（"Stopped" 等），前端匹配需大小写不敏感。
   const stateKey = engineState.state.toLowerCase();
@@ -75,6 +79,32 @@ export default function TitleBar({
           <img src="/loopmaster-logo.svg" alt="" />
         </div>
         <span className="titlebar-app-name">LoopMaster</span>
+        {onToggleSidebar && (
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={onToggleSidebar}
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              {sidebarCollapsed ? (
+                <polyline points="9 18 15 12 9 6" />
+              ) : (
+                <polyline points="15 18 9 12 15 6" />
+              )}
+            </svg>
+          </button>
+        )}
       </div>
 
       <div className="titlebar-center">
