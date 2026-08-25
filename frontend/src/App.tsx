@@ -12,6 +12,7 @@ import { useLoopMaster } from "./useLoopMaster";
 
 function App() {
   const {
+    captureDevices,
     renderDevices,
     processes,
     route,
@@ -23,7 +24,8 @@ function App() {
     refreshDevices,
     doStartEngine,
     doStopEngine,
-    addSource,
+    addSourceFromProcess,
+    addSourceFromDevice,
     addOutputChannel,
     addExternalOutput,
     removeSource,
@@ -46,6 +48,13 @@ function App() {
     value: String(p.pid),
     label: p.name,
     hint: `PID ${p.pid}`,
+  }));
+
+  // 麦克风与设备回环共用 capture 设备列表，按入口区分来源类型。
+  const captureOptions: PickerOption[] = captureDevices.map((d) => ({
+    value: d.id,
+    label: d.name,
+    hint: d.status,
   }));
 
   const externalOptions: PickerOption[] = renderDevices.map((d) => ({
@@ -114,29 +123,39 @@ function App() {
   }
 
   /** 切换音源开关：对该音源所有 send 统一 enabled */
-  function handleToggleSource(sourceId: string, on: boolean) {
+  async function handleToggleSource(sourceId: string, on: boolean) {
     const sends = route.sends.filter((s) => s.source === sourceId);
     if (sends.length === 0) {
       setNotice({ text: "请先拖动连线到输出通道，再开启音源", kind: "info" });
       return;
     }
-    for (const s of sends) void setSendEnabled(s.id, on);
+    await Promise.all(sends.map((s) => setSendEnabled(s.id, on)));
   }
 
   /** 切换外部输出开关 */
-  function handleToggleExternal(externalId: string, on: boolean) {
+  async function handleToggleExternal(externalId: string, on: boolean) {
     const sends = route.sends.filter((s) => s.external_output === externalId);
     if (sends.length === 0) {
-      setNotice({ text: "请先拖动连线到该外部输出，再开启监听", kind: "info" });
+      setNotice({ text: "请先拖动连线到该外部输出，再开启", kind: "info" });
       return;
     }
-    for (const s of sends) void setSendEnabled(s.id, on);
+    await Promise.all(sends.map((s) => setSendEnabled(s.id, on)));
   }
 
   function handleSelectSource(value: string) {
     const pid = Number(value);
     const process = processes.find((p) => p.pid === pid);
-    if (process) void addSource(process);
+    if (process) void addSourceFromProcess(process);
+  }
+
+  function handleSelectMicDevice(value: string) {
+    const device = captureDevices.find((d) => d.id === value);
+    if (device) void addSourceFromDevice(device, "device_capture");
+  }
+
+  function handleSelectLoopbackDevice(value: string) {
+    const device = captureDevices.find((d) => d.id === value);
+    if (device) void addSourceFromDevice(device, "device_loopback");
   }
 
   function handleSelectExternal(value: string) {
@@ -177,16 +196,38 @@ function App() {
                   title="应用程序进程 (Running Apps)"
                   trigger={
                     <button className="btn-add-node-wide">
-                      <span>＋ 添加音频来源</span>
+                      <span>＋ 添加进程音源</span>
                     </button>
                   }
                   options={sourceOptions}
                   onSelect={handleSelectSource}
                   onOpen={() => void refreshProcesses()}
                 />
+                <PickerMenu
+                  title="麦克风 (Microphone)"
+                  trigger={
+                    <button className="btn-add-node-wide">
+                      <span>＋ 添加麦克风</span>
+                    </button>
+                  }
+                  options={captureOptions}
+                  onSelect={handleSelectMicDevice}
+                  onOpen={() => void refreshDevices()}
+                />
+                <PickerMenu
+                  title="设备回环 (Device Loopback)"
+                  trigger={
+                    <button className="btn-add-node-wide">
+                      <span>＋ 添加设备回环</span>
+                    </button>
+                  }
+                  options={captureOptions}
+                  onSelect={handleSelectLoopbackDevice}
+                  onOpen={() => void refreshDevices()}
+                />
               </div>
               {route.sources.length === 0 ? (
-                <div className="empty-card">尚未添加音源。点击上方按钮选择进程。</div>
+                <div className="empty-card">尚未添加音源。选择进程、麦克风或设备回环来源。</div>
               ) : (
                 route.sources.map((s) => (
                   <SourceCard
@@ -194,6 +235,7 @@ function App() {
                     source={s}
                     route={route}
                     meterLevel={meterLevel}
+                    meterHint="全局捕获峰值"
                     isOn={isSourceEnabled(route, s.id)}
                     onToggle={handleToggleSource}
                     onRemove={(id) => void removeSource(id)}
@@ -219,6 +261,7 @@ function App() {
                     key={ch.id}
                     channel={ch}
                     meterLevel={meterLevel}
+                    meterHint="全局捕获峰值"
                     onRemove={(id) => void removeOutputChannel(id)}
                   />
                 ))
@@ -228,13 +271,13 @@ function App() {
             {/* 外部输出列 */}
             <Column
               title="External Outputs 外部输出"
-              subtitle={`${route.external_outputs.length} 个监听`}
+              subtitle={`${route.external_outputs.length} 个外部输出`}
               addTitle="添加外部输出"
               onAdd={undefined}
             >
               <div className="col-add-picker">
                 <PickerMenu
-                  title="物理监听设备 (Monitors)"
+                  title="物理输出设备 (External Outputs)"
                   trigger={
                     <button className="btn-add-node-wide">
                       <span>＋ 添加外部输出</span>
@@ -254,6 +297,7 @@ function App() {
                     external={ext}
                     device={deviceById.get(ext.endpoint_id)}
                     meterLevel={meterLevel}
+                    meterHint="全局捕获峰值"
                     isOn={isExternalEnabled(route, ext.id)}
                     onToggle={handleToggleExternal}
                     onRemove={(id) => void removeExternalOutput(id)}

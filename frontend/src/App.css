@@ -423,6 +423,14 @@ button:disabled {
   margin: 4px 0 2px 0;
 }
 
+.meter-hint {
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  margin: 2px 0 4px 0;
+  letter-spacing: 0.02em;
+}
+
 .node-channels-list {
   flex: 1;
   display: flex;
