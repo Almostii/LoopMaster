@@ -8,11 +8,12 @@
 
 当前工作分支：`codex/migrate-tauri-react-frontend`
 
-本分支基于 `codex/feature-bus-graph` 的提交 `d275910`，不是可直接发布的 `main` 基线。迁移准备完成后，必须先修复基线兼容错误并通过门禁，再由审查者合并到 `main`。
+本分支基于 `codex/feature-bus-graph` 的提交 `d275910`，并包含总线图调用方兼容修复。它仍不是已合并的 `main` 基线；必须完成分支审查后再合并到 `main`。
 
 相关最近提交：
 
-    d275910 实现内部混音总线基础架构（当前基线）
+    ca2837b 适配总线图诊断与运行时测试（当前分支最新）
+    d275910 实现内部混音总线基础架构
     a2cf0ce 修复音频来源列表刷新
     bf00ffa 支持常见设备音频格式转换
     7bd1076 修复音频引擎核心验收与生命周期问题
@@ -48,10 +49,14 @@
 迁移分支当前门禁状态：
 
     cargo metadata --no-deps     通过，workspace 不再包含 app/ Slint crate
-    cargo check --workspace      未通过，diagnostics 仍按旧 SendSpec/RouteGraph 初始化
-    cargo test --workspace       尚未执行通过，必须先修复上述编译错误
+    cargo fmt --all -- --check   通过
+    cargo clippy ... -D warnings 通过
+    cargo check --workspace      通过
+    cargo test --workspace       通过（app-service 9、audio-core 25、audio-windows 43、diagnostics 5）
+    cargo check --workspace --target x86_64-pc-windows-msvc 通过
+    git diff --check             通过
 
-历史真实设备短测已覆盖：44.1 kHz capture 到 48 kHz render、48 kHz capture 到 44.1 kHz render、单声道 capture 到双声道 render；这些结果来自前置分支，不等于当前总线图分支已通过全部门禁。
+历史真实设备短测已覆盖：44.1 kHz capture 到 48 kHz render、48 kHz capture 到 44.1 kHz render、单声道 capture 到双声道 render；这些结果来自前置分支，不替代当前分支尚未完成的真实硬件门禁。
 
 真实 16-bit PCM、真实 5.1/7.1 impulse/channel-id、Device Loopback/Process Loopback 长时间矩阵测试仍未完成，不能宣称已经通过。
 
@@ -68,24 +73,25 @@
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核、设备恢复、路由图、应用服务契约和配置 v1 已有实现；旧 Slint 前端已归档。当前首先要完成总线图分支的兼容修复和合并门禁，再进入 Tauri 2 + React 初始化，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、路由图、应用服务契约和配置 v1 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，当前应先审查并合并本迁移分支到 `main`，再从最新 `main` 创建 Tauri 2 + React 初始化分支，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
-### 第一步：修复总线图基线并完成合并门禁
+### 第一步：审查并合并迁移准备分支
 
-目标文件主要是 `diagnostics/src/main.rs` 及其测试构造，必要时修复与新 `RouteGraph`/`SendSpec` 契约不一致的调用方。
+当前分支：`codex/migrate-tauri-react-frontend`。
 
-任务：
+合并前确认：
 
-- 将所有 `SendSpec { ... }` 旧结构体字面量改为当前枚举变体；
-- 为所有 `RouteGraph` 构造补齐 `buses`，并核对总线图测试的拓扑语义；
-- 运行 `cargo fmt`、`cargo clippy`、`cargo test`、Windows target check 和 `git diff --check`；
-- 记录修复原因，不回退总线图模型来迁就旧调用方。
+- 工作树只有允许的 `.workbuddy/` 未跟踪目录；
+- 审查 `ca2837b`、`729e16b` 和文档变更；
+- 复跑本节列出的全部自动门禁；
+- 通过后将本分支合并到 `main`，不要在 `main` 上直接提交；
+- 合并后确认 `main` 的构建和测试仍然通过，再删除已合并的短期迁移分支（如团队流程允许）。
 
-验收：workspace 编译和自动测试通过，且总线图新增测试仍覆盖多 bus、多 send 和非法拓扑。
+验收：`main` 包含 Slint 归档、Tauri/React 文档和总线图兼容修复，Rust workspace 门禁通过。
 
-### 第二步：初始化 Tauri 2 + React 工程
+### 第二步：从最新 main 初始化 Tauri 2 + React 工程
 
-目标目录：`frontend/`，不得恢复旧 `app/`。
+合并完成后，从最新 `main` 创建 `codex/feature-tauri-init`；目标目录为 `frontend/`，不得恢复旧 `app/`。
 
 任务：
 
@@ -148,9 +154,9 @@
 
 1. 阅读本文、Doc/Main/1-8、最近三份 Doc/Log；
 2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并确认目标基线和未提交修改；
-3. 创建专用分支，例如 codex/feature-app-service-contract；
-4. 先审查 SendSpec、RouteEditor、EngineService、AudioEngine::update_graph 的真实接口与文档差异；
-5. 将第一阶段范围限定为服务契约，不夹带预设、UI 大改或格式引擎重构；
+3. 若当前仍在迁移分支，先完成本分支审查和合并；Tauri 开发必须从合并后的最新 `main` 创建专用分支；
+4. 初始化前先审查 `SendSpec`、`RouteEditor`、`EngineService`、`AudioEngine::update_graph` 的真实接口与文档差异；
+5. 将前端初始化范围限定为 Tauri shell、React/TypeScript 工程和最小启动闭环，不夹带预设、完整 UI 或格式引擎重构；
 6. 让子 agent 分别承担实现、测试/审查、文档记录，主 agent 负责拆分、验收和合并；
 7. 每个逻辑问题使用独立中文提交，完成后先跑自动检查，再合并到 main；
 8. 完成后更新 Doc/Log，说明已完成、未完成、验证结果和下一步。
