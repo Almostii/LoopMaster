@@ -42,6 +42,14 @@ export default function SettingsView({
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+
+  // 进入设置页时读取应用版本（用于关于卡片）
+  useEffect(() => {
+    void getAppVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion(""));
+  }, []);
 
   // 主题应用到根元素 data-theme，供 CSS 变量切换（后续实现深色样式）。
   useEffect(() => {
@@ -79,9 +87,33 @@ export default function SettingsView({
 
   return (
     <div className="settings-view">
-      <div className="settings-head">
-        <h2 className="settings-title">设置</h2>
-        <p className="settings-subtitle">配置 LoopMaster 的基础行为</p>
+      <div className="about-card">
+        <div className="about-logo">
+          <img src="/loopmaster-logo.svg" alt="" />
+        </div>
+        <div className="about-name">LoopMaster</div>
+        <div className="about-version">v{appVersion || "…"}</div>
+        <div className="about-desc">Windows 音频路由工具</div>
+        <div className="about-links">
+          <button
+            type="button"
+            className="about-link"
+            onClick={() => void openUrl("https://github.com/Almostii/LoopMaster")}
+          >
+            GitHub 仓库
+          </button>
+          <span className="about-link-sep">·</span>
+          <button
+            type="button"
+            className="about-link"
+            onClick={() => void openUrl("https://github.com/Almostii/LoopMaster/blob/main/LICENSE")}
+          >
+            用户协议
+          </button>
+        </div>
+        <div className="about-copyright">
+          © {new Date().getFullYear()} LoopMaster. All rights reserved.
+        </div>
       </div>
 
       <div className="settings-section">
