@@ -449,6 +449,7 @@ button:disabled {
   flex-shrink: 0;
 }
 .channel-label.label-source { width: 36px; text-align: left; }
+.channel-label.label-channel { width: 76px; text-align: left; }
 .channel-label.label-monitor { width: 82px; text-align: right; margin-right: 2px; }
 
 .vu-meter-wrap {
