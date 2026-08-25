@@ -62,6 +62,7 @@ export interface RouteEditRequest {
   enabled?: boolean;
   muted?: boolean;
   gain_db?: number;
+  channel_map?: [number, number][];
 }
 
 export function applyRouteEdit(request: RouteEditRequest): Promise<void> {

@@ -1,9 +1,6 @@
+import { useState } from "react";
 import type { ChannelBrief } from "../types";
 import { VuMeter } from "./ui";
-
-function stopProp(e: React.MouseEvent) {
-  e.stopPropagation();
-}
 
 function stopProp(e: React.MouseEvent) {
   e.stopPropagation();

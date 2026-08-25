@@ -39,12 +39,12 @@ export default function SourceCard({
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(source.display_name);
-  const [cmDraft, setCmDraft] = useState<[number, number][]>(
-    primarySend?.channel_map ?? [],
-  );
   const sends = sendsForSource(route, source.id);
   // 增益/静音作用于该音源的首条 send
   const primarySend = sends[0];
+  const [cmDraft, setCmDraft] = useState<[number, number][]>(
+    primarySend?.channel_map ?? [],
+  );
 
   function commitName() {
     const next = nameDraft.trim();
