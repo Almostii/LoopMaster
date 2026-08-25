@@ -41,7 +41,7 @@
 - 来源列表是当前存在 WASAPI 音频会话的进程，不是所有 Windows 进程。
 - 已修复来源列表只在启动时枚举一次的问题：顶部有“刷新音源”按钮，枚举在后台线程执行，UI 定时器只接收结果，不执行 WASAPI 枚举。
 - 刷新按 PID 和 endpoint ID 保留选择；进程退出或设备消失时清除选择；刷新失败保留旧列表。
-- 旧 UI 仍是单 source、单 sink 的 MVP 交互；虽然底层模型支持多路由，当前 React 前端尚未初始化。
+- 旧 UI 曾是单 source、单 sink 的 MVP 交互，现已归档；底层模型支持多路由，当前 React 前端尚未初始化。
 
 ### 已验证结果
 
@@ -59,50 +59,42 @@
 
 1. 进程来源只能是有 WASAPI 音频会话的程序。没有播放音频的程序不会出现在列表，这是设计边界，不要改成枚举全部进程后假装都可捕获。
 2. 当前刷新是手动触发。后续可以接入 WASAPI 音频会话通知或低频自动刷新，但必须保持后台执行，不能在 React/Tauri UI 线程调用设备枚举。
-3. SendSpec 目前还没有独立的 enabled 字段；muted 只能表示静音。Doc/Main/8.应用服务接口设计.md 中关于 enabled、事件订阅、配置 schema 的内容是目标契约，不代表代码已完成。
-4. app-service::EngineService 当前是简单的同步包装，尚未实现完整的 EngineCommand、ServiceEvent、订阅机制和手动重连 API。
-5. 配置/预设保存、加载、schema version、原子写入、缺失设备标记尚未实现。
-6. 旧 Slint UI 已归档；Tauri 2 + React 前端尚未初始化。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
-7. 运行中 source/sink 拓扑变化会返回“需要重启”；UI 当前通过停机并重建服务完成切换。完整服务层应把这个行为做成明确的用户状态和命令。
-8. 多声道转换不是动态多声道路由。若未来要让用户把输入的任意物理声道独立发送到输出的任意物理声道，必须重新设计动态声道数、channel map、FIFO、Mixer 和 UI，不能只放宽兼容判断。
-9. Process Loopback 的显式格式请求依赖 Windows 系统/驱动接受该格式，Initialize 失败必须报告，不得假设所有系统必然支持。
-10. 旧 Slint 组件已归档，不再参与构建；不要为了迁移方便重新把旧组件加入 workspace。新前端的 React/Tauri 警告应单独处理。
+3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；尚未实现的是 Tauri command/event 适配层。
+4. 配置 v1 的 JSON 校验、稳定 endpoint ID、缺失设备标记和原子写入已实现；schema 迁移和完整预设管理 UI 尚未实现。
+5. 运行中 source/sink 拓扑变化会返回“需要重启”；未来 Tauri UI 必须把这个行为做成明确的用户状态和命令，不能悄悄丢弃修改。
+6. 多声道转换不是动态多声道路由。若未来要让用户把输入的任意物理声道独立发送到输出的任意物理声道，必须重新设计动态声道数、channel map、FIFO、Mixer 和 UI，不能只放宽兼容判断。
+7. Process Loopback 的显式格式请求依赖 Windows 系统/驱动接受该格式，Initialize 失败必须报告，不得假设所有系统必然支持。
+8. 旧 Slint UI 已归档；Tauri 2 + React 前端尚未初始化。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核 Phase 2 和设备恢复/路由图的主要骨架已经完成，旧 Slint 前端已归档，当前应进入“前端迁移准备和 Tauri 2 + React MVP”，同时补齐应用服务契约和配置基础设施，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、路由图、应用服务契约和配置 v1 已有实现；旧 Slint 前端已归档。当前首先要完成总线图分支的兼容修复和合并门禁，再进入 Tauri 2 + React 初始化，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
-### 第一步：冻结并实现应用服务契约
+### 第一步：修复总线图基线并完成合并门禁
 
-目标文件主要是 audio-core/src/lib.rs、app-service/src/lib.rs、必要时 audio-windows/src/runtime.rs。
-
-任务：
-
-- 给 SendSpec 增加 enabled: bool，明确 enabled=false 与 muted=true 的不同语义；
-- 扩展 RouteEdit：创建/删除/启用/禁用 send，修改增益、静音、channel map；
-- 实现 EngineCommand，至少覆盖 Start、Stop、ApplyRoute、SetGain、SetMuted、SetSendEnabled；
-- 实现结构化 ServiceEvent：状态变化、统计变化、设备丢失、设备恢复；
-- 实现服务层统一错误分类，保留 HRESULT、endpoint ID 和中文恢复建议；
-- 实现 request_reconnect() 或等价的明确重试命令；
-- 保持 UI 不接触 WASAPI 类型和 AudioEngine worker。
-
-验收：服务层单元测试覆盖非法命令不改变状态、send 启停与 muted 区分、路由快照在 block 边界生效、设备错误字段完整。
-
-### 第二步：实现配置和预设
-
-目标主要是 app-service 新增配置模块和测试。
+目标文件主要是 `diagnostics/src/main.rs` 及其测试构造，必要时修复与新 `RouteGraph`/`SendSpec` 契约不一致的调用方。
 
 任务：
 
-- 定义 AppConfig { schema_version, graph, ui_state }；
-- JSON 序列化/反序列化，显式版本校验和未来迁移入口；
-- 只持久化稳定 endpoint ID，不持久化设备列表索引；
-- 设备缺失时保留路由并标记 unavailable，不按名称自动替换；
-- 使用临时文件写入后原子替换；
-- 对畸形 JSON、未知版本、重复 ID、缺失 endpoint、非法增益编写测试；
-- 设计“加载后待用户确认”策略，禁止配置加载直接悄悄启动音频。
+- 将所有 `SendSpec { ... }` 旧结构体字面量改为当前枚举变体；
+- 为所有 `RouteGraph` 构造补齐 `buses`，并核对总线图测试的拓扑语义；
+- 运行 `cargo fmt`、`cargo clippy`、`cargo test`、Windows target check 和 `git diff --check`；
+- 记录修复原因，不回退总线图模型来迁就旧调用方。
 
-验收：保存/加载 round-trip、旧 schema 拒绝或迁移、设备消失后配置仍可读、写入中断不会破坏旧文件。
+验收：workspace 编译和自动测试通过，且总线图新增测试仍覆盖多 bus、多 send 和非法拓扑。
+
+### 第二步：初始化 Tauri 2 + React 工程
+
+目标目录：`frontend/`，不得恢复旧 `app/`。
+
+任务：
+
+- 使用 Tauri 2 官方 React + TypeScript 模板；
+- 确认 Node.js、Rust、Tauri CLI、Windows WebView2 和构建脚本；
+- 保持 `frontend/` 独立于 Rust workspace，提交锁文件，忽略 `node_modules`、`dist` 和 `.tauri`；
+- 只建立壳层、路由和服务适配目录，不在本步实现完整页面。
+
+验收：最小 Tauri 窗口可启动，React 开发构建可重复执行，Rust workspace 不引入前端依赖。
 
 ### 第三步：实现 Tauri command/event 与服务的命令/事件闭环
 
