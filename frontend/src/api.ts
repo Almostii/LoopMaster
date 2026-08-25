@@ -34,6 +34,11 @@ export function getEngineState(): Promise<EngineStateBrief> {
   return invoke<EngineStateBrief>("get_engine_state");
 }
 
+/** 返回当前应用版本号（如 "0.1.0"）。 */
+export function getAppVersion(): Promise<string> {
+  return invoke<string>("get_app_version");
+}
+
 // ---------- 写命令 ----------
 
 export function startEngine(): Promise<void> {
