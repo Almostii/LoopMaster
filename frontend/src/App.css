@@ -1064,29 +1064,24 @@ button:disabled {
   min-height: 0;
   width: 100%;
   overflow: hidden;
-  position: relative;
 }
 
-/* ---------------- 侧边栏 (悬浮抽屉) ---------------- */
-/* 侧边栏不挤压主内容, 展开时浮在主内容之上; 收起到屏外 */
+/* ---------------- 侧边栏 (窗口向左扩展) ---------------- */
+/* 侧边栏展开时占左侧 220px, 收起时用负 margin 移到屏外;
+   同时由前端把窗口向左扩展 220px, 保证主内容宽度不变 */
 .sidebar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
   width: 220px;
+  flex: 0 0 220px;
   background: #f7f8fa;
   border-right: 1px solid var(--border-light);
   display: flex;
   flex-direction: column;
-  transition: transform 0.22s ease;
-  z-index: 20;
-  box-shadow: 1px 0 4px rgba(0, 0, 0, 0.04);
-  /* absolute 元素不参与 flex 文档流, 不挤压兄弟 */
-  flex: 0 0 auto;
+  transition: margin-left 0.22s ease;
+  overflow: hidden;
+  flex-shrink: 0;
 }
 .sidebar.is-collapsed {
-  transform: translateX(-100%);
+  margin-left: -220px;
 }
 
 .sidebar-nav {
