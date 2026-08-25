@@ -1016,10 +1016,10 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or("未找到默认窗口图标")?;
+    // 使用独立的高分辨率 PNG 作为托盘图标，避免 Windows 选用 ICO 中过小尺寸导致模糊。
+    // dev 模式下工作目录为 src-tauri，故使用相对路径；打包后需确保该文件位于同一目录或 resources。
+    let icon = tauri::image::Image::from_path("icons/tray-icon.png")
+        .map_err(|e| format!("加载托盘图标失败: {e}"))?;
 
     TrayIconBuilder::new()
         .icon(icon)
