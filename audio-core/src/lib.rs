@@ -46,7 +46,17 @@ pub struct EndpointId(pub String);
 pub struct SourceId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BusId(pub String);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SinkId(pub String);
+
+/// 路由连接的稳定标识。
+///
+/// 同一对节点之间允许存在多条连接，因此参数更新与删除必须通过 `SendId` 定位，
+/// 不能只依赖两端节点 ID。
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SendId(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceKind {
@@ -72,23 +82,74 @@ pub struct SinkSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SendSpec {
-    pub source_id: SourceId,
-    pub sink_id: SinkId,
-    pub gain_db: f32,
-    pub muted: bool,
-    /// send 是否参与混音计划。
-    ///
-    /// `enabled=false` 保留增益、静音与通道映射配置，但整条 send 从混音计划
-    /// 中跳过（等价于不存在）；`muted=true` 仍参与混音计划，只是增益被置静音。
-    /// 两者语义不同：关闭 send 后重新启用，其增益/映射配置原样恢复。
-    pub enabled: bool,
-    pub channel_map: Vec<(u16, u16)>,
+pub enum SendSpec {
+    /// 将真实输入源送入软件内部混音节点。
+    SourceToBus {
+        id: SendId,
+        source_id: SourceId,
+        bus_id: BusId,
+        gain_db: f32,
+        muted: bool,
+        enabled: bool,
+        channel_map: Vec<(u16, u16)>,
+    },
+    /// 将软件内部混音节点送往真实 render endpoint。
+    BusToSink {
+        id: SendId,
+        bus_id: BusId,
+        sink_id: SinkId,
+        gain_db: f32,
+        muted: bool,
+        enabled: bool,
+        channel_map: Vec<(u16, u16)>,
+    },
+}
+
+impl SendSpec {
+    pub fn id(&self) -> &SendId {
+        match self {
+            Self::SourceToBus { id, .. } | Self::BusToSink { id, .. } => id,
+        }
+    }
+
+    pub fn gain_db(&self) -> f32 {
+        match self {
+            Self::SourceToBus { gain_db, .. } | Self::BusToSink { gain_db, .. } => *gain_db,
+        }
+    }
+
+    pub fn muted(&self) -> bool {
+        match self {
+            Self::SourceToBus { muted, .. } | Self::BusToSink { muted, .. } => *muted,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::SourceToBus { enabled, .. } | Self::BusToSink { enabled, .. } => *enabled,
+        }
+    }
+
+    pub fn channel_map(&self) -> &[(u16, u16)] {
+        match self {
+            Self::SourceToBus { channel_map, .. } | Self::BusToSink { channel_map, .. } => {
+                channel_map
+            }
+        }
+    }
+}
+
+/// 软件内部混音节点。Bus 永远不是 Windows endpoint，也不包含设备标识。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BusSpec {
+    pub id: BusId,
+    pub display_name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RouteGraph {
     pub sources: Vec<SourceSpec>,
+    pub buses: Vec<BusSpec>,
     pub sinks: Vec<SinkSpec>,
     pub sends: Vec<SendSpec>,
 }
@@ -99,12 +160,18 @@ pub enum RouteGraphError {
     DuplicateSource(String),
     #[error("sink ID 重复: {0}")]
     DuplicateSink(String),
+    #[error("bus ID 重复: {0}")]
+    DuplicateBus(String),
+    #[error("send ID 重复: {0}")]
+    DuplicateSend(String),
     #[error("source endpoint ID 重复: {0}")]
     DuplicateSourceEndpoint(String),
     #[error("sink endpoint ID 重复: {0}")]
     DuplicateSinkEndpoint(String),
     #[error("source 不存在: {0}")]
     MissingSource(String),
+    #[error("bus 不存在: {0}")]
+    MissingBus(String),
     #[error("sink 不存在: {0}")]
     MissingSink(String),
     #[error("send 不存在: {0}")]
@@ -141,15 +208,41 @@ impl RouteGraph {
                 ));
             }
         }
+        let mut bus_ids = std::collections::HashSet::new();
+        for bus in &self.buses {
+            if !bus_ids.insert(bus.id.clone()) {
+                return Err(RouteGraphError::DuplicateBus(bus.id.0.clone()));
+            }
+        }
+        let mut send_ids = std::collections::HashSet::new();
         for send in &self.sends {
-            if !self.sources.iter().any(|s| s.id == send.source_id) {
-                return Err(RouteGraphError::MissingSource(send.source_id.0.clone()));
+            if !send_ids.insert(send.id().clone()) {
+                return Err(RouteGraphError::DuplicateSend(send.id().0.clone()));
             }
-            if !self.sinks.iter().any(|s| s.id == send.sink_id) {
-                return Err(RouteGraphError::MissingSink(send.sink_id.0.clone()));
+            match send {
+                SendSpec::SourceToBus {
+                    source_id, bus_id, ..
+                } => {
+                    if !self.sources.iter().any(|source| source.id == *source_id) {
+                        return Err(RouteGraphError::MissingSource(source_id.0.clone()));
+                    }
+                    if !self.buses.iter().any(|bus| bus.id == *bus_id) {
+                        return Err(RouteGraphError::MissingBus(bus_id.0.clone()));
+                    }
+                }
+                SendSpec::BusToSink {
+                    bus_id, sink_id, ..
+                } => {
+                    if !self.buses.iter().any(|bus| bus.id == *bus_id) {
+                        return Err(RouteGraphError::MissingBus(bus_id.0.clone()));
+                    }
+                    if !self.sinks.iter().any(|sink| sink.id == *sink_id) {
+                        return Err(RouteGraphError::MissingSink(sink_id.0.clone()));
+                    }
+                }
             }
-            if !send.gain_db.is_finite() || !(-60.0..=12.0).contains(&send.gain_db) {
-                return Err(RouteGraphError::InvalidGain(send.gain_db));
+            if !send.gain_db().is_finite() || !(-60.0..=12.0).contains(&send.gain_db()) {
+                return Err(RouteGraphError::InvalidGain(send.gain_db()));
             }
         }
         Ok(())
@@ -178,6 +271,25 @@ mod route_graph_tests {
         }
     }
 
+    fn bus(id: &str) -> BusSpec {
+        BusSpec {
+            id: BusId(id.into()),
+            display_name: id.into(),
+        }
+    }
+
+    fn source_to_bus_send(id: &str, source_id: &str, bus_id: &str) -> SendSpec {
+        SendSpec::SourceToBus {
+            id: SendId(id.into()),
+            source_id: SourceId(source_id.into()),
+            bus_id: BusId(bus_id.into()),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        }
+    }
+
     #[test]
     fn rejects_duplicate_graph_ids_and_endpoints() {
         let duplicate_source = RouteGraph {
@@ -196,6 +308,42 @@ mod route_graph_tests {
         assert_eq!(
             duplicate_sink_endpoint.validate().unwrap_err(),
             RouteGraphError::DuplicateSinkEndpoint("endpoint".into())
+        );
+
+        let duplicate_bus = RouteGraph {
+            buses: vec![bus("mix"), bus("mix")],
+            ..RouteGraph::default()
+        };
+        assert_eq!(
+            duplicate_bus.validate().unwrap_err(),
+            RouteGraphError::DuplicateBus("mix".into())
+        );
+    }
+
+    #[test]
+    fn validates_bus_connections_and_stable_send_ids() {
+        let missing_bus = RouteGraph {
+            sources: vec![source("source", None)],
+            sends: vec![source_to_bus_send("source-mix", "source", "mix")],
+            ..RouteGraph::default()
+        };
+        assert_eq!(
+            missing_bus.validate().unwrap_err(),
+            RouteGraphError::MissingBus("mix".into())
+        );
+
+        let duplicate_send = RouteGraph {
+            sources: vec![source("source", None)],
+            buses: vec![bus("mix")],
+            sends: vec![
+                source_to_bus_send("send", "source", "mix"),
+                source_to_bus_send("send", "source", "mix"),
+            ],
+            ..RouteGraph::default()
+        };
+        assert_eq!(
+            duplicate_send.validate().unwrap_err(),
+            RouteGraphError::DuplicateSend("send".into())
         );
     }
 }
