@@ -4,10 +4,12 @@ import { VuMeter } from "./ui";
 export default function ChannelCard({
   channel,
   meterLevel,
+  meterHint = "全局捕获峰值",
   onRemove,
 }: {
   channel: ChannelBrief;
   meterLevel: number;
+  meterHint?: string;
   onRemove: (channelId: string) => void;
 }) {
   return (
@@ -36,6 +38,7 @@ export default function ChannelCard({
         </div>
 
         <div className="node-content-padding">
+          <div className="meter-hint">{meterHint}</div>
           <div className="node-channels-wrapper">
             <div
               className="socket socket-left"
