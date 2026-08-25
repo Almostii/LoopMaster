@@ -291,6 +291,12 @@ fn list_audio_processes() -> Result<Vec<ProcessBrief>, ServiceErrorBrief> {
     Ok(processes.iter().map(ProcessBrief::from_model).collect())
 }
 
+/// 返回进程可执行文件图标的 PNG data URI；无图标或平台不支持时返回 `None`。
+#[tauri::command]
+fn process_icon_data_uri(executable_path: String) -> Option<String> {
+    loopmaster_audio_windows::process_icon_data_uri(&executable_path)
+}
+
 /// 当前 Route Profile 视图模型（只读快照）。
 #[tauri::command]
 fn get_route_snapshot(
@@ -911,6 +917,7 @@ pub fn run() {
             stop_engine,
             request_reconnect,
             apply_route_edit,
+            process_icon_data_uri,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
