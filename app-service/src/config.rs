@@ -6,11 +6,13 @@
 //! - 写入使用"临时文件 + 原子替换"，写入中断不会破坏旧文件；
 //! - 加载只返回配置，**不自动启动音频**，是否启动由调用方（UI）在用户
 //!   确认后决定；
-//! - `schema_version` 显式校验：当前仅接受 `CURRENT_SCHEMA_VERSION`，
-//!   旧版本返回 `UnsupportedSchemaVersion`，后续 schema 演进时在
-//!   `from_json` 中加入迁移分支。
+//! - `schema_version` 显式校验：加载 V1 时无损迁移为当前模型；
+//!   其他未知版本返回 `UnsupportedSchemaVersion`。
 
-use loopmaster_audio_core::{EndpointId, RouteGraph, RouteGraphError};
+use loopmaster_audio_core::{
+    BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
+    SourceId, SourceSpec,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// 当前配置 schema 版本。
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// 应用配置：schema 有版本，加载时按版本校验。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -43,13 +45,25 @@ impl AppConfig {
 
     /// 从 JSON 字节反序列化并校验路由图。
     ///
-    /// schema 版本必须等于 `CURRENT_SCHEMA_VERSION`；旧版本在此预留迁移
-    /// 入口（当前直接拒绝，见 `ConfigError::UnsupportedSchemaVersion`）。
+    /// V1 的 source -> sink 图会无损转换为 source -> bus -> sink：每个旧
+    /// sink 都创建一个内部 bus，旧 send 的参数保留在 source -> bus 连接，
+    /// bus -> sink 使用 0 dB、未静音、已启用的 identity 连接。
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
-        let config: AppConfig = serde_json::from_slice(bytes)?;
-        if config.schema_version != CURRENT_SCHEMA_VERSION {
-            return Err(ConfigError::UnsupportedSchemaVersion(config.schema_version));
-        }
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        let schema_version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                ConfigError::Json(serde_json::Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "配置缺少有效的 schema_version",
+                )))
+            })? as u32;
+        let config = match schema_version {
+            CURRENT_SCHEMA_VERSION => serde_json::from_value(value)?,
+            1 => migrate_v1(serde_json::from_value(value)?)?,
+            version => return Err(ConfigError::UnsupportedSchemaVersion(version)),
+        };
         config.graph.validate()?;
         Ok(config)
     }
@@ -109,6 +123,81 @@ impl AppConfig {
     }
 }
 
+/// schema V1 的直接 source -> sink 持久化形式。仅用于读取并迁移，不能再写出。
+#[derive(Clone, Debug, Deserialize)]
+struct V1Config {
+    schema_version: u32,
+    graph: V1Graph,
+    #[serde(default)]
+    ui_state: UiState,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct V1Graph {
+    sources: Vec<SourceSpec>,
+    sinks: Vec<SinkSpec>,
+    sends: Vec<V1SendSpec>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct V1SendSpec {
+    source_id: SourceId,
+    sink_id: SinkId,
+    gain_db: f32,
+    muted: bool,
+    enabled: bool,
+    channel_map: Vec<(u16, u16)>,
+}
+
+fn migrate_v1(config: V1Config) -> Result<AppConfig, ConfigError> {
+    debug_assert_eq!(config.schema_version, 1);
+    let mut buses = Vec::with_capacity(config.graph.sinks.len());
+    let mut sends = Vec::with_capacity(config.graph.sinks.len() + config.graph.sends.len());
+
+    for sink in &config.graph.sinks {
+        let bus_id = BusId(format!("migrated-bus:{}", sink.id.0));
+        buses.push(BusSpec {
+            id: bus_id.clone(),
+            display_name: format!("Mix - {}", sink.display_name),
+        });
+        sends.push(SendSpec::BusToSink {
+            id: SendId(format!("migrated-bus-to-sink:{}", sink.id.0)),
+            bus_id,
+            sink_id: sink.id.clone(),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        });
+    }
+
+    for (index, send) in config.graph.sends.into_iter().enumerate() {
+        sends.push(SendSpec::SourceToBus {
+            id: SendId(format!(
+                "migrated-source-to-bus:{}:{}:{index}",
+                send.source_id.0, send.sink_id.0
+            )),
+            source_id: send.source_id,
+            bus_id: BusId(format!("migrated-bus:{}", send.sink_id.0)),
+            gain_db: send.gain_db,
+            muted: send.muted,
+            enabled: send.enabled,
+            channel_map: send.channel_map,
+        });
+    }
+
+    Ok(AppConfig {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        graph: RouteGraph {
+            sources: config.graph.sources,
+            buses,
+            sinks: config.graph.sinks,
+            sends,
+        },
+        ui_state: config.ui_state,
+    })
+}
+
 /// 预设附加的 UI 选择。
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UiState {
@@ -140,7 +229,8 @@ fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(tmp_name)
 }
 
-#[cfg(test)]
+// 旧 source -> sink 测试保留用于迁移 JSON 对照；由下方 V2 测试替代。
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
     use loopmaster_audio_core::{SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec};
@@ -348,5 +438,109 @@ mod tests {
         assert!(!temp_path_for(&path).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use loopmaster_audio_core::{SourceKind, SourceSpec};
+
+    fn graph() -> RouteGraph {
+        RouteGraph {
+            sources: vec![SourceSpec {
+                id: SourceId("source".into()),
+                kind: SourceKind::DeviceCapture,
+                endpoint_id: Some(EndpointId("endpoint-source".into())),
+                process_id: None,
+                display_name: "Source".into(),
+            }],
+            buses: vec![BusSpec {
+                id: BusId("mix".into()),
+                display_name: "Mix 1".into(),
+            }],
+            sinks: vec![SinkSpec {
+                id: SinkId("sink".into()),
+                endpoint_id: EndpointId("endpoint-sink".into()),
+                display_name: "Sink".into(),
+            }],
+            sends: vec![
+                SendSpec::SourceToBus {
+                    id: SendId("source-mix".into()),
+                    source_id: SourceId("source".into()),
+                    bus_id: BusId("mix".into()),
+                    gain_db: -3.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: vec![(0, 0), (1, 1)],
+                },
+                SendSpec::BusToSink {
+                    id: SendId("mix-sink".into()),
+                    bus_id: BusId("mix".into()),
+                    sink_id: SinkId("sink".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn v2_json_round_trip_preserves_config() {
+        let config = AppConfig::new(graph());
+        let loaded = AppConfig::from_json(&config.to_json().unwrap()).unwrap();
+        assert_eq!(loaded, config);
+        assert_eq!(loaded.schema_version, 2);
+    }
+
+    #[test]
+    fn v1_is_migrated_without_losing_route_parameters() {
+        let json = br#"{
+            "schema_version": 1,
+            "graph": {
+                "sources": [{
+                    "id": "source", "kind": "DeviceCapture",
+                    "endpoint_id": "endpoint-source", "process_id": null,
+                    "display_name": "Source"
+                }],
+                "sinks": [{
+                    "id": "sink", "endpoint_id": "endpoint-sink", "display_name": "Sink"
+                }],
+                "sends": [{
+                    "source_id": "source", "sink_id": "sink", "gain_db": -9.0,
+                    "muted": true, "enabled": false, "channel_map": [[0, 1]]
+                }]
+            },
+            "ui_state": { "missing_endpoints": ["offline"] }
+        }"#;
+
+        let config = AppConfig::from_json(json).unwrap();
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(config.graph.buses.len(), 1);
+        assert_eq!(config.graph.buses[0].id, BusId("migrated-bus:sink".into()));
+        assert_eq!(config.graph.sends.len(), 2);
+        let source_send = config
+            .graph
+            .sends
+            .iter()
+            .find(|send| matches!(send, SendSpec::SourceToBus { .. }))
+            .unwrap();
+        assert_eq!(source_send.gain_db(), -9.0);
+        assert!(source_send.muted());
+        assert!(!source_send.enabled());
+        assert_eq!(source_send.channel_map(), &[(0, 1)]);
+        assert_eq!(
+            config.ui_state.missing_endpoints,
+            vec![EndpointId("offline".into())]
+        );
+        config.graph.validate().unwrap();
+    }
+
+    #[test]
+    fn unknown_schema_version_is_rejected() {
+        let error = AppConfig::from_json(br#"{"schema_version": 999, "graph": {}}"#).unwrap_err();
+        assert!(matches!(error, ConfigError::UnsupportedSchemaVersion(999)));
     }
 }

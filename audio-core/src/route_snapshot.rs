@@ -42,6 +42,7 @@ mod tests {
     fn validates_snapshot_before_sharing() {
         let graph = RouteGraph {
             sources: vec![source("a")],
+            buses: Vec::new(),
             sinks: vec![SinkSpec {
                 id: SinkId("s".into()),
                 endpoint_id: EndpointId("endpoint".into()),
