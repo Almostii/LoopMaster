@@ -95,7 +95,7 @@ function App() {
       title: "进程 (Process Loopback)",
       options: processes.map((p) => ({
         value: `proc:${p.pid}`,
-        label: p.name,
+        label: p.name.replace(/\.exe$/i, ""),
         icon: procIconMap[p.pid] ? (
           <img className="dropdown-item-icon-img" src={procIconMap[p.pid]!} alt="" />
         ) : undefined,
@@ -310,11 +310,9 @@ function App() {
                     source={s}
                     route={route}
                     meterLevel={meterLevel}
-                    meterHint="全局捕获峰值"
                     icon={s.process_id != null ? procIconMap[s.process_id] : undefined}
                     isOn={isSourceEnabled(route, s.id)}
                     onToggle={handleToggleSource}
-                    onRemove={(id) => void removeSource(id)}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
                     onSetMuted={(sendId, m) => void setSendMuted(sendId, m)}
                   />
@@ -337,7 +335,6 @@ function App() {
                     key={ch.id}
                     channel={ch}
                     meterLevel={meterLevel}
-                    meterHint="全局捕获峰值"
                     onRemove={(id) => void removeOutputChannel(id)}
                   />
                 ))
@@ -373,7 +370,6 @@ function App() {
                     external={ext}
                     device={deviceById.get(ext.endpoint_id)}
                     meterLevel={meterLevel}
-                    meterHint="全局捕获峰值"
                     isOn={isExternalEnabled(route, ext.id)}
                     onToggle={handleToggleExternal}
                     onRemove={(id) => void removeExternalOutput(id)}

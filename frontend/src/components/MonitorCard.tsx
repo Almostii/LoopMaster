@@ -6,7 +6,6 @@ export default function MonitorCard({
   external,
   device,
   meterLevel,
-  meterHint = "全局捕获峰值",
   isOn,
   onToggle,
   onRemove,
@@ -14,7 +13,6 @@ export default function MonitorCard({
   external: ExternalOutputBrief;
   device: DeviceBrief | undefined;
   meterLevel: number;
-  meterHint?: string;
   isOn: boolean;
   onToggle: (externalId: string, on: boolean) => void;
   onRemove: (externalId: string) => void;
@@ -56,7 +54,6 @@ export default function MonitorCard({
         </div>
 
         <div className="node-content-padding">
-          <div className="meter-hint">{meterHint}</div>
           <div className="node-channels-wrapper">
             <div
               className="socket socket-left"

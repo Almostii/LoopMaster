@@ -658,7 +658,7 @@ button:disabled {
   display: none;
   flex-direction: column;
   gap: 8px;
-  padding: 8px;
+  padding: 8px 10px;
   background: var(--bg-card-subtle);
   border-radius: var(--radius-sm);
   margin-top: 4px;
@@ -670,9 +670,10 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   font-size: 11px;
 }
-.option-label { color: var(--text-secondary); }
+.option-label { color: var(--text-secondary); flex-shrink: 0; }
 .option-hint { font-size: 11px; color: var(--text-muted); }
 .option-val { font-size: 11px; color: var(--text-secondary); min-width: 44px; text-align: right; }
 .option-control-group {
@@ -681,10 +682,13 @@ button:disabled {
   gap: 6px;
   flex: 1;
   justify-content: flex-end;
+  max-width: 160px;
 }
 
 .device-slider {
   flex: 1;
+  min-width: 60px;
+  max-width: 110px;
   height: 4px;
   -webkit-appearance: none;
   background: var(--bg-meter-track);
