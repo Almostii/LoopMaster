@@ -433,6 +433,62 @@ function cleanProcessName(name: string): string {
     [runEdit],
   );
 
+  // ---------- 节点重命名 ----------
+
+  /** 重命名音源（仅改显示名，不影响拓扑；引擎需重启才反映到运行中图）。 */
+  const renameSource = useCallback(
+    async (id: string, displayName: string) => {
+      await runEdit(
+        { op: "set_source_name", id, display_name: displayName },
+        "已重命名音源",
+      );
+    },
+    [runEdit],
+  );
+
+  /** 重命名输出通道。 */
+  const renameOutputChannel = useCallback(
+    async (id: string, displayName: string) => {
+      await runEdit(
+        { op: "set_output_channel_name", id, display_name: displayName },
+        "已重命名输出通道",
+      );
+    },
+    [runEdit],
+  );
+
+  /** 重命名外部输出（Monitor）。 */
+  const renameExternalOutput = useCallback(
+    async (id: string, displayName: string) => {
+      await runEdit(
+        { op: "set_external_output_name", id, display_name: displayName },
+        "已重命名外部输出",
+      );
+    },
+    [runEdit],
+  );
+
+  // ---------- send 通道映射（channel map）编辑 ----------
+
+  /**
+   * 设置某条 send 的通道映射（input -> output 声道映射）。
+   * 该变更无对应的引擎热更新命令，需重启引擎才能生效；若引擎正在运行会
+   * 在 runEdit 内自动重启以应用（channel map 属拓扑级参数）。
+   */
+  const setSendChannelMap = useCallback(
+    async (sendId: string, channelMap: [number, number][]) => {
+      await runEdit(
+        {
+          op: "set_send_channel_map",
+          id: sendId,
+          channel_map: channelMap,
+        },
+        "已更新通道映射（重启引擎生效）",
+      );
+    },
+    [runEdit],
+  );
+
   // ---------- 事件订阅 ----------
 
   useEffect(() => {
@@ -487,6 +543,56 @@ function cleanProcessName(name: string): string {
     return Math.round(raw * 100);
   }, [stats]);
 
+  // 把幅度（0..1）映射为 0..100 的电平值并夹紧。
+  const ampToLevel = useCallback((amp: number) => {
+    const raw = Math.min(1, Math.max(0, amp));
+    return Math.round(raw * 100);
+  }, []);
+
+  // 每条 send 的逐通道（L/R）峰值，键为 send id，值为 [L(0..100), R(0..100)]。
+  const sendMeter = useMemo(() => {
+    const map: Record<string, [number, number]> = {};
+    if (stats?.send_peaks) {
+      for (const [id, [l, r]] of Object.entries(stats.send_peaks)) {
+        map[id] = [ampToLevel(l), ampToLevel(r)];
+      }
+    }
+    return map;
+  }, [stats, ampToLevel]);
+
+  // 聚合某节点所有相关 send 的逐通道峰值（取 max），得到该节点的 L/R 电平。
+  // source / external 的 send 由 route 关联；channel 作为 send 的任一端参与。
+  const nodeMeter = useCallback(
+    (sendIds: string[]): [number, number] => {
+      let l = 0;
+      let r = 0;
+      for (const id of sendIds) {
+        const m = sendMeter[id];
+        if (m) {
+          if (m[0] > l) l = m[0];
+          if (m[1] > r) r = m[1];
+        }
+      }
+      return [l, r];
+    },
+    [sendMeter],
+  );
+
+  const sourceSendIds = useCallback(
+    (sourceId: string) => route.sends.filter((s) => s.source === sourceId).map((s) => s.id),
+    [route.sends],
+  );
+  const externalSendIds = useCallback(
+    (externalId: string) =>
+      route.sends.filter((s) => s.external_output === externalId).map((s) => s.id),
+    [route.sends],
+  );
+  const channelSendIds = useCallback(
+    (channelId: string) =>
+      route.sends.filter((s) => s.output_channel === channelId).map((s) => s.id),
+    [route.sends],
+  );
+
   return {
     captureDevices,
     renderDevices,
@@ -497,6 +603,11 @@ function cleanProcessName(name: string): string {
     notice,
     loading,
     meterLevel,
+    sendMeter,
+    nodeMeter,
+    sourceSendIds,
+    externalSendIds,
+    channelSendIds,
     setNotice,
     refreshAll,
     refreshDevices,
@@ -518,6 +629,10 @@ function cleanProcessName(name: string): string {
     setSendEnabled,
     setSendMuted,
     setSendGain,
+    renameSource,
+    renameOutputChannel,
+    renameExternalOutput,
+    setSendChannelMap,
   };
 }
 

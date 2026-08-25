@@ -147,7 +147,7 @@ pub enum AudioEngineError {
     Fifo(#[from] loopmaster_audio_core::FifoConfigError),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioEngineStats {
     pub capture_packets: u64,
     pub captured_frames: u64,
@@ -175,6 +175,9 @@ pub struct AudioEngineStats {
     /// 混音后写入 render 且超过静音阈值的 block 数。运行中静音切换后
     /// 该计数停止增长，用于验证 send 级路由变更是否在块边界生效。
     pub rendered_non_silent_blocks: u64,
+    /// 每条 send 的逐通道（L/R）输出峰值幅度（0.0~1.0，静音为 0.0）。
+    /// 键为 send id；值 `[left_peak, right_peak]`。用于逐通道电平表。
+    pub send_peaks: std::collections::HashMap<String, [f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,6 +208,9 @@ struct Counters {
     non_silent_packets: AtomicU64,
     rendered_peak: AtomicU32,
     rendered_non_silent_blocks: AtomicU64,
+    /// 每条 send 的逐通道（L/R）输出峰值，随时间取最大值并衰减。
+    /// 用 Mutex<HashMap> 承载，因为需要按 send id 动态读写并整体快照。
+    send_peaks: Mutex<std::collections::HashMap<loopmaster_audio_core::SendId, [f32; 2]>>,
 }
 
 impl Counters {
@@ -228,6 +234,13 @@ impl Counters {
             non_silent_packets: self.non_silent_packets.load(Ordering::Relaxed),
             rendered_peak: f32::from_bits(self.rendered_peak.load(Ordering::Relaxed)),
             rendered_non_silent_blocks: self.rendered_non_silent_blocks.load(Ordering::Relaxed),
+            send_peaks: self
+                .send_peaks
+                .lock()
+                .expect("峰值锁未中毒")
+                .iter()
+                .map(|(id, peaks)| (id.0.clone(), *peaks))
+                .collect(),
         }
     }
 }
@@ -270,6 +283,7 @@ impl AudioEngine {
                 non_silent_packets: AtomicU64::new(0),
                 rendered_peak: AtomicU32::new(0),
                 rendered_non_silent_blocks: AtomicU64::new(0),
+                send_peaks: Mutex::new(std::collections::HashMap::new()),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
@@ -1181,6 +1195,18 @@ fn mixer_worker(
         if let Err(e) = plan.process(&source_refs, &mut sink_refs) {
             fail(&state, &stop, &error, e.to_string());
             return Err(());
+        }
+        // 收集每条 send 的逐通道（L/R）峰值，与历史值取 max 以平滑偶发归零抖动。
+        {
+            let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
+            for (id, block_peaks) in plan.send_peaks() {
+                let entry = peaks.entry(id.clone()).or_insert([0.0f32; 2]);
+                for ch in 0..2 {
+                    if block_peaks[ch] > entry[ch] {
+                        entry[ch] = block_peaks[ch];
+                    }
+                }
+            }
         }
         for (index, producer) in producers.iter_mut().enumerate() {
             let written = producer

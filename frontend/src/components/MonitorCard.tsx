@@ -2,7 +2,7 @@ import { useState } from "react";
 import { formatDb, sendsForExternal } from "../lib";
 import { DEVICE_STATUS_LABEL } from "../types";
 import type { DeviceBrief, ExternalOutputBrief, RouteProfileSnapshot } from "../types";
-import { LoopToggle, VuMeter } from "./ui";
+import { ChannelMapEditor, LoopToggle, VuMeter } from "./ui";
 
 function stopProp(e: React.MouseEvent) {
   e.stopPropagation();
@@ -12,27 +12,48 @@ export default function MonitorCard({
   external,
   device,
   route,
-  meterLevel,
+  meterL,
+  meterR,
   isOn,
   isSelected,
   onToggle,
   onSetGain,
+  onRename,
+  onSetChannelMap,
   onSelect,
 }: {
   external: ExternalOutputBrief;
   device: DeviceBrief | undefined;
   route: RouteProfileSnapshot;
-  meterLevel: number;
+  meterL: number;
+  meterR: number;
   isOn: boolean;
   isSelected: boolean;
   onToggle: (externalId: string, on: boolean) => void;
   onSetGain: (sendId: string, gainDb: number) => void;
+  onRename: (externalId: string, name: string) => void;
+  onSetChannelMap: (sendId: string, channelMap: [number, number][]) => void;
   onSelect: () => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(external.display_name);
+  const [cmDraft, setCmDraft] = useState<[number, number][]>(
+    primarySend?.channel_map ?? [],
+  );
   const statusLabel = device ? DEVICE_STATUS_LABEL[device.status] : "未知";
   const sends = sendsForExternal(route, external.id);
   const primarySend = sends[0];
+
+  function commitName() {
+    const next = nameDraft.trim();
+    setEditingName(false);
+    if (next && next !== external.display_name) {
+      onRename(external.id, next);
+    } else {
+      setNameDraft(external.display_name);
+    }
+  }
 
   return (
     <div
@@ -63,7 +84,35 @@ export default function MonitorCard({
               </svg>
             </div>
             <div className="node-title-group">
-              <span className="node-title">{external.display_name}</span>
+              {editingName ? (
+                <input
+                  className="node-title-input"
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={commitName}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitName();
+                    if (e.key === "Escape") {
+                      setNameDraft(external.display_name);
+                      setEditingName(false);
+                    }
+                  }}
+                  onClick={stopProp}
+                />
+              ) : (
+                <span
+                  className="node-title"
+                  title="双击重命名"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setNameDraft(external.display_name);
+                    setEditingName(true);
+                  }}
+                >
+                  {external.display_name}
+                </span>
+              )}
               <span className="node-subtext">状态：{statusLabel}</span>
             </div>
           </div>
@@ -87,8 +136,8 @@ export default function MonitorCard({
               onClick={stopProp}
             />
             <div className="node-channels-list">
-              <VuMeter level={meterLevel} label="Channel 1 (L)" align="right" />
-              <VuMeter level={meterLevel} label="Channel 2 (R)" align="right" />
+              <VuMeter level={meterL} label="Channel 1 (L)" align="right" />
+              <VuMeter level={meterR} label="Channel 2 (R)" align="right" />
             </div>
           </div>
 
@@ -113,23 +162,39 @@ export default function MonitorCard({
           </div>
           <div className={`node-options-content ${optionsOpen ? "show" : ""}`} onClick={stopProp}>
             {primarySend ? (
-              <div className="option-row">
-                <span className="option-label">增益 (Gain)</span>
-                <div className="option-control-group">
-                  <input
-                    type="range"
-                    className="device-slider"
-                    min={-24}
-                    max={12}
-                    step={0.5}
-                    value={primarySend.gain_db}
-                    onChange={(e) =>
-                      onSetGain(primarySend.id, Number(e.target.value))
-                    }
-                  />
-                  <span className="option-val">{formatDb(primarySend.gain_db)}</span>
+              <>
+                <div className="option-row">
+                  <span className="option-label">增益 (Gain)</span>
+                  <div className="option-control-group">
+                    <input
+                      type="range"
+                      className="device-slider"
+                      min={-24}
+                      max={12}
+                      step={0.5}
+                      value={primarySend.gain_db}
+                      onChange={(e) =>
+                        onSetGain(primarySend.id, Number(e.target.value))
+                      }
+                    />
+                    <span className="option-val">{formatDb(primarySend.gain_db)}</span>
+                  </div>
                 </div>
-              </div>
+                <div className="option-row">
+                  <span className="option-label">通道映射</span>
+                  <ChannelMapEditor channelMap={cmDraft} onChange={setCmDraft} />
+                </div>
+                <button
+                  type="button"
+                  className="btn-apply"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSetChannelMap(primarySend.id, cmDraft);
+                  }}
+                >
+                  应用通道映射
+                </button>
+              </>
             ) : (
               <span className="option-hint">尚未连线，无法设置增益</span>
             )}

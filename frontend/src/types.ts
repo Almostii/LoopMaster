@@ -74,6 +74,8 @@ export interface EngineStatsEvent {
   discontinuities: number;
   reconnect_attempts: number;
   captured_peak: number;
+  /** 每条 send 的逐通道（L/R）峰值，键为 send id，值为 [left, right]（0.0~1.0）。 */
+  send_peaks: Record<string, [number, number]>;
 }
 
 export interface DeviceLostEvent {

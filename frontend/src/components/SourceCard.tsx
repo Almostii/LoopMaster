@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { formatDb, sendsForSource } from "../lib";
 import type { RouteProfileSnapshot, SourceBrief } from "../types";
-import { LoopToggle, VuMeter } from "./ui";
+import { ChannelMapEditor, LoopToggle, VuMeter } from "./ui";
 
 function stopProp(e: React.MouseEvent) {
   e.stopPropagation();
@@ -10,30 +10,51 @@ function stopProp(e: React.MouseEvent) {
 export default function SourceCard({
   source,
   route,
-  meterLevel,
+  meterL,
+  meterR,
   icon,
   isOn,
   isSelected,
   onToggle,
   onSetGain,
   onSetMuted,
+  onRename,
+  onSetChannelMap,
   onSelect,
 }: {
   source: SourceBrief;
   route: RouteProfileSnapshot;
-  meterLevel: number;
+  meterL: number;
+  meterR: number;
   icon?: string | null;
   isOn: boolean;
   isSelected: boolean;
   onToggle: (sourceId: string, on: boolean) => void;
   onSetGain: (sendId: string, gainDb: number) => void;
   onSetMuted: (sendId: string, muted: boolean) => void;
+  onRename: (sourceId: string, name: string) => void;
+  onSetChannelMap: (sendId: string, channelMap: [number, number][]) => void;
   onSelect: () => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(source.display_name);
+  const [cmDraft, setCmDraft] = useState<[number, number][]>(
+    primarySend?.channel_map ?? [],
+  );
   const sends = sendsForSource(route, source.id);
   // 增益/静音作用于该音源的首条 send
   const primarySend = sends[0];
+
+  function commitName() {
+    const next = nameDraft.trim();
+    setEditingName(false);
+    if (next && next !== source.display_name) {
+      onRename(source.id, next);
+    } else {
+      setNameDraft(source.display_name);
+    }
+  }
 
   return (
     <div
@@ -66,7 +87,35 @@ export default function SourceCard({
               )}
             </div>
             <div className="node-title-group">
-              <span className="node-title">{source.display_name}</span>
+              {editingName ? (
+                <input
+                  className="node-title-input"
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={commitName}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitName();
+                    if (e.key === "Escape") {
+                      setNameDraft(source.display_name);
+                      setEditingName(false);
+                    }
+                  }}
+                  onClick={stopProp}
+                />
+              ) : (
+                <span
+                  className="node-title"
+                  title="双击重命名"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setNameDraft(source.display_name);
+                    setEditingName(true);
+                  }}
+                >
+                  {source.display_name}
+                </span>
+              )}
             </div>
           </div>
           <div onClick={stopProp}>
@@ -81,8 +130,8 @@ export default function SourceCard({
         <div className="node-content-padding">
         <div className="node-channels-wrapper">
           <div className="node-channels-list">
-            <VuMeter level={meterLevel} label="1 (L)" align="left" />
-              <VuMeter level={meterLevel} label="2 (R)" align="left" />
+            <VuMeter level={meterL} label="1 (L)" align="left" />
+              <VuMeter level={meterR} label="2 (R)" align="left" />
             </div>
             <div
               className="socket socket-right"
@@ -141,6 +190,23 @@ export default function SourceCard({
                     onChange={(e) => onSetMuted(primarySend.id, e.target.checked)}
                   />
                 </div>
+                <div className="option-row">
+                  <span className="option-label">通道映射</span>
+                  <ChannelMapEditor
+                    channelMap={cmDraft}
+                    onChange={setCmDraft}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="btn-apply"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSetChannelMap(primarySend.id, cmDraft);
+                  }}
+                >
+                  应用通道映射
+                </button>
               </>
             ) : (
               <span className="option-hint">尚未连线，无法设置增益/静音</span>
