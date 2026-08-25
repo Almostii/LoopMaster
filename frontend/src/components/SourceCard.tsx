@@ -7,22 +7,18 @@ export default function SourceCard({
   source,
   route,
   meterLevel,
-  meterHint = "全局捕获峰值",
   icon,
   isOn,
   onToggle,
-  onRemove,
   onSetGain,
   onSetMuted,
 }: {
   source: SourceBrief;
   route: RouteProfileSnapshot;
   meterLevel: number;
-  meterHint?: string;
   icon?: string | null;
   isOn: boolean;
   onToggle: (sourceId: string, on: boolean) => void;
-  onRemove: (sourceId: string) => void;
   onSetGain: (sendId: string, gainDb: number) => void;
   onSetMuted: (sendId: string, muted: boolean) => void;
 }) {
@@ -57,13 +53,6 @@ export default function SourceCard({
             </div>
             <div className="node-title-group">
               <span className="node-title">{source.display_name}</span>
-              <span className="node-subtext">
-                {source.process_id != null
-                  ? `进程 PID ${source.process_id}`
-                  : source.kind === "device_loopback"
-                    ? "设备回环"
-                    : "音频来源"}
-              </span>
             </div>
           </div>
           <LoopToggle
@@ -74,7 +63,6 @@ export default function SourceCard({
         </div>
 
         <div className="node-content-padding">
-        <div className="meter-hint">{meterHint}</div>
         <div className="node-channels-wrapper">
           <div className="node-channels-list">
             <VuMeter level={meterLevel} label="1 (L)" align="left" />
@@ -103,7 +91,7 @@ export default function SourceCard({
             >
               <polyline points="9 18 15 12 9 6" />
             </svg>
-            <span>高级选项 (Options)</span>
+            <span>Options</span>
           </div>
           <div className={`node-options-content ${optionsOpen ? "show" : ""}`}>
             {primarySend ? (
@@ -137,9 +125,6 @@ export default function SourceCard({
             ) : (
               <span className="option-hint">尚未连线，无法设置增益/静音</span>
             )}
-            <button className="btn-remove-card" onClick={() => onRemove(source.id)}>
-              移除音源
-            </button>
           </div>
         </div>
       </div>

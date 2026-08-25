@@ -52,6 +52,45 @@ export default function WireLayer({
     forceRender((v) => v + 1);
   }, [wires]);
 
+  // 监听拓扑容器尺寸/子元素变化（如卡片展开/收起），自动重绘连线。
+  useEffect(() => {
+    const container = svgRef.current?.parentElement;
+    if (!container) return;
+
+    let raf: number | null = null;
+    const schedule = () => {
+      if (raf != null) return;
+      raf = requestAnimationFrame(() => {
+        raf = null;
+        forceRender((v) => v + 1);
+      });
+    };
+
+    const ro = new ResizeObserver(schedule);
+    ro.observe(container);
+    for (const child of container.querySelectorAll(".node-card")) {
+      ro.observe(child);
+    }
+
+    const mo = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node instanceof Element && node.classList.contains("node-card")) {
+            ro.observe(node);
+          }
+        }
+      }
+      schedule();
+    });
+    mo.observe(container, { childList: true, subtree: true });
+
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      if (raf != null) cancelAnimationFrame(raf);
+    };
+  }, [svgRef]);
+
   function socketCenter(el: Element, svgRect: DOMRect): Point {
     const rect = el.getBoundingClientRect();
     return {
