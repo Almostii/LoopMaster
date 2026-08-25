@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "app",
     "app-service",
     "audio-core",
     "audio-windows",
@@ -17,4 +16,3 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-

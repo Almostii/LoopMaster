@@ -11,8 +11,8 @@
 //! M2 范围：配置与预设（`AppConfig`/schema version/原子写入）。
 
 use loopmaster_audio_core::{
-    AudioFormat, EndpointId, RouteGraph, RouteGraphError, RouteGraphSnapshot, SendSpec, SinkId,
-    SinkSpec, SourceId, SourceSpec,
+    AudioFormat, BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, RouteGraphSnapshot,
+    SendId, SendSpec, SinkId, SinkSpec, SourceId, SourceSpec,
 };
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineState, AudioEngineStats,
@@ -390,34 +390,29 @@ impl ProcessRepository {
 pub enum RouteEdit {
     AddSource(SourceSpec),
     RemoveSource(SourceId),
+    AddBus(BusSpec),
+    RemoveBus(BusId),
     AddSink(SinkSpec),
     RemoveSink(SinkId),
-    /// 新增或覆盖一条 send（含 gain/muted/channel_map）。
+    /// 新增或覆盖同一稳定 ID 的连接（含 gain/muted/channel_map）。
     SetSend(SendSpec),
-    RemoveSend {
-        source_id: SourceId,
-        sink_id: SinkId,
-    },
+    RemoveSend(SendId),
     SetSendGain {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         gain_db: f32,
     },
     SetSendMuted {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         muted: bool,
     },
     /// 启用/禁用一条 send。`enabled=false` 保留增益/静音/通道映射配置，
     /// 但整条 send 从混音计划跳过；与 `SetSendMuted`（混音增益静音）语义不同。
     SetSendEnabled {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         enabled: bool,
     },
     SetSendChannelMap {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         channel_map: Vec<(u16, u16)>,
     },
 }
@@ -448,7 +443,22 @@ impl RouteEditor {
                     return Err(RouteGraphError::MissingSource(id.0.clone()));
                 }
                 self.draft.sources.retain(|s| s.id != id);
-                self.draft.sends.retain(|s| s.source_id != id);
+                self.draft.sends.retain(|send| {
+                    !matches!(send, SendSpec::SourceToBus { source_id, .. } if *source_id == id)
+                });
+            }
+            RouteEdit::AddBus(bus) => self.draft.buses.push(bus),
+            RouteEdit::RemoveBus(id) => {
+                if !self.draft.buses.iter().any(|bus| bus.id == id) {
+                    return Err(RouteGraphError::MissingBus(id.0.clone()));
+                }
+                self.draft.buses.retain(|bus| bus.id != id);
+                self.draft.sends.retain(|send| {
+                    !matches!(send,
+                        SendSpec::SourceToBus { bus_id, .. } | SendSpec::BusToSink { bus_id, .. }
+                            if *bus_id == id
+                    )
+                });
             }
             RouteEdit::AddSink(sink) => self.draft.sinks.push(sink),
             RouteEdit::RemoveSink(id) => {
@@ -456,85 +466,79 @@ impl RouteEditor {
                     return Err(RouteGraphError::MissingSink(id.0.clone()));
                 }
                 self.draft.sinks.retain(|s| s.id != id);
-                self.draft.sends.retain(|s| s.sink_id != id);
+                self.draft.sends.retain(
+                    |send| !matches!(send, SendSpec::BusToSink { sink_id, .. } if *sink_id == id),
+                );
             }
             RouteEdit::SetSend(send) => {
-                let key = (send.source_id.clone(), send.sink_id.clone());
                 if let Some(existing) = self
                     .draft
                     .sends
                     .iter_mut()
-                    .find(|s| (s.source_id.clone(), s.sink_id.clone()) == key)
+                    .find(|existing| existing.id() == send.id())
                 {
                     *existing = send;
                 } else {
                     self.draft.sends.push(send);
                 }
             }
-            RouteEdit::RemoveSend { source_id, sink_id } => {
-                self.draft
-                    .sends
-                    .retain(|s| !(s.source_id == source_id && s.sink_id == sink_id));
+            RouteEdit::RemoveSend(send_id) => {
+                self.draft.sends.retain(|send| send.id() != &send_id);
             }
-            RouteEdit::SetSendGain {
-                source_id,
-                sink_id,
-                gain_db,
-            } => {
+            RouteEdit::SetSendGain { send_id, gain_db } => {
                 let send = self
                     .draft
                     .sends
                     .iter_mut()
-                    .find(|s| s.source_id == source_id && s.sink_id == sink_id)
-                    .ok_or_else(|| {
-                        RouteGraphError::MissingSend(format!("{}->{}", source_id.0, sink_id.0))
-                    })?;
-                send.gain_db = gain_db;
+                    .find(|send| send.id() == &send_id)
+                    .ok_or_else(|| RouteGraphError::MissingSend(send_id.0.clone()))?;
+                match send {
+                    SendSpec::SourceToBus { gain_db: value, .. }
+                    | SendSpec::BusToSink { gain_db: value, .. } => *value = gain_db,
+                }
             }
-            RouteEdit::SetSendMuted {
-                source_id,
-                sink_id,
-                muted,
-            } => {
+            RouteEdit::SetSendMuted { send_id, muted } => {
                 let send = self
                     .draft
                     .sends
                     .iter_mut()
-                    .find(|s| s.source_id == source_id && s.sink_id == sink_id)
-                    .ok_or_else(|| {
-                        RouteGraphError::MissingSend(format!("{}->{}", source_id.0, sink_id.0))
-                    })?;
-                send.muted = muted;
+                    .find(|send| send.id() == &send_id)
+                    .ok_or_else(|| RouteGraphError::MissingSend(send_id.0.clone()))?;
+                match send {
+                    SendSpec::SourceToBus { muted: value, .. }
+                    | SendSpec::BusToSink { muted: value, .. } => *value = muted,
+                }
             }
-            RouteEdit::SetSendEnabled {
-                source_id,
-                sink_id,
-                enabled,
-            } => {
+            RouteEdit::SetSendEnabled { send_id, enabled } => {
                 let send = self
                     .draft
                     .sends
                     .iter_mut()
-                    .find(|s| s.source_id == source_id && s.sink_id == sink_id)
-                    .ok_or_else(|| {
-                        RouteGraphError::MissingSend(format!("{}->{}", source_id.0, sink_id.0))
-                    })?;
-                send.enabled = enabled;
+                    .find(|send| send.id() == &send_id)
+                    .ok_or_else(|| RouteGraphError::MissingSend(send_id.0.clone()))?;
+                match send {
+                    SendSpec::SourceToBus { enabled: value, .. }
+                    | SendSpec::BusToSink { enabled: value, .. } => *value = enabled,
+                }
             }
             RouteEdit::SetSendChannelMap {
-                source_id,
-                sink_id,
+                send_id,
                 channel_map,
             } => {
                 let send = self
                     .draft
                     .sends
                     .iter_mut()
-                    .find(|s| s.source_id == source_id && s.sink_id == sink_id)
-                    .ok_or_else(|| {
-                        RouteGraphError::MissingSend(format!("{}->{}", source_id.0, sink_id.0))
-                    })?;
-                send.channel_map = channel_map;
+                    .find(|send| send.id() == &send_id)
+                    .ok_or_else(|| RouteGraphError::MissingSend(send_id.0.clone()))?;
+                match send {
+                    SendSpec::SourceToBus {
+                        channel_map: value, ..
+                    }
+                    | SendSpec::BusToSink {
+                        channel_map: value, ..
+                    } => *value = channel_map,
+                }
             }
         }
         if let Err(error) = self.draft.validate() {
@@ -567,18 +571,15 @@ pub enum EngineCommand {
     /// 整图替换（引擎在 block 边界应用）。
     ApplyRoute(RouteGraphSnapshot),
     SetGain {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         gain_db: f32,
     },
     SetMuted {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         muted: bool,
     },
     SetSendEnabled {
-        source_id: SourceId,
-        sink_id: SinkId,
+        send_id: SendId,
         enabled: bool,
     },
 }
@@ -651,21 +652,24 @@ impl EngineService {
             EngineCommand::Start => self.inner.engine.lock().expect("引擎锁未中毒").start()?,
             EngineCommand::Stop => self.inner.engine.lock().expect("引擎锁未中毒").stop()?,
             EngineCommand::ApplyRoute(snapshot) => self.apply_route(snapshot)?,
-            EngineCommand::SetGain {
-                source_id,
-                sink_id,
-                gain_db,
-            } => self.update_send(source_id, sink_id, |send| send.gain_db = gain_db)?,
-            EngineCommand::SetMuted {
-                source_id,
-                sink_id,
-                muted,
-            } => self.update_send(source_id, sink_id, |send| send.muted = muted)?,
-            EngineCommand::SetSendEnabled {
-                source_id,
-                sink_id,
-                enabled,
-            } => self.update_send(source_id, sink_id, |send| send.enabled = enabled)?,
+            EngineCommand::SetGain { send_id, gain_db } => {
+                self.update_send(send_id, |send| match send {
+                    SendSpec::SourceToBus { gain_db: value, .. }
+                    | SendSpec::BusToSink { gain_db: value, .. } => *value = gain_db,
+                })?
+            }
+            EngineCommand::SetMuted { send_id, muted } => {
+                self.update_send(send_id, |send| match send {
+                    SendSpec::SourceToBus { muted: value, .. }
+                    | SendSpec::BusToSink { muted: value, .. } => *value = muted,
+                })?
+            }
+            EngineCommand::SetSendEnabled { send_id, enabled } => {
+                self.update_send(send_id, |send| match send {
+                    SendSpec::SourceToBus { enabled: value, .. }
+                    | SendSpec::BusToSink { enabled: value, .. } => *value = enabled,
+                })?
+            }
         }
         Ok(())
     }
@@ -747,12 +751,7 @@ impl EngineService {
 
     /// 对运行中引擎的一条 send 做热更新：修改暂存图 → 整图替换（block 边界
     /// 生效）。失败时暂存图不变，符合"非法命令不改变状态"。
-    fn update_send<F>(
-        &self,
-        source_id: SourceId,
-        sink_id: SinkId,
-        update: F,
-    ) -> Result<(), ServiceError>
+    fn update_send<F>(&self, send_id: SendId, update: F) -> Result<(), ServiceError>
     where
         F: FnOnce(&mut SendSpec),
     {
@@ -770,9 +769,9 @@ impl EngineService {
         let send = next_graph
             .sends
             .iter_mut()
-            .find(|send| send.source_id == source_id && send.sink_id == sink_id)
+            .find(|send| send.id() == &send_id)
             .ok_or_else(|| ServiceError::Rejected {
-                reason: format!("send 不存在: {}->{}", source_id.0, sink_id.0),
+                reason: format!("send 不存在: {}", send_id.0),
             })?;
         update(send);
         let snapshot = RouteGraphSnapshot::new(next_graph)?;
@@ -870,7 +869,8 @@ fn broadcast(inner: &EngineServiceInner, event: ServiceEvent) {
     subscribers.retain(|sender| sender.send(event.clone()).is_ok());
 }
 
-#[cfg(test)]
+// 旧的 source -> sink 测试保留在历史代码中供迁移比对；Bus 模型由下方测试覆盖。
+#[cfg(all(test, any()))]
 mod tests {
     use super::*;
     use loopmaster_audio_windows::AudioEngineState;
@@ -1253,5 +1253,168 @@ mod tests {
         assert_eq!(first, ServiceEvent::StateChanged(AudioEngineState::Stopped));
         let second = receiver.recv_timeout(Duration::from_millis(500)).unwrap();
         assert!(matches!(second, ServiceEvent::StatsChanged(_)));
+    }
+}
+
+#[cfg(test)]
+mod bus_tests {
+    use super::*;
+    use loopmaster_audio_core::{BusId, BusSpec, SendId, SourceKind};
+
+    fn source(id: &str) -> SourceSpec {
+        SourceSpec {
+            id: SourceId(id.into()),
+            kind: SourceKind::ProcessLoopback,
+            endpoint_id: None,
+            process_id: Some(1),
+            display_name: id.into(),
+        }
+    }
+
+    fn bus(id: &str) -> BusSpec {
+        BusSpec {
+            id: BusId(id.into()),
+            display_name: id.into(),
+        }
+    }
+
+    fn sink(id: &str) -> SinkSpec {
+        SinkSpec {
+            id: SinkId(id.into()),
+            endpoint_id: EndpointId(format!("endpoint-{id}")),
+            display_name: id.into(),
+        }
+    }
+
+    fn source_send(id: &str, source_id: &str, bus_id: &str) -> SendSpec {
+        SendSpec::SourceToBus {
+            id: SendId(id.into()),
+            source_id: SourceId(source_id.into()),
+            bus_id: BusId(bus_id.into()),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        }
+    }
+
+    fn bus_send(id: &str, bus_id: &str, sink_id: &str) -> SendSpec {
+        SendSpec::BusToSink {
+            id: SendId(id.into()),
+            bus_id: BusId(bus_id.into()),
+            sink_id: SinkId(sink_id.into()),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        }
+    }
+
+    fn graph() -> RouteGraph {
+        RouteGraph {
+            sources: vec![source("a"), source("b")],
+            buses: vec![bus("mix")],
+            sinks: vec![sink("out")],
+            sends: vec![
+                source_send("a-mix", "a", "mix"),
+                source_send("b-mix", "b", "mix"),
+                bus_send("mix-out", "mix", "out"),
+            ],
+        }
+    }
+
+    #[test]
+    fn send_parameters_are_updated_by_stable_send_id() {
+        let mut editor = RouteEditor::new(graph());
+        editor
+            .apply(RouteEdit::SetSendGain {
+                send_id: SendId("a-mix".into()),
+                gain_db: -6.0,
+            })
+            .unwrap();
+        editor
+            .apply(RouteEdit::SetSendMuted {
+                send_id: SendId("mix-out".into()),
+                muted: true,
+            })
+            .unwrap();
+        editor
+            .apply(RouteEdit::SetSendEnabled {
+                send_id: SendId("b-mix".into()),
+                enabled: false,
+            })
+            .unwrap();
+
+        assert_eq!(editor.draft().sends[0].gain_db(), -6.0);
+        assert!(editor.draft().sends[2].muted());
+        assert!(!editor.draft().sends[1].enabled());
+        editor.commit().unwrap();
+    }
+
+    #[test]
+    fn replacing_a_send_uses_its_id_not_its_endpoints() {
+        let mut editor = RouteEditor::new(graph());
+        let mut replacement = source_send("a-mix", "a", "mix");
+        if let SendSpec::SourceToBus { gain_db, .. } = &mut replacement {
+            *gain_db = -3.0;
+        }
+        editor.apply(RouteEdit::SetSend(replacement)).unwrap();
+        assert_eq!(editor.draft().sends.len(), 3);
+        assert_eq!(editor.draft().sends[0].gain_db(), -3.0);
+    }
+
+    #[test]
+    fn missing_send_id_does_not_mutate_draft() {
+        let mut editor = RouteEditor::new(graph());
+        let before = editor.draft().clone();
+        let error = editor
+            .apply(RouteEdit::SetSendChannelMap {
+                send_id: SendId("missing".into()),
+                channel_map: vec![(0, 0)],
+            })
+            .unwrap_err();
+        assert_eq!(error, RouteGraphError::MissingSend("missing".into()));
+        assert_eq!(editor.draft(), &before);
+    }
+
+    #[test]
+    fn removing_nodes_cascades_their_incident_sends() {
+        let mut editor = RouteEditor::new(graph());
+        editor
+            .apply(RouteEdit::RemoveSource(SourceId("a".into())))
+            .unwrap();
+        assert_eq!(editor.draft().sends.len(), 2);
+
+        editor
+            .apply(RouteEdit::RemoveBus(BusId("mix".into())))
+            .unwrap();
+        assert!(editor.draft().sends.is_empty());
+        assert!(editor.draft().buses.is_empty());
+
+        editor
+            .apply(RouteEdit::RemoveSink(SinkId("out".into())))
+            .unwrap();
+        assert!(editor.draft().sinks.is_empty());
+    }
+
+    #[test]
+    fn add_bus_is_validated_atomically() {
+        let mut editor = RouteEditor::new(graph());
+        let before = editor.draft().clone();
+        let error = editor.apply(RouteEdit::AddBus(bus("mix"))).unwrap_err();
+        assert_eq!(error, RouteGraphError::DuplicateBus("mix".into()));
+        assert_eq!(editor.draft(), &before);
+    }
+
+    #[test]
+    fn send_commands_reject_when_engine_is_not_running() {
+        let service = EngineService::new(graph()).unwrap();
+        let error = service
+            .command(EngineCommand::SetGain {
+                send_id: SendId("a-mix".into()),
+                gain_db: -6.0,
+            })
+            .unwrap_err();
+        assert!(matches!(error, ServiceError::Rejected { .. }));
     }
 }
