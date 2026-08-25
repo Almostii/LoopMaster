@@ -49,6 +49,8 @@ export function useLoopMaster() {
   const [loading, setLoading] = useState(false);
 
   const busyRef = useRef(false);
+  const engineStateRef = useRef(engineState);
+  engineStateRef.current = engineState;
 
   const showNotice = useCallback((text: string, kind: Notice["kind"] = "ok") => {
     setNotice({ text, kind });
@@ -106,13 +108,34 @@ export function useLoopMaster() {
 
   // ---------- 通用命令包装 ----------
 
+  // 拓扑类操作（增删节点或连线）会改变引擎结构，需重启引擎才能生效。
+  const TOPOLOGY_OPS = new Set<string>([
+    "add_source",
+    "add_output_channel",
+    "add_external_output",
+    "remove_source",
+    "remove_output_channel",
+    "remove_external_output",
+    "add_send",
+    "add_send_to_output",
+    "remove_send",
+  ]);
+
   const runEdit = useCallback(
     async (req: RouteEditRequest, okMessage: string) => {
       if (busyRef.current) return;
       busyRef.current = true;
       try {
         await applyRouteEdit(req);
-        showNotice(okMessage);
+        const isTopology = TOPOLOGY_OPS.has(req.op);
+        if (isTopology && engineStateRef.current.running) {
+          // 拓扑变更需重启引擎才生效，明确告知并自动重启。
+          showNotice(`${okMessage}；引擎已重启以应用拓扑`);
+          await stopEngine();
+          await startEngine();
+        } else {
+          showNotice(okMessage);
+        }
       } catch (e) {
         showNotice(formatError(e), "error");
       } finally {
@@ -121,7 +144,7 @@ export function useLoopMaster() {
         await refreshEngineState();
       }
     },
-    [showNotice, refreshRoute, refreshEngineState],
+    [showNotice, refreshRoute, refreshEngineState, stopEngine, startEngine],
   );
 
   // ---------- 引擎控制 ----------
@@ -161,12 +184,14 @@ export function useLoopMaster() {
 
   // ---------- 拓扑编辑 ----------
 
+
   const addSource = useCallback(
     async (process: ProcessBrief) => {
+      const srcId = freshId("src");
       await runEdit(
         {
           op: "add_source",
-          id: freshId("src"),
+          id: srcId,
           kind: "process_loopback",
           display_name: `${process.name}（PID ${process.pid}）`,
           endpoint_id: null,
@@ -174,6 +199,20 @@ export function useLoopMaster() {
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
+      // 新建音源后，若已存在输出通道且该音源尚无连线，则自动连到第一个输出通道
+      const snap = await getRouteSnapshot();
+      const hasSend = snap.sends.some((s) => s.source === srcId);
+      if (!hasSend && snap.output_channels.length > 0) {
+        await runEdit(
+          {
+            op: "add_send",
+            id: freshId("send"),
+            source_id: srcId,
+            output_channel_id: snap.output_channels[0].id,
+          },
+          "已添加连线（拓扑变更需重启引擎生效）",
+        );
+      }
     },
     [runEdit],
   );
@@ -188,21 +227,6 @@ export function useLoopMaster() {
       "已添加输出通道（拓扑变更需重启引擎生效）",
     );
   }, [runEdit, route.output_channels.length]);
-
-  const addExternalOutput = useCallback(
-    async (device: DeviceBrief) => {
-      await runEdit(
-        {
-          op: "add_external_output",
-          id: freshId("out"),
-          endpoint_id: device.id,
-          display_name: device.name,
-        },
-        "已添加外部输出（拓扑变更需重启引擎生效）",
-      );
-    },
-    [runEdit],
-  );
 
   const removeSource = useCallback(
     async (id: string) => {
@@ -257,6 +281,57 @@ export function useLoopMaster() {
     [runEdit],
   );
 
+  const addExternalOutput = useCallback(
+    async (device: DeviceBrief) => {
+      await runEdit(
+        {
+          op: "add_external_output",
+          id: freshId("out"),
+          endpoint_id: device.id,
+          display_name: device.name,
+        },
+        "已添加外部输出（拓扑变更需重启引擎生效）",
+      );
+
+      // 自动把新外部输出与第一个输出通道连线（若存在且尚未连线）。
+      // 该 send 与 add_external_output 同属一次拓扑变更，start_engine 会重建引擎生效。
+      const latest = await getRouteSnapshot();
+      const channel = latest.output_channels[0];
+      const external = latest.external_outputs[latest.external_outputs.length - 1];
+      if (channel && external) {
+        const existing = latest.sends.find(
+          (s) =>
+            s.output_channel === channel.id && s.external_output === external.id,
+        );
+        if (!existing) {
+          await addSendToOutput(channel.id, external.id);
+        }
+      }
+    },
+    [runEdit, addSendToOutput],
+  );
+
+  // ---------- 默认拓扑初始化 ----------
+
+  // 防止初始化并发/重复执行
+  const defaultInitRef = useRef(false);
+
+  /**
+   * 当路由完全为空（无任何 source / output_channel / external_output）时，
+   * 自动建立默认拓扑：仅默认创建 1 个输出通道，方便用户在此基础上添加音源
+   * （自动连线）与手动添加外部输出。外部输出需用户选择真实设备，故不自动创建。
+   * 仅在首启且路由为空时执行一次。
+   */
+  const ensureDefaultTopology = useCallback(async () => {
+    if (defaultInitRef.current) return;
+    defaultInitRef.current = true;
+    try {
+      await addOutputChannel();
+    } catch (e) {
+      showNotice(formatError(e), "error");
+    }
+  }, [addOutputChannel, showNotice]);
+
   const removeSend = useCallback(
     async (sendId: string) => {
       await runEdit({ op: "remove_send", send_id: sendId }, "已删除连线");
@@ -267,7 +342,7 @@ export function useLoopMaster() {
   const setSendEnabled = useCallback(
     async (sendId: string, enabled: boolean) => {
       await runEdit(
-        { op: "set_send_enabled", send_id: sendId, enabled },
+        { op: "set_send_enabled", id: sendId, enabled },
         enabled ? "连线已开启" : "连线已关闭",
       );
     },
@@ -277,7 +352,7 @@ export function useLoopMaster() {
   const setSendMuted = useCallback(
     async (sendId: string, muted: boolean) => {
       await runEdit(
-        { op: "set_send_muted", send_id: sendId, muted },
+        { op: "set_send_muted", id: sendId, muted },
         muted ? "已静音" : "已取消静音",
       );
     },
@@ -287,7 +362,7 @@ export function useLoopMaster() {
   const setSendGain = useCallback(
     async (sendId: string, gainDb: number) => {
       await runEdit(
-        { op: "set_send_gain", send_id: sendId, gain_db: gainDb },
+        { op: "set_send_gain", id: sendId, gain_db: gainDb },
         "已更新增益",
       );
     },
@@ -297,7 +372,11 @@ export function useLoopMaster() {
   // ---------- 事件订阅 ----------
 
   useEffect(() => {
-    void refreshAll();
+    void (async () => {
+      await refreshAll();
+      // 路由为空时建立默认拓扑（1 输出通道 + 1 外部输出并连线）
+      await ensureDefaultTopology();
+    })();
 
     const unState = onEngineStateChanged((payload) => {
       setEngineState((prev) => ({ ...prev, state: payload.state, running: payload.running }));
@@ -351,6 +430,7 @@ export function useLoopMaster() {
     removeExternalOutput,
     addSend,
     addSendToOutput,
+    ensureDefaultTopology,
     removeSend,
     setSendEnabled,
     setSendMuted,

@@ -116,12 +116,20 @@ function App() {
   /** 切换音源开关：对该音源所有 send 统一 enabled */
   function handleToggleSource(sourceId: string, on: boolean) {
     const sends = route.sends.filter((s) => s.source === sourceId);
+    if (sends.length === 0) {
+      setNotice({ text: "请先拖动连线到输出通道，再开启音源", kind: "info" });
+      return;
+    }
     for (const s of sends) void setSendEnabled(s.id, on);
   }
 
   /** 切换外部输出开关 */
   function handleToggleExternal(externalId: string, on: boolean) {
     const sends = route.sends.filter((s) => s.external_output === externalId);
+    if (sends.length === 0) {
+      setNotice({ text: "请先拖动连线到该外部输出，再开启监听", kind: "info" });
+      return;
+    }
     for (const s of sends) void setSendEnabled(s.id, on);
   }
 
