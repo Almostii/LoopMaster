@@ -22,7 +22,7 @@ Tauri command/event 适配层已建立，React 通过命令访问 app-service、
 
 ### 阶段 C：主路由工作区 MVP（已合并）
 
-Loopback 风格三列拓扑路由画布，UI 严格参考 `Library/UI-Demo-HTML/`：
+Loopback 风格三列拓扑路由画布（UI 视觉参考内部原型 `Library/UI-Demo-HTML/`，该目录为私有本地参考资料，不随公开仓库分发）：
 
 - 三列布局：Sources（音频来源）→ Output Channels（输出通道）→ External Outputs（外部输出/监听）；
 - Loopback 视觉：主色青绿 `#29b6a2`、浅灰背景、白卡片圆角阴影、On/Off 红青胶囊开关、双行电平表、SVG 三次贝塞尔连线（On=青绿、Off=暗黑）；
