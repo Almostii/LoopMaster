@@ -29,7 +29,10 @@ export default function Column({
           <button
             className="btn-add-node"
             title={addTitle ?? "添加"}
-            onClick={onAdd}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAdd();
+            }}
           >
             +
           </button>

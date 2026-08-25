@@ -73,6 +73,9 @@ function App() {
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [selectedWireId, setSelectedWireId] = useState<string | null>(null);
+  const [selectedCard, setSelectedCard] = useState<
+    { type: "source" | "channel" | "external"; id: string } | null
+  >(null);
   // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
   const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
 
@@ -185,9 +188,10 @@ function App() {
     }
   }
 
-  /** 点击连线删除 */
+  /** 点击连线选中 */
   function handleWireClick(wireId: string) {
     setSelectedWireId(wireId);
+    setSelectedCard(null);
   }
 
   function handleDeleteWire() {
@@ -197,6 +201,38 @@ function App() {
     void removeSend(sendId);
     setSelectedWireId(null);
   }
+
+  function handleDeleteSelectedCard() {
+    if (!selectedCard) return;
+    if (selectedCard.type === "source") {
+      void removeSource(selectedCard.id);
+    } else if (selectedCard.type === "channel") {
+      void removeOutputChannel(selectedCard.id);
+    } else {
+      void removeExternalOutput(selectedCard.id);
+    }
+    setSelectedCard(null);
+  }
+
+  function handleCanvasClick() {
+    setSelectedWireId(null);
+    setSelectedCard(null);
+  }
+
+  /** 键盘 Delete 删除当前选中项 */
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedCard) {
+          handleDeleteSelectedCard();
+        } else if (selectedWireId) {
+          handleDeleteWire();
+        }
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedCard, selectedWireId]);
 
   /** 切换音源开关：对该音源所有 send 统一 enabled */
   async function handleToggleSource(sourceId: string, on: boolean) {
@@ -267,7 +303,7 @@ function App() {
       )}
 
       <div className="router-canvas-wrap">
-        <div className="topology-viewport" id="topology-viewport">
+        <div className="topology-viewport" id="topology-viewport" onClick={handleCanvasClick}>
           <WireLayer
             svgRef={svgRef}
             wires={wires}
@@ -279,8 +315,8 @@ function App() {
           <div className="topology-grid">
             {/* 音源列 */}
             <Column
-              title="Sources 音频来源"
-              subtitle={`${route.sources.length} 个音源`}
+              title="Sources"
+              subtitle={`${route.sources.length} ${route.sources.length <= 1 ? "source" : "sources"}`}
               addTitle="添加音频来源"
               addNode={
                 <PickerMenu
@@ -311,9 +347,11 @@ function App() {
                     meterLevel={meterLevel}
                     icon={s.process_id != null ? procIconMap[s.process_id] : undefined}
                     isOn={isSourceEnabled(route, s.id)}
+                    isSelected={selectedCard?.type === "source" && selectedCard.id === s.id}
                     onToggle={handleToggleSource}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
                     onSetMuted={(sendId, m) => void setSendMuted(sendId, m)}
+                    onSelect={() => setSelectedCard({ type: "source", id: s.id })}
                   />
                 ))
               )}
@@ -321,8 +359,8 @@ function App() {
 
             {/* 输出通道列 */}
             <Column
-              title="Output Channels 输出通道"
-              subtitle={`${route.output_channels.length} 个通道`}
+              title="Output Channels"
+              subtitle={`${route.output_channels.length} ${route.output_channels.length <= 1 ? "channel" : "channels"}`}
               addTitle="添加输出通道"
               onAdd={() => void addOutputChannel()}
             >
@@ -334,7 +372,9 @@ function App() {
                     key={ch.id}
                     channel={ch}
                     meterLevel={meterLevel}
+                    isSelected={selectedCard?.type === "channel" && selectedCard.id === ch.id}
                     onRemove={(id) => void removeOutputChannel(id)}
+                    onSelect={() => setSelectedCard({ type: "channel", id: ch.id })}
                   />
                 ))
               )}
@@ -342,8 +382,8 @@ function App() {
 
             {/* 外部输出列 */}
             <Column
-              title="External Outputs 外部输出"
-              subtitle={`${route.external_outputs.length} 个外部输出`}
+              title="Monitors"
+              subtitle={`${route.external_outputs.length} ${route.external_outputs.length <= 1 ? "device" : "devices"}`}
               addTitle="添加外部输出"
               addNode={
                 <PickerMenu
@@ -367,9 +407,13 @@ function App() {
                     key={ext.id}
                     external={ext}
                     device={deviceById.get(ext.endpoint_id)}
+                    route={route}
                     meterLevel={meterLevel}
                     isOn={isExternalEnabled(route, ext.id)}
+                    isSelected={selectedCard?.type === "external" && selectedCard.id === ext.id}
                     onToggle={handleToggleExternal}
+                    onSetGain={(sendId, g) => void setSendGain(sendId, g)}
+                    onSelect={() => setSelectedCard({ type: "external", id: ext.id })}
                   />
                 ))
               )}
@@ -381,9 +425,12 @@ function App() {
           <div className="footer-left">
             <button
               className="btn-secondary"
-              disabled={!selectedWireId}
-              onClick={handleDeleteWire}
-              title="删除选中的连线"
+              disabled={!selectedWireId && !selectedCard}
+              onClick={() => {
+                if (selectedCard) handleDeleteSelectedCard();
+                else if (selectedWireId) handleDeleteWire();
+              }}
+              title="删除选中的项目"
             >
               <svg
                 width="14"
@@ -396,11 +443,11 @@ function App() {
                 <polyline points="3 6 5 6 21 6" />
                 <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
               </svg>
-              <span>删除连线 (Delete)</span>
+              <span>删除 (Delete)</span>
             </button>
           </div>
           <div className="footer-right">
-            <span className="footer-hint">拖动插孔连接，点击连线可选中删除</span>
+            <span className="footer-hint">点击卡片或连线选中，按 Delete 删除</span>
           </div>
         </footer>
       </div>
