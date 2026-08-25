@@ -1059,7 +1059,8 @@ button:disabled {
 /* ---------------- 主体区域 (App Main) ---------------- */
 .app-main {
   flex: 1;
-  display: block;
+  display: flex;
+  flex-direction: row;
   min-height: 0;
   width: 100%;
   overflow: hidden;
@@ -1081,6 +1082,8 @@ button:disabled {
   transition: transform 0.22s ease;
   z-index: 20;
   box-shadow: 1px 0 4px rgba(0, 0, 0, 0.04);
+  /* absolute 元素不参与 flex 文档流, 不挤压兄弟 */
+  flex: 0 0 auto;
 }
 .sidebar.is-collapsed {
   transform: translateX(-100%);
