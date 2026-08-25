@@ -1128,6 +1128,16 @@ fn mixer_worker(
                 INTERNAL_CHANNELS,
             ) {
                 Ok(next_plan) => {
+                    // plan 变更时清理已不存在的 send 峰值，避免旧路由的峰值残留。
+                    {
+                        let valid_ids: std::collections::HashSet<_> = next_plan
+                            .send_peaks()
+                            .iter()
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                        let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
+                        peaks.retain(|id, _| valid_ids.contains(id));
+                    }
                     plan = next_plan;
                     counters.graph_updates.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1196,18 +1206,16 @@ fn mixer_worker(
             fail(&state, &stop, &error, e.to_string());
             return Err(());
         }
-        // 收集每条 send 的逐通道（L/R）峰值，与历史值取 max 以平滑偶发归零抖动。
+        // 收集每条 send 的逐通道（L/R）峰值。
+        // 直接采用当前处理块的峰值，由前端负责 peak-hold / decay 的平滑显示。
         {
             let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
             for (id, block_peaks) in plan.send_peaks() {
                 let entry = peaks.entry(id.clone()).or_insert([0.0f32; 2]);
-                for ch in 0..2 {
-                    if block_peaks[ch] > entry[ch] {
-                        entry[ch] = block_peaks[ch];
-                    }
-                }
+                entry.copy_from_slice(block_peaks);
             }
         }
+
         for (index, producer) in producers.iter_mut().enumerate() {
             let written = producer
                 .push_interleaved(&sink_blocks[index])
