@@ -1,7 +1,7 @@
 use loopmaster_audio_core::{
-    fill_block, AudioFifo, AudioFormat, EndpointId, MixerPlan, RouteGraph, RouteGraphSnapshot,
-    SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec, TestToneConfig, TestToneKind,
-    TonePhase,
+    fill_block, AudioFifo, AudioFormat, BusId, BusSpec, EndpointId, MixerPlan, RouteGraph,
+    RouteGraphSnapshot, SendId, SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec,
+    TestToneConfig, TestToneKind, TonePhase,
 };
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineState, EndpointFlow, EndpointFormat, EndpointInfo,
@@ -177,19 +177,35 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recove
             process_id: None,
             display_name: "capture".to_owned(),
         }],
+        buses: vec![BusSpec {
+            id: BusId("mix".to_owned()),
+            display_name: "mix".to_owned(),
+        }],
         sinks: vec![SinkSpec {
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(render_id.to_owned()),
             display_name: "render".to_owned(),
         }],
-        sends: vec![SendSpec {
-            source_id: SourceId("capture".to_owned()),
-            sink_id: SinkId("render".to_owned()),
-            gain_db: 0.0,
-            muted: false,
-            enabled: true,
-            channel_map: Vec::new(),
-        }],
+        sends: vec![
+            SendSpec::SourceToBus {
+                id: SendId("capture-to-mix".to_owned()),
+                source_id: SourceId("capture".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+            SendSpec::BusToSink {
+                id: SendId("mix-to-render".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                sink_id: SinkId("render".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+        ],
     };
     run_engine_graph_test(graph, seconds, allow_recovery)
 }
@@ -207,19 +223,35 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             process_id: Some(pid),
             display_name: format!("process:{pid}"),
         }],
+        buses: vec![BusSpec {
+            id: BusId("mix".to_owned()),
+            display_name: "mix".to_owned(),
+        }],
         sinks: vec![SinkSpec {
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(render_id.to_owned()),
             display_name: "render".to_owned(),
         }],
-        sends: vec![SendSpec {
-            source_id: SourceId("process".to_owned()),
-            sink_id: SinkId("render".to_owned()),
-            gain_db: 0.0,
-            muted: false,
-            enabled: true,
-            channel_map: Vec::new(),
-        }],
+        sends: vec![
+            SendSpec::SourceToBus {
+                id: SendId("process-to-mix".to_owned()),
+                source_id: SourceId("process".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+            SendSpec::BusToSink {
+                id: SendId("mix-to-render".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                sink_id: SinkId("render".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+        ],
     };
     run_engine_graph_test(graph, seconds, false)
 }
@@ -233,19 +265,35 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             process_id: None,
             display_name: "loopback".to_owned(),
         }],
+        buses: vec![BusSpec {
+            id: BusId("mix".to_owned()),
+            display_name: "mix".to_owned(),
+        }],
         sinks: vec![SinkSpec {
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(sink_render_id.to_owned()),
             display_name: "render".to_owned(),
         }],
-        sends: vec![SendSpec {
-            source_id: SourceId("loopback".to_owned()),
-            sink_id: SinkId("render".to_owned()),
-            gain_db: 0.0,
-            muted: false,
-            enabled: true,
-            channel_map: Vec::new(),
-        }],
+        sends: vec![
+            SendSpec::SourceToBus {
+                id: SendId("loopback-to-mix".to_owned()),
+                source_id: SourceId("loopback".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+            SendSpec::BusToSink {
+                id: SendId("mix-to-render".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                sink_id: SinkId("render".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+        ],
     };
     run_engine_graph_test(graph, seconds, false)
 }
@@ -336,19 +384,35 @@ fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             process_id: Some(pid),
             display_name: format!("process:{pid}"),
         }],
+        buses: vec![BusSpec {
+            id: BusId("mix".to_owned()),
+            display_name: "mix".to_owned(),
+        }],
         sinks: vec![SinkSpec {
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(render_id.to_owned()),
             display_name: "render".to_owned(),
         }],
-        sends: vec![SendSpec {
-            source_id: SourceId("process".to_owned()),
-            sink_id: SinkId("render".to_owned()),
-            gain_db: 0.0,
-            muted,
-            enabled: true,
-            channel_map: Vec::new(),
-        }],
+        sends: vec![
+            SendSpec::SourceToBus {
+                id: SendId("process-to-mix".to_owned()),
+                source_id: SourceId("process".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                gain_db: 0.0,
+                muted,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+            SendSpec::BusToSink {
+                id: SendId("mix-to-render".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                sink_id: SinkId("render".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+        ],
     };
     let mut engine = AudioEngine::new(AudioEngineConfig::new(
         RouteGraphSnapshot::new(make_graph(false)).expect("引擎验收路由图有效"),
@@ -496,6 +560,10 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
             process_id: Some(pid),
             display_name: format!("process:{pid}"),
         }],
+        buses: vec![BusSpec {
+            id: BusId("mix".to_owned()),
+            display_name: "mix".to_owned(),
+        }],
         sinks: vec![
             SinkSpec {
                 id: SinkId("sink-a".to_owned()),
@@ -509,16 +577,27 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
             },
         ],
         sends: vec![
-            SendSpec {
+            SendSpec::SourceToBus {
+                id: SendId("process-to-mix".to_owned()),
                 source_id: SourceId("process".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+            SendSpec::BusToSink {
+                id: SendId("mix-to-sink-a".to_owned()),
+                bus_id: BusId("mix".to_owned()),
                 sink_id: SinkId("sink-a".to_owned()),
                 gain_db: 0.0,
                 muted: false,
                 enabled: true,
                 channel_map: Vec::new(),
             },
-            SendSpec {
-                source_id: SourceId("process".to_owned()),
+            SendSpec::BusToSink {
+                id: SendId("mix-to-sink-b".to_owned()),
+                bus_id: BusId("mix".to_owned()),
                 sink_id: SinkId("sink-b".to_owned()),
                 gain_db: 0.0,
                 muted: false,
@@ -732,21 +811,37 @@ fn run_capture_render_test(
             process_id: None,
             display_name: "capture".to_owned(),
         }],
+        buses: vec![BusSpec {
+            id: BusId("mix".to_owned()),
+            display_name: "mix".to_owned(),
+        }],
         sinks: vec![SinkSpec {
             id: SinkId("render".to_owned()),
             endpoint_id: render_endpoint.clone(),
             display_name: "render".to_owned(),
         }],
-        sends: vec![SendSpec {
-            source_id: SourceId("capture".to_owned()),
-            sink_id: SinkId("render".to_owned()),
-            gain_db: 0.0,
-            muted: false,
-            enabled: true,
-            channel_map: Vec::new(),
-        }],
+        sends: vec![
+            SendSpec::SourceToBus {
+                id: SendId("capture-to-mix".to_owned()),
+                source_id: SourceId("capture".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+            SendSpec::BusToSink {
+                id: SendId("mix-to-render".to_owned()),
+                bus_id: BusId("mix".to_owned()),
+                sink_id: SinkId("render".to_owned()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            },
+        ],
     };
-    let mixer = MixerPlan::new(&graph, 480, 2, 2).expect("空路由图混音计划有效");
+    let mut mixer = MixerPlan::new(&graph, 480, 2, 2).expect("空路由图混音计划有效");
     let mut source_block = vec![0.0f32; 960];
     let mut output_block = vec![0.0f32; 960];
     let silence_block = [0.0f32; 960];

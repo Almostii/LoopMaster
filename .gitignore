@@ -8,6 +8,11 @@
 # Rust 构建产物
 **/target/
 
+# Tauri/React 前端依赖和构建产物
+**/node_modules/
+**/dist/
+**/.tauri/
+
 # Windows/.NET/IDE 生成物
 **/bin/
 **/obj/
@@ -19,3 +24,6 @@
 *.suo
 *.local
 *.log
+
+# WorkBuddy 本地记忆、输出和运行状态，不属于项目 Git
+/.workbuddy/
