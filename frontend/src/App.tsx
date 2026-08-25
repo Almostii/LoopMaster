@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import ChannelCard from "./components/ChannelCard";
 import Column from "./components/Column";
@@ -10,6 +10,37 @@ import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
 import { listAudioProcesses, processIconDataUri } from "./api";
+
+// 设备分组通用图标（进程使用真实应用图标）
+function MicIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="22" />
+      <line x1="8" y1="22" x2="16" y2="22" />
+    </svg>
+  );
+}
+function LoopbackIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M16 21h5v-5" />
+    </svg>
+  );
+}
+function VirtualIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </svg>
+  );
+}
 
 function App() {
   const {
@@ -45,6 +76,15 @@ function App() {
   // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
   const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
 
+  // 应用启动/路由变化时，为已存在的进程来源补齐图标。
+  useEffect(() => {
+    const hasProcessSource = route.sources.some((s) => s.process_id != null);
+    if (hasProcessSource) {
+      void loadProcessIcons();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.sources.map((s) => s.id).join(",")]);
+
   const wires = useMemo(() => computeWires(route), [route]);
 
   // 所有音频来源按用途分组到同一个 Picker：进程、麦克风、设备回环、虚拟设备。
@@ -56,8 +96,9 @@ function App() {
       options: processes.map((p) => ({
         value: `proc:${p.pid}`,
         label: p.name,
-        hint: `PID ${p.pid}`,
-        icon: procIconMap[p.pid] ?? null,
+        icon: procIconMap[p.pid] ? (
+          <img className="dropdown-item-icon-img" src={procIconMap[p.pid]!} alt="" />
+        ) : undefined,
       })),
     },
     {
@@ -67,7 +108,7 @@ function App() {
         .map((d) => ({
           value: `mic:${d.id}`,
           label: d.name,
-          hint: "麦克风",
+          icon: <MicIcon />,
         })),
     },
     {
@@ -77,7 +118,7 @@ function App() {
         .map((d) => ({
           value: `loop:${d.id}`,
           label: d.name,
-          hint: "设备回环",
+          icon: <LoopbackIcon />,
         })),
     },
     {
@@ -87,7 +128,7 @@ function App() {
         .map((d) => ({
           value: `loop:${d.id}`,
           label: d.name,
-          hint: "虚拟设备",
+          icon: <VirtualIcon />,
         })),
     },
   ];
@@ -197,7 +238,7 @@ function App() {
     if (device) void addExternalOutput(device);
   }
 
-  /** 打开来源 Picker 时，为进程并行加载应用图标（data URI）。 */
+  /** 为进程并行加载应用图标（data URI），供 Picker 和 SourceCard 使用。 */
   async function loadProcessIcons() {
     try {
       const procs = await listAudioProcesses();
@@ -211,7 +252,7 @@ function App() {
       );
       setProcIconMap(Object.fromEntries(entries));
     } catch {
-      /* 图标加载失败不影响主流程，列表仍显示无图标项 */
+      /* 图标加载失败不影响主流程 */
     }
   }
 
@@ -270,6 +311,7 @@ function App() {
                     route={route}
                     meterLevel={meterLevel}
                     meterHint="全局捕获峰值"
+                    icon={s.process_id != null ? procIconMap[s.process_id] : undefined}
                     isOn={isSourceEnabled(route, s.id)}
                     onToggle={handleToggleSource}
                     onRemove={(id) => void removeSource(id)}

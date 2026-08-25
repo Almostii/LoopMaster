@@ -381,6 +381,12 @@ button:disabled {
   font-size: 18px;
   flex-shrink: 0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+.node-app-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .node-title-group {
@@ -867,6 +873,14 @@ button:disabled {
   width: 16px;
   height: 16px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.dropdown-item-icon-img {
+  width: 16px;
+  height: 16px;
   object-fit: contain;
   border-radius: 3px;
 }

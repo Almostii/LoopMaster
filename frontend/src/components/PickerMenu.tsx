@@ -4,7 +4,7 @@ export interface PickerOption {
   value: string;
   label: string;
   hint?: string;
-  icon?: string | null;
+  icon?: ReactNode;
 }
 
 export interface PickerGroup {
@@ -66,7 +66,7 @@ export default function PickerMenu({
         }}
       >
         {opt.icon ? (
-          <img className="dropdown-item-icon" src={opt.icon} alt="" />
+          <span className="dropdown-item-icon">{opt.icon}</span>
         ) : (
           <span className="dropdown-item-icon dropdown-item-icon-placeholder" />
         )}
