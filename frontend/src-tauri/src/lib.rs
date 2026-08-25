@@ -32,6 +32,8 @@ use loopmaster_audio_core::{
 };
 use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineStatus};
 use tauri::Emitter;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 
 // ---------------------------------------------------------------------------
 // 前端 DTO（稳定、可审查，不直接暴露 Windows/引擎内部类型）
@@ -1007,6 +1009,46 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
 // 入口
 // ---------------------------------------------------------------------------
 
+/// 创建系统托盘图标和右键菜单，实现应用常驻后台。
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let show_i = MenuItem::with_id(app, "show", "显示 LoopMaster", true, None::<&str>)?;
+    let hide_i = MenuItem::with_id(app, "hide", "隐藏窗口", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+
+    // 使用独立的高分辨率 PNG 作为托盘图标，避免 Windows 选用 ICO 中过小尺寸导致模糊。
+    // dev 模式下工作目录为 src-tauri，故使用相对路径；打包后需确保该文件位于同一目录或 resources。
+    let icon = tauri::image::Image::from_path("icons/tray-icon.png")
+        .map_err(|e| format!("加载托盘图标失败: {e}"))?;
+
+    TrayIconBuilder::new()
+        .icon(icon)
+        .tooltip("LoopMaster")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+            "hide" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            "quit" => {
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1015,6 +1057,25 @@ pub fn run() {
             let handle = app.handle().clone();
             let config_path = resolve_config_path(&handle);
             app.manage(Arc::new(AppState::new(config_path)));
+
+            // 系统托盘常驻：创建托盘图标与菜单（显示/隐藏/退出）
+            if let Err(e) = setup_tray(app) {
+                eprintln!("创建系统托盘失败: {e}");
+            }
+
+            // 关闭主窗口时隐藏而非退出，使音频路由在后台持续运行
+            if let Some(window) = app.get_webview_window("main") {
+                let win = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Err(e) = win.hide() {
+                            eprintln!("隐藏窗口失败: {e}");
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
