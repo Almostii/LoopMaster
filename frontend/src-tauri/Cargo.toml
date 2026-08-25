@@ -4,7 +4,7 @@
 
 [package]
 name = "loopmaster-frontend"
-version = "0.1.0"
+version = "0.1.1"
 description = "LoopMaster 音频路由前端（Tauri 2 + React + TypeScript）"
 authors = ["LoopMaster"]
 edition = "2021"
@@ -24,6 +24,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # LoopMaster 应用服务：前端唯一业务服务边界。独立 Tauri crate 通过路径依赖
