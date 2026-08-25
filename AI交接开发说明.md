@@ -37,11 +37,11 @@
 ### 应用服务和前端
 
 - app-service 已提供设备模型、进程模型、内部 RouteGraph 编辑器、引擎创建/启动/停止/更新图的 M1 API；产品层 Route Profile DTO 尚需由 Tauri 适配层定义。
-- 旧 Slint UI 曾可枚举 Process Loopback 来源和 Render 输出设备，现已归档；当前没有正式可运行的前端。
+- 旧 Slint UI 曾可枚举 Process Loopback 来源和 Render 输出设备，现已归档；正式前端已从 Slint 迁移到 Tauri 2 + React，壳层初始化完成（见 `frontend/README.md`）。
 - 来源列表是当前存在 WASAPI 音频会话的进程，不是所有 Windows 进程。
 - 已修复来源列表只在启动时枚举一次的问题：顶部有“刷新音源”按钮，枚举在后台线程执行，UI 定时器只接收结果，不执行 WASAPI 枚举。
 - 刷新按 PID 和 endpoint ID 保留选择；进程退出或设备消失时清除选择；刷新失败保留旧列表。
-- 旧 UI 曾是单 source、单 sink 的 MVP 交互，现已归档；底层模型支持多路由，当前 React 前端尚未初始化。
+- 旧 UI 曾是单 source、单 sink 的 MVP 交互，现已归档；底层模型支持多路由，Tauri 2 + React 前端已完成壳层初始化，command/event 适配层与主路由工作区尚未实现。
 
 ### 已验证结果
 
@@ -68,24 +68,20 @@
 5. 运行中 source/sink 拓扑变化会返回“需要重启”；未来 Tauri UI 必须把这个行为映射为 Route Profile 的明确状态，不能悄悄丢弃修改。
 6. 多声道转换不是动态多声道路由。若未来要让用户把输入的任意物理声道独立发送到输出的任意物理声道，必须重新设计动态声道数、channel map、FIFO、Mixer 和 UI，不能只放宽兼容判断。
 7. Process Loopback 的显式格式请求依赖 Windows 系统/驱动接受该格式，Initialize 失败必须报告，不得假设所有系统必然支持。
-8. 旧 Slint UI 已归档；Tauri 2 + React 前端尚未初始化。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
+8. 旧 Slint UI 已归档；Tauri 2 + React 前端壳层已初始化（`codex/feature-tauri-init`），但完整 command/event 适配层和产品层 DTO 尚未实现。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；下一步从最新 `main` 创建 Tauri 2 + React 初始化分支，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；Tauri 2 + React 壳层初始化（第一步）已完成。下一步实现 Tauri command/event 适配层，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
-### 第一步：从最新 main 初始化 Tauri 2 + React 工程
+### 第一步：初始化 Tauri 2 + React 工程（已完成）
 
-从最新 `main` 创建 `codex/feature-tauri-init`；目标目录为 `frontend/`，不得恢复旧 `app/`。
+已于 2026-08-25 在 `codex/feature-tauri-init` 完成，见 `Doc/Log/2026-08-25-tauri-react-init.md`：
 
-任务：
-
-- 使用 Tauri 2 官方 React + TypeScript 模板；
-- 确认 Node.js、Rust、Tauri CLI、Windows WebView2 和构建脚本；
-- 保持 `frontend/` 独立于 Rust workspace，提交锁文件，忽略 `node_modules`、`dist` 和 `.tauri`；
-- 只建立壳层、路由和服务适配目录，不在本步实现完整页面。
-
-验收：最小 Tauri 窗口可启动，React 开发构建可重复执行，Rust workspace 不引入前端依赖。
+- 在 `frontend/` 使用 Tauri 2 官方 React + TypeScript 模板；
+- `frontend/src-tauri` 作为独立 Tauri crate（声明独立 `[workspace]`），通过路径依赖使用 `app-service`；
+- 提供 `list_devices` 作为访问 app-service 的最小验证接口；
+- 最小窗口可启动，React 开发构建可重复执行，Rust workspace 不引入前端依赖。
 
 ### 第二步：实现 Tauri command/event 与服务的命令/事件闭环
 
@@ -133,15 +129,15 @@
 
 每次实机测试必须在 Doc/Log/YYYY-MM-DD-主题.md 记录 Windows 版本、设备、驱动、endpoint ID、采样率、声道、block/FIFO 配置、时长、原始输出和结论。
 
-## 5. 下一位 agent 的第一轮执行要求
+## 5. 下一位 agent 的执行要求
 
-不要直接开始写 UI。第一轮应：
+Tauri 壳层初始化（第一步）已完成。下一轮进入阶段 B：实现 Tauri command/event 适配层闭环。执行时应：
 
-1. 阅读本文、Doc/Main/1-8、最近三份 Doc/Log；
-2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并确认目标基线和未提交修改；
-3. 从最新 `main` 创建 `codex/feature-tauri-init`，Tauri 开发不得复用旧迁移分支继续堆叠；
-4. 初始化前先审查 `SendSpec`、`RouteEditor`、`EngineService`、`AudioEngine::update_graph` 的真实接口与文档差异；
-5. 将前端初始化范围限定为 Tauri shell、React/TypeScript 工程和最小启动闭环，不夹带预设、完整 UI 或格式引擎重构；
+1. 阅读本文、Doc/Main/1-8、`Doc/Log/2026-08-25-tauri-react-init.md` 和最近三份 Doc/Log；
+2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并从最新 `main` 创建新的 `codex/` 分支，不在 `codex/feature-tauri-init` 上堆叠；
+3. 实现前先审查 `SendSpec`、`RouteEditor`、`EngineService`、`AudioEngine::update_graph`、`list_devices` 的真实接口与文档差异；
+4. 先实现只读命令与事件闭环（`list_devices`、`list_audio_processes`、`get_route_snapshot`、引擎状态/统计、设备丢失/恢复事件），再实现写操作（引擎启停/重连、路由编辑）；
+5. 定义并冻结产品层 Route Profile DTO（Sources、Output Channels、External Outputs/Monitors），不把内部 Bus/Sink 直接暴露为产品概念，拓扑变化向用户明确显示「需要重启」；
 6. 让子 agent 分别承担实现、测试/审查、文档记录，主 agent 负责拆分、验收和合并；
 7. 每个逻辑问题使用独立中文提交，完成后先跑自动检查，再合并到 main；
 8. 完成后更新 Doc/Log，说明已完成、未完成、验证结果和下一步。
