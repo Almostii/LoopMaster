@@ -13,6 +13,9 @@
 **/dist/
 **/.tauri/
 
+# 安装包输出目录（由 build:installer 脚本生成到仓库根目录）
+/dist-installer/
+
 # Windows/.NET/IDE 生成物
 **/bin/
 **/obj/
