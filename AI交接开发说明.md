@@ -63,16 +63,16 @@
 
 1. 进程来源只能是有 WASAPI 音频会话的程序。没有播放音频的程序不会出现在列表，这是设计边界，不要改成枚举全部进程后假装都可捕获。
 2. 当前刷新是手动触发。后续可以接入 WASAPI 音频会话通知或低频自动刷新，但必须保持后台执行，不能在 React/Tauri UI 线程调用设备枚举。
-3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；Tauri command/event 适配层（阶段 B）已建立，完整的产品层 Route Profile 预设管理 UI 与主路由工作区（阶段 C）尚未实现。
+3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；Tauri command/event 适配层（阶段 B）与主路由工作区 MVP（阶段 C）已建立，完整的产品层 Route Profile 预设管理 UI 尚未实现。
 4. 当前配置 schema v2 的 JSON 校验、稳定 endpoint ID、缺失设备标记、v1 到 v2 迁移和原子保存已实现；完整 Route Profile 预设管理 UI 尚未实现。
 5. 运行中 source/sink 拓扑变化会返回“需要重启”；未来 Tauri UI 必须把这个行为映射为 Route Profile 的明确状态，不能悄悄丢弃修改。
 6. 多声道转换不是动态多声道路由。若未来要让用户把输入的任意物理声道独立发送到输出的任意物理声道，必须重新设计动态声道数、channel map、FIFO、Mixer 和 UI，不能只放宽兼容判断。
 7. Process Loopback 的显式格式请求依赖 Windows 系统/驱动接受该格式，Initialize 失败必须报告，不得假设所有系统必然支持。
-8. 旧 Slint UI 已归档；Tauri 2 + React 前端壳层（阶段 A）与 command/event 适配层（阶段 B）已实现，主路由工作区（阶段 C）和完整产品层 Route Profile DTO 尚未完成。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
+8. 旧 Slint UI 已归档；Tauri 2 + React 前端壳层（阶段 A）、command/event 适配层（阶段 B）与主路由工作区 MVP（阶段 C，Loopback 风格）已实现；完整产品层 Route Profile 预设管理 UI 尚未完成。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；Tauri 2 + React 壳层初始化（第一步）与 command/event 适配层（第二步）已完成。下一步实现主路由工作区 MVP（第三步），而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；Tauri 2 + React 壳层初始化（第一步）、command/event 适配层（第二步）与主路由工作区 MVP（第三步）已完成。下一步执行真实硬件门禁（第四步），而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
 ### 第一步：初始化 Tauri 2 + React 工程（已完成）
 
@@ -95,20 +95,18 @@
 
 验收：UI 操作不阻塞音频线程；设备拔出后 UI 显示 degraded/reconnecting；恢复后显示 restored；错误包含可执行建议；切换列表顺序不会改变已选 endpoint。真实设备（拔出/恢复、VB-CABLE 闭环）需在阶段 D 实机门禁验证。
 
-### 第三步：完成真正的 Tauri 2 + React MVP
+### 第三步：完成真正的 Tauri 2 + React MVP（已完成）
 
-任务：
+已于 2026-08-25 在 `codex/feature-stagec-router-workspace` 完成，见 `Doc/Log/2026-08-25-tauri-stagec-router-workspace.md`。采用主线派发 + 子 agent 实现 + 主线验收合并的协作方式：
 
-- 在一个主路由工作区实现 Route Profile 下多 Source、Output Channel、External Output/Monitor 和 mapping 的可视化路由表；
-- 每条 send 的启用、静音、增益和 channel map；
-- 在主路由工作区展示设备流向、格式、声道、兼容性和缺失状态；
-- 展示实时状态、峰值、packet/frame、FIFO、discontinuity、重连次数；
-- 所有界面文本使用中文；
-- 旧 Slint 组件只保留在 Library，不再作为新前端实现依据。
+- 主路由工作区：Sources → Output Channels → External Outputs/Monitors 三列 Loopback 风格拓扑画布（贝塞尔连线、On/Off 开关、双行电平表、拖拽连线）；
+- 每条 send 的启用/静音/增益；后端适配层新增节点重命名与 send channel_map 命令；
+- 前端模块化：`api.ts`、`types.ts`、`lib.ts`、`useLoopMaster.ts`、`components/`；
+- 所有界面文本使用中文；严格遵守产品边界，未实现虚拟设备/Pass-Thru/固定 Channels 等禁用概念。
 
-预设页、独立诊断页和其他工作区属于 MVP 之后的迭代，不得在前端初始化阶段擅自扩大范围。
+预设页、独立诊断页和其他工作区属于 MVP 之后的迭代。
 
-验收流程必须能在不查看命令行日志的情况下完成“音频应用 → VB-CABLE CABLE Input → 录音/会议应用选择 CABLE Output”的完整流程。
+验收流程必须能在不查看命令行日志的情况下完成“音频应用 → VB-CABLE CABLE Input → 录音/会议应用选择 CABLE Output”的完整流程（需阶段 D 实机验证）。
 
 ### 第四步：真实硬件门禁
 
@@ -127,14 +125,14 @@
 
 ## 5. 下一位 agent 的执行要求
 
-Tauri 壳层初始化（第一步）与 command/event 适配层（第二步）已完成。下一轮进入阶段 C：实现主路由工作区 MVP。执行时应：
+Tauri 壳层初始化（第一步）、command/event 适配层（第二步）与主路由工作区 MVP（第三步）已完成。下一轮进入阶段 D：真实硬件门禁。执行时应：
 
-1. 阅读本文、Doc/Main/1-8、`Doc/Log/2026-08-25-tauri-command-event.md` 和最近三份 Doc/Log；
+1. 阅读本文、Doc/Main/1-8、`Doc/Log/2026-08-25-tauri-stagec-router-workspace.md` 和最近三份 Doc/Log；
 2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并从最新 `main` 创建新的 `codex/` 分支，不在已合并的阶段分支上堆叠；
-3. 实现前先审查 `RouteEditRequest`、`RouteProfileSnapshot`、`EngineService`、`apply_route_edit`、`get_route_snapshot` 的真实接口与文档差异；
-4. 在 `get_route_snapshot` 返回的 Route Profile 视图模型上实现主路由工作区，不把内部 Bus/Sink 直接暴露为产品概念，拓扑变化向用户明确显示「需要重启」；
-5. 冻结产品层 Route Profile DTO（Sources、Output Channels、External Outputs/Monitors），每条 send 的启用/静音/增益/channel map 在 UI 可编辑；
-6. 让子 agent 分别承担实现、测试/审查、文档记录，主 agent 负责拆分、验收和合并；
+3. 执行真实设备门禁矩阵：VB-CABLE 闭环、物理 USB 声卡、44.1/48 kHz、16-bit PCM、单声道/双声道、Device Loopback、Process Loopback、拔插恢复、30 分钟与 2 小时连续运行；
+4. 记录延迟、CPU、FIFO 深度和错误计数；每次实机测试写入 `Doc/Log/YYYY-MM-DD-主题.md`，记录 Windows 版本、设备、驱动、endpoint ID、采样率、声道、block/FIFO 配置、时长、原始输出和结论；
+5. 不要用 UI 开发掩盖未验证的音频问题；未验证能力明确写入剩余风险，不夸大；
+6. 可选用主线派发 + 子 agent 的协作方式，主 agent 负责拆分、验收和合并；
 7. 每个逻辑问题使用独立中文提交，完成后先跑自动检查，再合并到 main；
 8. 完成后更新 Doc/Log，说明已完成、未完成、验证结果和下一步。
 
