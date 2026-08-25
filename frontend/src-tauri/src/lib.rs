@@ -123,6 +123,8 @@ struct EngineStatsBrief {
     discontinuities: u64,
     reconnect_attempts: u64,
     captured_peak: f32,
+    /// 每条 send 的逐通道（L/R）峰值，键为 send id，值为 `[left, right]`（0.0~1.0）。
+    send_peaks: std::collections::HashMap<String, Vec<f32>>,
 }
 
 /// 统一服务错误视图（保留分类、endpoint ID、HRESULT 与中文建议）。
@@ -665,6 +667,11 @@ fn serialize_stats(stats: AudioEngineStats) -> serde_json::Value {
         "discontinuities": stats.discontinuities,
         "reconnect_attempts": stats.reconnect_attempts,
         "captured_peak": stats.captured_peak,
+        "send_peaks": stats
+            .send_peaks
+            .iter()
+            .map(|(id, peaks)| (id.clone(), vec![peaks[0], peaks[1]]))
+            .collect::<std::collections::HashMap<_, _>>(),
     })
 }
 
@@ -737,9 +744,14 @@ impl EngineStatsBrief {
             fifo_overflows: stats.fifo_overflows,
             fifo_underflows: stats.fifo_underflows,
             discontinuities: stats.discontinuities,
-            reconnect_attempts: stats.reconnect_attempts,
-            captured_peak: stats.captured_peak,
-        }
+        reconnect_attempts: stats.reconnect_attempts,
+        captured_peak: stats.captured_peak,
+        send_peaks: stats
+            .send_peaks
+            .iter()
+            .map(|(id, peaks)| (id.clone(), vec![peaks[0], peaks[1]]))
+            .collect(),
+    }
     }
 }
 

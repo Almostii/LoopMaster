@@ -765,7 +765,7 @@ fn engine_run_succeeded(
     status: &loopmaster_audio_windows::AudioEngineStatus,
     allow_recovery: bool,
 ) -> bool {
-    let stats = status.stats;
+    let stats = status.stats.clone();
     if status.failed
         || status.state != AudioEngineState::Running
         || stats.capture_packets == 0

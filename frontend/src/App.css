@@ -414,6 +414,19 @@ button:disabled {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: text;
+}
+
+.node-title-input {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-main);
+  background: var(--bg-input, #1c1c1e);
+  border: 1px solid var(--accent, #19c3c3);
+  border-radius: 4px;
+  padding: 1px 4px;
+  width: 100%;
+  outline: none;
 }
 
 .node-subtext {
@@ -709,6 +722,61 @@ button:disabled {
   cursor: pointer;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
+
+/* ---------------- 通道映射编辑器 ---------------- */
+.channel-map-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  margin-top: 2px;
+}
+.channel-map-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.channel-map-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  justify-content: center;
+}
+.channel-map-row input {
+  width: 42px;
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-input, #1c1c1e);
+  color: var(--text-main);
+  text-align: center;
+}
+.channel-map-arrow { color: var(--text-muted); }
+.btn-mini {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-light);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.btn-mini:hover { border-color: var(--accent); color: var(--accent); }
+.btn-apply {
+  margin-top: 4px;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: rgba(25, 195, 195, 0.12);
+  color: var(--accent);
+  cursor: pointer;
+  align-self: flex-start;
+}
+.btn-apply:hover { background: rgba(25, 195, 195, 0.22); }
 
 .btn-remove-card {
   align-self: flex-start;

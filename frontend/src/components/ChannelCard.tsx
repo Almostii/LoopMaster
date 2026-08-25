@@ -5,19 +5,40 @@ function stopProp(e: React.MouseEvent) {
   e.stopPropagation();
 }
 
+function stopProp(e: React.MouseEvent) {
+  e.stopPropagation();
+}
+
 export default function ChannelCard({
   channel,
-  meterLevel,
+  meterL,
+  meterR,
   isSelected,
   onRemove,
+  onRename,
   onSelect,
 }: {
   channel: ChannelBrief;
-  meterLevel: number;
+  meterL: number;
+  meterR: number;
   isSelected: boolean;
   onRemove: (channelId: string) => void;
+  onRename: (channelId: string, name: string) => void;
   onSelect: () => void;
 }) {
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(channel.display_name);
+
+  function commitName() {
+    const next = nameDraft.trim();
+    setEditingName(false);
+    if (next && next !== channel.display_name) {
+      onRename(channel.id, next);
+    } else {
+      setNameDraft(channel.display_name);
+    }
+  }
+
   return (
     <div
       className={`node-card ${isSelected ? "is-selected" : ""}`}
@@ -29,7 +50,35 @@ export default function ChannelCard({
       <div className="node-card-body">
         <div className="node-top-row">
           <div className="node-title-group">
-            <span className="node-title">{channel.display_name}</span>
+            {editingName ? (
+              <input
+                className="node-title-input"
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitName();
+                  if (e.key === "Escape") {
+                    setNameDraft(channel.display_name);
+                    setEditingName(false);
+                  }
+                }}
+                onClick={stopProp}
+              />
+            ) : (
+              <span
+                className="node-title"
+                title="双击重命名"
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  setNameDraft(channel.display_name);
+                  setEditingName(true);
+                }}
+              >
+                {channel.display_name}
+              </span>
+            )}
           </div>
           <button
             className="btn-remove-icon"
@@ -64,13 +113,13 @@ export default function ChannelCard({
             />
             <div className="node-channels-list">
               <VuMeter
-                level={meterLevel}
+                level={meterL}
                 label="Channel 1 (L)"
                 align="left"
                 labelClass="label-channel"
               />
               <VuMeter
-                level={meterLevel}
+                level={meterR}
                 label="Channel 2 (R)"
                 align="left"
                 labelClass="label-channel"

@@ -75,3 +75,77 @@ export function VuMeter({
     </div>
   );
 }
+
+/**
+ * 单条 send 的通道映射（channel map）编辑器。
+ *
+ * `channelMap` 为 `[input, output]` 声道对的列表（空列表表示 identity 映射）。
+ * 提供“交换 L/R”快捷操作，以及手动编辑映射项。所有变更通过 `onChange` 上报。
+ */
+export function ChannelMapEditor({
+  channelMap,
+  onChange,
+}: {
+  channelMap: [number, number][];
+  onChange: (next: [number, number][]) => void;
+}) {
+  // 默认展示 2 条映射（L->L, R->R），便于编辑；空映射也按此展开。
+  const rows: [number, number][] =
+    channelMap.length > 0
+      ? channelMap
+      : ([
+          [0, 0],
+          [1, 1],
+        ] as [number, number][]);
+
+  function update(index: number, which: "in" | "out", value: number) {
+    const next = rows.map((r) => [...r] as [number, number]);
+    next[index][which === "in" ? 0 : 1] = value;
+    onChange(next);
+  }
+
+  function swap() {
+    onChange(rows.map(([a, b]) => [b, a] as [number, number]));
+  }
+
+  return (
+    <div className="channel-map-editor">
+      <div className="channel-map-head">
+        <span>通道映射 (In → Out)</span>
+        <button
+          type="button"
+          className="btn-mini"
+          title="交换左右声道"
+          onClick={(e) => {
+            e.stopPropagation();
+            swap();
+          }}
+        >
+          交换 L/R
+        </button>
+      </div>
+      {rows.map(([a, b], i) => (
+        <div className="channel-map-row" key={i}>
+          <input
+            type="number"
+            min={0}
+            max={15}
+            value={a}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => update(i, "in", Number(e.target.value))}
+          />
+          <span className="channel-map-arrow">→</span>
+          <input
+            type="number"
+            min={0}
+            max={15}
+            value={b}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => update(i, "out", Number(e.target.value))}
+          />
+        </div>
+      ))}
+      <span className="option-hint">修改后需重启引擎生效（仅更新草稿）。</span>
+    </div>
+  );
+}
