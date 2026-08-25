@@ -42,14 +42,13 @@ export default function TitleBar({
             </svg>
           </div>
           <span>LoopMaster</span>
-          <span className="brand-subtitle">音频路由</span>
         </div>
       </div>
 
       <div className="titlebar-center">
         <div className={badgeClass} id="engine-status-badge">
           <span className={dotClass} />
-          <span>音频引擎 · {stateLabel}</span>
+          <span>音频路由 · {stateLabel}</span>
         </div>
         {engineState.last_error && (
           <span className="titlebar-error" title={engineState.last_error}>
