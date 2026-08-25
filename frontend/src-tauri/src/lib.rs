@@ -337,27 +337,29 @@ fn get_engine_stats(state: tauri::State<'_, Arc<AppState>>) -> EngineStatsBrief 
 // 引擎控制命令
 // ---------------------------------------------------------------------------
 
-/// 启动引擎。首次启动会创建引擎服务；拓扑变更（source/sink 变化）会
-/// 返回“需要重启”结构化错误，前端不得静默丢弃。
+/// 启动引擎。每次启动都使用当前编辑器暂存路由重建 EngineService 并启动，
+/// 以保证引擎图与编辑器一致；`update_graph` 依赖运行中的 supervisor 写入
+/// `graph_tx`，但 supervisor 仅在 `Start` 后建立 `graph_tx`，因此不能在
+/// `Start` 之前调用 `ApplyRoute`（否则会收到 `AudioEngineError::NotRunning`）。
+///
+/// 旧实例若存在则先 stop 并丢弃，避免两次启动间图不一致。
 #[tauri::command]
 fn start_engine(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), ServiceErrorBrief> {
-    // 首次启动创建引擎服务（需要图至少含一个 source 和一个 sink）。
+    // 1) 若已有引擎实例，先停止并丢弃，确保用最新图重建。
+    {
+        let mut engine_slot = state.engine.lock().expect("引擎锁未中毒");
+        if let Some(old) = engine_slot.take() {
+            drop(engine_slot);
+            let _ = old.command(EngineCommand::Stop);
+        }
+    }
+    // 2) 用当前编辑器草图创建 EngineService 并启动。
     ensure_engine(&app, &state).map_err(service_error_brief)?;
     let engine = state.engine.lock().expect("引擎锁未中毒");
     let engine = engine.as_ref().expect("引擎已创建");
-    // 用当前暂存路由提交到引擎。
-    let snapshot = {
-        let editor = state.editor.lock().expect("路由锁未中毒");
-        editor
-            .commit()
-            .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?
-    };
-    engine
-        .command(EngineCommand::ApplyRoute(snapshot))
-        .map_err(service_error_brief)?;
     engine
         .command(EngineCommand::Start)
         .map_err(service_error_brief)
