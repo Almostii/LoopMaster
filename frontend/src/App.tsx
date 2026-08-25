@@ -6,6 +6,8 @@ import MonitorCard from "./components/MonitorCard";
 import PickerMenu, { type PickerOption } from "./components/PickerMenu";
 import SourceCard from "./components/SourceCard";
 import TitleBar from "./components/TitleBar";
+import Sidebar, { type SidebarItem } from "./components/Sidebar";
+import SettingsView from "./components/SettingsView";
 import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
@@ -84,6 +86,9 @@ function App() {
   >(null);
   // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
   const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
+  // 侧边栏状态 (默认展开, 向窗口内弹出, 不遮挡 sources)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeView, setActiveView] = useState<string>("router");
 
   // 应用启动/路由变化时，为已存在的进程来源补齐图标。
   useEffect(() => {
@@ -95,6 +100,75 @@ function App() {
   }, [route.sources.map((s) => s.id).join(",")]);
 
   const wires = useMemo(() => computeWires(route), [route]);
+
+  // 侧边栏菜单(占位骨架, 待确认实际页面后再调整顺序/标签)
+  const sidebarTopItems: SidebarItem[] = useMemo(
+    () => [
+      {
+        key: "home",
+        label: "首页",
+        icon: (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 11l9-8 9 8" />
+            <path d="M5 10v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V10" />
+          </svg>
+        ),
+      },
+      {
+        key: "router",
+        label: "音频路由",
+        icon: (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="6" cy="6" r="2.5" />
+            <circle cx="18" cy="6" r="2.5" />
+            <circle cx="12" cy="18" r="2.5" />
+            <path d="M8.2 7.5l3 9" />
+            <path d="M15.8 7.5l-3 9" />
+            <path d="M8 6h8" />
+          </svg>
+        ),
+      },
+      {
+        key: "devices",
+        label: "设备",
+        icon: (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="5" width="18" height="12" rx="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+        ),
+      },
+      {
+        key: "logs",
+        label: "日志",
+        icon: (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 4h16v16H4z" />
+            <line x1="8" y1="9" x2="16" y2="9" />
+            <line x1="8" y1="13" x2="16" y2="13" />
+            <line x1="8" y1="17" x2="12" y2="17" />
+          </svg>
+        ),
+      },
+    ],
+    [],
+  );
+  const sidebarBottomItems: SidebarItem[] = useMemo(
+    () => [
+      {
+        key: "settings",
+        label: "设置",
+        icon: (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        ),
+      },
+    ],
+    [],
+  );
 
   // 所有音频来源按用途分组到同一个 Picker：进程、麦克风、设备回环、虚拟设备。
   // 每个 capture 设备只按其后端分类（category）出现在其中一个组里，避免重复。
@@ -300,7 +374,12 @@ function App() {
 
   return (
     <div className="app-container mode-stereo">
-      <TitleBar engineState={engineState} onToggleEngine={handleToggleEngine} />
+      <TitleBar
+        engineState={engineState}
+        onToggleEngine={handleToggleEngine}
+        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+        sidebarCollapsed={sidebarCollapsed}
+      />
 
       {notice && (
         <div className={`toast-msg show toast-${notice.kind}`} onClick={() => setNotice(null)}>
@@ -308,7 +387,19 @@ function App() {
         </div>
       )}
 
-      <div className="router-canvas-wrap">
+      <div className="app-main">
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          activeKey={activeView}
+          onSelect={setActiveView}
+          topItems={sidebarTopItems}
+          bottomItems={sidebarBottomItems}
+        />
+
+        {activeView === "settings" ? (
+          <SettingsView />
+        ) : activeView === "router" ? (
+          <div className="router-canvas-wrap">
         <div className="topology-viewport" id="topology-viewport" onClick={handleCanvasClick}>
           <WireLayer
             svgRef={svgRef}
@@ -471,6 +562,20 @@ function App() {
             <span className="footer-hint">点击卡片或连线选中，按 Delete 删除</span>
           </div>
         </footer>
+      </div>
+        ) : (
+          <div className="router-canvas-wrap placeholder-view">
+            <div className="placeholder-view-inner">
+              <div className="placeholder-view-title">
+                {sidebarTopItems.find((i) => i.key === activeView)?.label
+                  ?? "未知页面"}
+              </div>
+              <div className="placeholder-view-hint">
+                此页面尚未实现，待确认功能后再补充内容。
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
