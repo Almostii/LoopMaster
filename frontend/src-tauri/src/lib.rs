@@ -401,37 +401,103 @@ fn request_reconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<(), Servi
 
 /// 应用一次路由编辑（写入暂存图并校验）。拓扑变化需重启会在
 /// `apply_route_edit` 的返回值或后续状态中体现，前端不得静默丢弃修改。
+///
+/// send 级热更新（`SetSendEnabled`/`SetSendMuted`/`SetSendGain`）除写入草稿外，
+/// 若引擎正在运行还会转发为 `EngineCommand` 立即生效；非运行态仅更新草稿，
+/// 下次 `start_engine` 基于草稿重建引擎时生效。
 #[tauri::command]
 fn apply_route_edit(
     state: tauri::State<'_, Arc<AppState>>,
     request: RouteEditRequest,
 ) -> Result<(), ServiceErrorBrief> {
-    let mut editor = state
-        .editor
-        .lock()
-        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
-    // 节点重命名在壳层处理：app-service 的 RouteEdit 不直接支持 display_name
-    // 覆盖，故重建编辑图（仅改 display_name，不影响拓扑）。其余 op 走标准映射。
-    match request {
-        RouteEditRequest::SetSourceName { id, display_name } => {
-            apply_rename(&mut editor, RenameTarget::Source, &id, display_name)
-                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
-        }
-        RouteEditRequest::SetOutputChannelName { id, display_name } => {
-            apply_rename(&mut editor, RenameTarget::OutputChannel, &id, display_name)
-                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
-        }
-        RouteEditRequest::SetExternalOutputName { id, display_name } => {
-            apply_rename(&mut editor, RenameTarget::ExternalOutput, &id, display_name)
-                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
-        }
-        _ => {
-            let edit = request_to_route_edit(request).map_err(ServiceErrorBrief::graph)?;
-            editor
-                .apply(edit)
-                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+    // 1) 写入暂存图（编辑器草稿），保持与拓扑/显示一致。
+    // 锁范围收窄到仅改草稿，避免与引擎锁形成循环等待（start_engine 为 engine→editor）。
+    {
+        let mut editor = state
+            .editor
+            .lock()
+            .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+        // 节点重命名在壳层处理：app-service 的 RouteEdit 不直接支持 display_name
+        // 覆盖，故重建编辑图（仅改 display_name，不影响拓扑）。其余 op 走标准映射。
+        match &request {
+            RouteEditRequest::SetSourceName { id, display_name } => {
+                apply_rename(&mut editor, RenameTarget::Source, id, display_name.clone())
+                    .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
+            }
+            RouteEditRequest::SetOutputChannelName { id, display_name } => {
+                apply_rename(
+                    &mut editor,
+                    RenameTarget::OutputChannel,
+                    id,
+                    display_name.clone(),
+                )
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
+            }
+            RouteEditRequest::SetExternalOutputName { id, display_name } => {
+                apply_rename(
+                    &mut editor,
+                    RenameTarget::ExternalOutput,
+                    id,
+                    display_name.clone(),
+                )
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
+            }
+            _ => {
+                let edit =
+                    request_to_route_edit(request.clone()).map_err(ServiceErrorBrief::graph)?;
+                editor
+                    .apply(edit)
+                    .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
+            }
         }
     }
+
+    // 2) send 级热更新转发到运行中的引擎（仅 Running 态，否则草稿已在步骤 1 更新）。
+    forward_send_to_engine(&state, &request)
+}
+
+/// 将 send 级路由编辑转发给运行中的引擎，使其立即生效。
+///
+/// 仅对 `Running` 引擎执行热更新；引擎未创建或未运行时不转发（草稿已在
+/// `apply_route_edit` 步骤 1 更新，下次 `start_engine` 会基于草稿重建引擎并生效）。
+///
+/// 注意：`SetSendChannelMap` 暂无对应的 `EngineCommand` 热更新变体，故走整图
+/// 替换路径（重启生效），此处不转发。
+fn forward_send_to_engine(
+    state: &AppState,
+    request: &RouteEditRequest,
+) -> Result<(), ServiceErrorBrief> {
+    let command = match request {
+        RouteEditRequest::SetSendEnabled { id, enabled } => Some(EngineCommand::SetSendEnabled {
+            send_id: SendId(id.clone()),
+            enabled: *enabled,
+        }),
+        RouteEditRequest::SetSendMuted { id, muted } => Some(EngineCommand::SetMuted {
+            send_id: SendId(id.clone()),
+            muted: *muted,
+        }),
+        RouteEditRequest::SetSendGain { id, gain_db } => Some(EngineCommand::SetGain {
+            send_id: SendId(id.clone()),
+            gain_db: *gain_db,
+        }),
+        _ => None,
+    };
+    let command = match command {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+    let engine_slot = state
+        .engine
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    let engine = match engine_slot.as_ref() {
+        Some(e) => e,
+        None => return Ok(()), // 引擎尚未创建
+    };
+    if engine.status().state != AudioEngineState::Running {
+        return Ok(()); // 未运行：草稿已更新，下次启动生效
+    }
+    engine.command(command).map_err(service_error_brief)
 }
 
 /// 可重命名节点类型。
