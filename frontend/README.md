@@ -9,7 +9,7 @@
 - React 只负责界面、交互和展示状态；
 - Tauri command/event 是前端与 Rust 应用服务之间的边界；
 - 前端不得直接调用 WASAPI、读取音频 FIFO 或持有实时线程对象；
-- 稳定的 endpoint ID、source/sink/send schema 和错误分类以 `app-service` 公开契约为准；
+- 稳定的 endpoint ID、Route Profile（Source、Output Channel、External Output、Monitor）DTO 和错误分类以 Tauri/app-service 适配契约为准；内部 source/bus/sink/send 仅是 Rust 实现模型；
 - 前端依赖和构建产物必须使用 Node/Tauri 工具链管理，不加入 Rust workspace 成员；
 - `node_modules/`、前端构建产物和本地配置不得提交。
 
