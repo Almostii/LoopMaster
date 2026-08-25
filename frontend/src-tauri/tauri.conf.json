@@ -24,10 +24,26 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "icon": [
       "icons/icon.ico",
-      "icons/icon.icns"
-    ]
+      "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true,
+        "languages": ["SimpChinese", "English"],
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/nsis-header.bmp",
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "installMode": "currentUser",
+        "startMenuFolder": "LoopMaster"
+      },
+      "wix": {
+        "language": "zh-CN",
+        "bannerPath": "icons/loopmaster-logo.png",
+        "dialogImagePath": "icons/loopmaster-logo.png"
+      }
+    }
   }
 }
