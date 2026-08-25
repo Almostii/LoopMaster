@@ -50,7 +50,10 @@ function App() {
     route,
     engineState,
     notice,
-    meterLevel,
+    nodeMeter,
+    sourceSendIds,
+    externalSendIds,
+    channelSendIds,
     setNotice,
     refreshProcesses,
     refreshDevices,
@@ -69,6 +72,10 @@ function App() {
     setSendEnabled,
     setSendMuted,
     setSendGain,
+    renameSource,
+    renameOutputChannel,
+    renameExternalOutput,
+    setSendChannelMap,
   } = useLoopMaster();
 
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -339,21 +346,27 @@ function App() {
               {route.sources.length === 0 ? (
                 <div className="empty-card">点击上方 + 添加音源。</div>
               ) : (
-                route.sources.map((s) => (
+                route.sources.map((s) => {
+                  const [ml, mr] = nodeMeter(sourceSendIds(s.id));
+                  return (
                   <SourceCard
                     key={s.id}
                     source={s}
                     route={route}
-                    meterLevel={meterLevel}
+                    meterL={ml}
+                    meterR={mr}
                     icon={s.process_id != null ? procIconMap[s.process_id] : undefined}
                     isOn={isSourceEnabled(route, s.id)}
                     isSelected={selectedCard?.type === "source" && selectedCard.id === s.id}
                     onToggle={handleToggleSource}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
                     onSetMuted={(sendId, m) => void setSendMuted(sendId, m)}
+                    onRename={(id, name) => void renameSource(id, name)}
+                    onSetChannelMap={(id, cm) => void setSendChannelMap(id, cm)}
                     onSelect={() => setSelectedCard({ type: "source", id: s.id })}
                   />
-                ))
+                  );
+                })
               )}
             </Column>
 
@@ -367,16 +380,21 @@ function App() {
               {route.output_channels.length === 0 ? (
                 <div className="empty-card">尚未添加输出通道。点击上方 + 按钮添加。</div>
               ) : (
-                route.output_channels.map((ch) => (
+                route.output_channels.map((ch) => {
+                  const [ml, mr] = nodeMeter(channelSendIds(ch.id));
+                  return (
                   <ChannelCard
                     key={ch.id}
                     channel={ch}
-                    meterLevel={meterLevel}
+                    meterL={ml}
+                    meterR={mr}
                     isSelected={selectedCard?.type === "channel" && selectedCard.id === ch.id}
                     onRemove={(id) => void removeOutputChannel(id)}
+                    onRename={(id, name) => void renameOutputChannel(id, name)}
                     onSelect={() => setSelectedCard({ type: "channel", id: ch.id })}
                   />
-                ))
+                  );
+                })
               )}
             </Column>
 
@@ -402,20 +420,26 @@ function App() {
               {route.external_outputs.length === 0 ? (
                 <div className="empty-card">点击上方 + 添加外部输出。</div>
               ) : (
-                route.external_outputs.map((ext) => (
+                route.external_outputs.map((ext) => {
+                  const [ml, mr] = nodeMeter(externalSendIds(ext.id));
+                  return (
                   <MonitorCard
                     key={ext.id}
                     external={ext}
                     device={deviceById.get(ext.endpoint_id)}
                     route={route}
-                    meterLevel={meterLevel}
+                    meterL={ml}
+                    meterR={mr}
                     isOn={isExternalEnabled(route, ext.id)}
                     isSelected={selectedCard?.type === "external" && selectedCard.id === ext.id}
                     onToggle={handleToggleExternal}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
+                    onRename={(id, name) => void renameExternalOutput(id, name)}
+                    onSetChannelMap={(id, cm) => void setSendChannelMap(id, cm)}
                     onSelect={() => setSelectedCard({ type: "external", id: ext.id })}
                   />
-                ))
+                  );
+                })
               )}
             </Column>
           </div>

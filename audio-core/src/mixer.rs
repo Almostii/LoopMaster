@@ -4,7 +4,7 @@
 //! 增益换算和通道边界校验；实时 [`MixerPlan::process`] 只使用调用方提供的切片与
 //! 计划内预分配的 Bus 缓冲，不分配内存、不加锁、不等待。
 
-use crate::{RouteGraph, RouteGraphError, SendSpec};
+use crate::{RouteGraph, RouteGraphError, SendId, SendSpec};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
@@ -63,6 +63,8 @@ pub enum MixerError {
 
 #[derive(Clone, Debug)]
 struct CompiledSend {
+    /// 该 send 的稳定标识，用于把逐通道峰值回传给调用方按 send 聚合。
+    id: SendId,
     input_index: usize,
     output_index: usize,
     gain_linear: f32,
@@ -89,6 +91,9 @@ pub struct MixerPlan {
     source_sends: Vec<CompiledSend>,
     bus_sends: Vec<CompiledSend>,
     bus_blocks: Vec<f32>,
+    /// 每条 send 在最近一次 `process` 后输出的逐通道（L/R）峰值幅度（0.0~1.0）。
+    /// 顺序为 `source_sends` 全体后接 `bus_sends` 全体，与 `send_ids` 一一对应。
+    send_peaks: Vec<(SendId, [f32; 2])>,
 }
 
 impl MixerPlan {
@@ -160,6 +165,7 @@ impl MixerPlan {
                         ChannelSide::Bus,
                     )?;
                     source_sends.push(CompiledSend {
+                        id: send.id().clone(),
                         input_index: source_index,
                         output_index: bus_index,
                         gain_linear: db_to_linear(send.gain_db()),
@@ -194,6 +200,7 @@ impl MixerPlan {
                         ChannelSide::Sink,
                     )?;
                     bus_sends.push(CompiledSend {
+                        id: send.id().clone(),
                         input_index: bus_index,
                         output_index: sink_index,
                         gain_linear: db_to_linear(send.gain_db()),
@@ -203,6 +210,12 @@ impl MixerPlan {
                     });
                 }
             }
+        }
+
+        // 每条 send 占一项，初始峰值为 0。顺序与 process 中统计顺序一致。
+        let mut send_peaks = Vec::with_capacity(source_sends.len() + bus_sends.len());
+        for send in source_sends.iter().chain(bus_sends.iter()) {
+            send_peaks.push((send.id.clone(), [0.0f32; 2]));
         }
 
         Ok(Self {
@@ -216,6 +229,7 @@ impl MixerPlan {
             source_sends,
             bus_sends,
             bus_blocks: vec![0.0; bus_block_total],
+            send_peaks,
         })
     }
 
@@ -239,6 +253,13 @@ impl MixerPlan {
     }
     pub const fn sink_count(&self) -> usize {
         self.sink_count
+    }
+    /// 最近一次 [`process`](Self::process) 后各条 send 的逐通道（L/R）输出峰值。
+    ///
+    /// 每个元素为 `(send_id, [left_peak, right_peak])`，峰值幅度 0.0~1.0。
+    /// 顺序与内部 `source_sends` 接 `bus_sends` 一致，调用方据此按 send 聚合。
+    pub fn send_peaks(&self) -> &[(SendId, [f32; 2])] {
+        &self.send_peaks
     }
 
     /// 将 source block 经内部 Bus 混音到 sink block。
@@ -297,23 +318,34 @@ impl MixerPlan {
         }
 
         let bus_block_samples = self.block_frames * self.bus_channels;
+        // 统计每条 send 的逐通道（L/R）峰值，静音/禁用的 send 峰值记为 0。
+        // 顺序与 `send_peaks` 初始化一致：先 source_sends 后 bus_sends。
+        let mut peak_index = 0;
         for send in &self.source_sends {
             if send.muted || !send.enabled {
+                self.send_peaks[peak_index].1 = [0.0f32; 2];
+                peak_index += 1;
                 continue;
             }
             let source = source_blocks[send.input_index];
             let bus_offset = send.output_index * bus_block_samples;
             let bus = &mut self.bus_blocks[bus_offset..bus_offset + bus_block_samples];
-            mix_block(source, self.source_channels, bus, self.bus_channels, send);
+            let peaks = mix_block(source, self.source_channels, bus, self.bus_channels, send);
+            self.send_peaks[peak_index].1 = peaks;
+            peak_index += 1;
         }
         for send in &self.bus_sends {
             if send.muted || !send.enabled {
+                self.send_peaks[peak_index].1 = [0.0f32; 2];
+                peak_index += 1;
                 continue;
             }
             let bus_offset = send.input_index * bus_block_samples;
             let bus = &self.bus_blocks[bus_offset..bus_offset + bus_block_samples];
             let sink = &mut sink_blocks[send.output_index];
-            mix_block(bus, self.bus_channels, sink, self.sink_channels, send);
+            let peaks = mix_block(bus, self.bus_channels, sink, self.sink_channels, send);
+            self.send_peaks[peak_index].1 = peaks;
+            peak_index += 1;
         }
         Ok(())
     }
@@ -382,21 +414,31 @@ fn channel_out_of_range(
     }
 }
 
+/// 将单条 send 的 `input` 混入 `output`，返回该 send 在输出块上的逐通道
+/// （L/R，即第 0/1 声道）峰值幅度（0.0~1.0，取绝对值最大）。
+///
+/// 峰值在增益应用后统计，反映该 send 实际送入下游的电平，供逐通道电平表使用。
 fn mix_block(
     input: &[f32],
     input_channels: usize,
     output: &mut [f32],
     output_channels: usize,
     send: &CompiledSend,
-) {
+) -> [f32; 2] {
     let available_frames = input.len() / input_channels;
+    let mut peaks = [0.0f32; 2];
     if send.channel_map.is_empty() {
         let mapped_channels = input_channels.min(output_channels);
         for frame in 0..available_frames {
             let input_base = frame * input_channels;
             let output_base = frame * output_channels;
             for channel in 0..mapped_channels {
-                output[output_base + channel] += input[input_base + channel] * send.gain_linear;
+                let sample = input[input_base + channel] * send.gain_linear;
+                output[output_base + channel] += sample;
+                let mag = sample.abs();
+                if channel < 2 && mag > peaks[channel] {
+                    peaks[channel] = mag;
+                }
             }
         }
     } else {
@@ -404,11 +446,18 @@ fn mix_block(
             let input_base = frame * input_channels;
             let output_base = frame * output_channels;
             for &(input_channel, output_channel) in &send.channel_map {
-                output[output_base + output_channel] +=
-                    input[input_base + input_channel] * send.gain_linear;
+                let sample = input[input_base + input_channel] * send.gain_linear;
+                output[output_base + output_channel] += sample;
+                if output_channel < 2 {
+                    let mag = sample.abs();
+                    if mag > peaks[output_channel] {
+                        peaks[output_channel] = mag;
+                    }
+                }
             }
         }
     }
+    peaks
 }
 
 fn db_to_linear(gain_db: f32) -> f32 {

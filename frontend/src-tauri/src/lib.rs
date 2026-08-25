@@ -14,15 +14,18 @@
 //! - 事件：`engine-state-changed`、`engine-stats-changed`、
 //!   `device-lost`、`device-restored`、`service-error`。
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 use loopmaster_app_service::{
     DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, ProcessModel,
     ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent,
 };
+use loopmaster_app_service::{AppConfig, ConfigError};
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
     SourceId, SourceKind, SourceSpec,
@@ -120,6 +123,8 @@ struct EngineStatsBrief {
     discontinuities: u64,
     reconnect_attempts: u64,
     captured_peak: f32,
+    /// 每条 send 的逐通道（L/R）峰值，键为 send id，值为 `[left, right]`（0.0~1.0）。
+    send_peaks: std::collections::HashMap<String, Vec<f32>>,
 }
 
 /// 统一服务错误视图（保留分类、endpoint ID、HRESULT 与中文建议）。
@@ -208,22 +213,46 @@ enum RouteEditRequest {
 // Tauri 托管状态
 // ---------------------------------------------------------------------------
 
-/// 全局应用状态：暂存路由编辑器 + 惰性创建的引擎服务。
+/// 全局应用状态：暂存路由编辑器 + 惰性创建的引擎服务 + 配置持久化路径。
 ///
 /// 引擎在首次 `start_engine` 时才创建（`RouteGraph` 至少需要一个 source 和
 /// 一个 sink，空图不能初始化引擎），此后复用同一实例直到进程退出。
+///
+/// `config_path` 为自动保存的目标配置文件（位于 Tauri `app_config_dir`
+/// 下的 `config.json`）；路径在启动时解析一次，命令层只负责读写。
 struct AppState {
     editor: Mutex<RouteEditor>,
     engine: Mutex<Option<EngineService>>,
+    config_path: PathBuf,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(config_path: PathBuf) -> Self {
         Self {
             editor: Mutex::new(RouteEditor::new(RouteGraph::default())),
             engine: Mutex::new(None),
+            config_path,
         }
     }
+}
+
+/// 解析配置文件路径：`<app_config_dir>/config.json`。
+///
+/// `app_config_dir` 由 Tauri 按平台返回标准配置目录（如 Windows 的
+/// `%APPDATA%/LoopMaster`）。目录不存在时尝试创建，失败则回退到当前目录，
+/// 保证命令层始终有可用路径。
+fn resolve_config_path(app: &tauri::AppHandle) -> PathBuf {
+    let dir: std::path::PathBuf = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .filter(|p: &std::path::PathBuf| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("创建配置目录失败，回退到当前目录: {e}");
+        return std::path::PathBuf::from("config.json");
+    }
+    dir.join("config.json")
 }
 
 /// 首次启动引擎时创建服务，并派生事件转发线程；重复调用返回 `false`。
@@ -507,6 +536,53 @@ fn forward_send_to_engine(
     engine.command(command).map_err(service_error_brief)
 }
 
+// ---------------------------------------------------------------------------
+// 配置持久化命令（阶段 D：自动保存当前路由，启动加载上次配置）
+// ---------------------------------------------------------------------------
+
+/// 把当前编辑器草稿保存为配置文件（原子写入）。
+///
+/// 保存的是**草稿图**（`RouteEditor.draft()`），即当前 UI 展示的拓扑，与引擎
+/// 是否运行无关；引擎运行中的热更新也已同步进草稿，故保存即反映最新状态。
+#[tauri::command]
+fn save_config(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), ServiceErrorBrief> {
+    let editor = state
+        .editor
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    let config = AppConfig::new(editor.draft().clone());
+    drop(editor);
+    config
+        .save_to(&state.config_path)
+        .map_err(config_error_brief)
+}
+
+/// 从配置文件加载路由，替换当前编辑器草稿。
+///
+/// 文件不存在（`ConfigError::NotFound`）时返回 `Ok(false)`，表示无需加载，
+/// 交由前端决定是否建立默认拓扑；其余错误（损坏/版本不支持/校验失败）返回
+/// `Err` 以便前端提示。加载成功后标记缺失设备，后续 UI 按 endpoint 可用性
+/// 决定是否自动启动引擎。
+#[tauri::command]
+fn load_config(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<bool, ServiceErrorBrief> {
+    let config = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => config,
+        Err(ConfigError::NotFound(_)) => return Ok(false),
+        Err(e) => return Err(config_error_brief(e)),
+    };
+    let graph = config.graph;
+    let mut editor = state
+        .editor
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    *editor = RouteEditor::new(graph);
+    Ok(true)
+}
+
 /// 可重命名节点类型。
 #[derive(Clone, Copy)]
 enum RenameTarget {
@@ -591,6 +667,11 @@ fn serialize_stats(stats: AudioEngineStats) -> serde_json::Value {
         "discontinuities": stats.discontinuities,
         "reconnect_attempts": stats.reconnect_attempts,
         "captured_peak": stats.captured_peak,
+        "send_peaks": stats
+            .send_peaks
+            .iter()
+            .map(|(id, peaks)| (id.clone(), vec![peaks[0], peaks[1]]))
+            .collect::<std::collections::HashMap<_, _>>(),
     })
 }
 
@@ -663,9 +744,14 @@ impl EngineStatsBrief {
             fifo_overflows: stats.fifo_overflows,
             fifo_underflows: stats.fifo_underflows,
             discontinuities: stats.discontinuities,
-            reconnect_attempts: stats.reconnect_attempts,
-            captured_peak: stats.captured_peak,
-        }
+        reconnect_attempts: stats.reconnect_attempts,
+        captured_peak: stats.captured_peak,
+        send_peaks: stats
+            .send_peaks
+            .iter()
+            .map(|(id, peaks)| (id.clone(), vec![peaks[0], peaks[1]]))
+            .collect(),
+    }
     }
 }
 
@@ -801,6 +887,27 @@ fn service_error_brief(error: ServiceError) -> ServiceErrorBrief {
     }
 }
 
+/// 把配置错误映射为前端错误视图。
+fn config_error_brief(error: ConfigError) -> ServiceErrorBrief {
+    let (category, hint) = match &error {
+        ConfigError::NotFound(_) => ("config_not_found", Some("尚无已保存的配置".into())),
+        ConfigError::Io(_) => ("config_io", Some("配置文件读写失败".into())),
+        ConfigError::Json(_) => ("config_json", Some("配置文件格式损坏，已忽略".into())),
+        ConfigError::UnsupportedSchemaVersion(v) => (
+            "config_schema",
+            Some(format!("配置文件版本 {v} 不受支持").into()),
+        ),
+        ConfigError::Graph(_) => ("config_graph", Some("配置文件路由图校验失败".into())),
+    };
+    ServiceErrorBrief {
+        category,
+        message: error.to_string(),
+        endpoint_id: None,
+        hresult: None,
+        hint,
+    }
+}
+
 fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String> {
     Ok(match request {
         RouteEditRequest::AddSource {
@@ -902,10 +1009,14 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app_state = Arc::new(AppState::new());
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(app_state)
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let config_path = resolve_config_path(&handle);
+            app.manage(Arc::new(AppState::new(config_path)));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             list_devices,
@@ -918,6 +1029,8 @@ pub fn run() {
             request_reconnect,
             apply_route_edit,
             process_icon_data_uri,
+            save_config,
+            load_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
