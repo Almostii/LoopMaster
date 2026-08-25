@@ -6,19 +6,18 @@
 
 ## 1. 当前工程状态
 
-当前工作分支：`codex/migrate-tauri-react-frontend`
-
-本分支基于 `codex/feature-bus-graph` 的提交 `d275910`，并包含总线图调用方兼容修复。它仍不是已合并的 `main` 基线；必须完成分支审查后再合并到 `main`。
+迁移准备已完成并应合并到 `main`。后续前端开发必须从合并后的最新 `main` 创建专用 `codex/` 分支，禁止直接在 `main` 上开发。
 
 相关最近提交：
 
-    ca2837b 适配总线图诊断与运行时测试（当前分支最新）
+    24d643f 同步总线图修复后的合并状态
+    ca2837b 适配总线图诊断与运行时测试
     d275910 实现内部混音总线基础架构
     a2cf0ce 修复音频来源列表刷新
     bf00ffa 支持常见设备音频格式转换
     7bd1076 修复音频引擎核心验收与生命周期问题
 
-工作区目前只允许存在用户自己的未跟踪目录 .workbuddy/。不要修改、删除、暂存或提交它。Library/ 是本地参考资料目录，不属于 Git，也不允许读取后直接复制第三方代码进正式工程。旧 Slint 前端完整归档在 Library/LoopMaster-Slint-archive-2026-08-25/app/。
+`.workbuddy/` 已加入 `.gitignore`，其中内容仅供本地 AI 记忆和运行使用，不要修改、删除、暂存或提交其整体内容。Library/ 是本地参考资料目录，不属于 Git，也不允许读取后直接复制第三方代码进正式工程。旧 Slint 前端完整归档在 Library/LoopMaster-Slint-archive-2026-08-25/app/。
 
 项目是 Windows 用户态音频路由器，不创建虚拟音频驱动。输出目标是系统中已经存在的物理设备或 VB-CABLE 等虚拟 endpoint。内部音频格式是 48 kHz / 32-bit IEEE float / stereo。
 
@@ -73,25 +72,11 @@
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核、设备恢复、路由图、应用服务契约和配置 v1 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，当前应先审查并合并本迁移分支到 `main`，再从最新 `main` 创建 Tauri 2 + React 初始化分支，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、路由图、应用服务契约和配置 v1 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备应进入 `main`；下一步从最新 `main` 创建 Tauri 2 + React 初始化分支，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
-### 第一步：审查并合并迁移准备分支
+### 第一步：从最新 main 初始化 Tauri 2 + React 工程
 
-当前分支：`codex/migrate-tauri-react-frontend`。
-
-合并前确认：
-
-- 工作树只有允许的 `.workbuddy/` 未跟踪目录；
-- 审查 `ca2837b`、`729e16b` 和文档变更；
-- 复跑本节列出的全部自动门禁；
-- 通过后将本分支合并到 `main`，不要在 `main` 上直接提交；
-- 合并后确认 `main` 的构建和测试仍然通过，再删除已合并的短期迁移分支（如团队流程允许）。
-
-验收：`main` 包含 Slint 归档、Tauri/React 文档和总线图兼容修复，Rust workspace 门禁通过。
-
-### 第二步：从最新 main 初始化 Tauri 2 + React 工程
-
-合并完成后，从最新 `main` 创建 `codex/feature-tauri-init`；目标目录为 `frontend/`，不得恢复旧 `app/`。
+从最新 `main` 创建 `codex/feature-tauri-init`；目标目录为 `frontend/`，不得恢复旧 `app/`。
 
 任务：
 
@@ -102,7 +87,7 @@
 
 验收：最小 Tauri 窗口可启动，React 开发构建可重复执行，Rust workspace 不引入前端依赖。
 
-### 第三步：实现 Tauri command/event 与服务的命令/事件闭环
+### 第二步：实现 Tauri command/event 与服务的命令/事件闭环
 
 目标主要是 frontend/、新生成的 frontend/src-tauri/ 和 app-service。旧 app/ 不应重新恢复。
 
@@ -118,7 +103,7 @@
 
 验收：UI 操作不阻塞音频线程；设备拔出后 UI 显示 degraded/reconnecting；恢复后显示 restored；错误包含可执行建议；切换列表顺序不会改变已选 endpoint。
 
-### 第四步：完成真正的 Tauri 2 + React MVP
+### 第三步：完成真正的 Tauri 2 + React MVP
 
 任务：
 
@@ -133,7 +118,7 @@
 
 验收流程必须能在不查看命令行日志的情况下完成“音频应用 → VB-CABLE CABLE Input → 录音/会议应用选择 CABLE Output”的完整流程。
 
-### 第五步：真实硬件门禁
+### 第四步：真实硬件门禁
 
 在功能和服务契约稳定后执行，不要用 UI 开发掩盖未验证的音频问题：
 
@@ -154,7 +139,7 @@
 
 1. 阅读本文、Doc/Main/1-8、最近三份 Doc/Log；
 2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并确认目标基线和未提交修改；
-3. 若当前仍在迁移分支，先完成本分支审查和合并；Tauri 开发必须从合并后的最新 `main` 创建专用分支；
+3. 从最新 `main` 创建 `codex/feature-tauri-init`，Tauri 开发不得复用旧迁移分支继续堆叠；
 4. 初始化前先审查 `SendSpec`、`RouteEditor`、`EngineService`、`AudioEngine::update_graph` 的真实接口与文档差异；
 5. 将前端初始化范围限定为 Tauri shell、React/TypeScript 工程和最小启动闭环，不夹带预设、完整 UI 或格式引擎重构；
 6. 让子 agent 分别承担实现、测试/审查、文档记录，主 agent 负责拆分、验收和合并；
