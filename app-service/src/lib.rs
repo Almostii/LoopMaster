@@ -167,6 +167,59 @@ pub enum DeviceFormatSupport {
     Unknown,
 }
 
+/// 设备在 LoopMaster 中的用途分类，用于前端分组展示，避免同一 capture 设备
+/// 被同时渲染成「麦克风」和「设备回环」两份。
+///
+/// 注意：这一分类依据设备友好名称中的关键词推断，并非 Windows 官方的设备角色。
+/// 物理话筒/线路输入归为 [`DeviceCategory::InputMic`]，把播放总混音当输入用的
+/// 回环设备归为 [`DeviceCategory::InputLoopback`]，纯软件虚拟声卡归为
+/// [`DeviceCategory::InputVirtual`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceCategory {
+    /// 物理话筒 / 线路输入（Capture endpoint）。
+    InputMic,
+    /// 设备回环（通常是 Render endpoint 的 loopback 混音，名称带有 loopback/cable 等）。
+    InputLoopback,
+    /// 软件虚拟声卡（VB-Audio、Voicemeeter 等）。
+    InputVirtual,
+    /// 渲染输出设备。
+    Output,
+}
+
+impl DeviceCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InputMic => "input_mic",
+            Self::InputLoopback => "input_loopback",
+            Self::InputVirtual => "input_virtual",
+            Self::Output => "output",
+        }
+    }
+
+    /// 由设备名称推断分类。`flow` 用于区分渲染/捕获。
+    pub fn classify(name: &str, flow: DeviceFlow) -> Self {
+        if flow == DeviceFlow::Render {
+            return Self::Output;
+        }
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("virtual")
+            || lower.contains("vb-audio")
+            || lower.contains("voicemeeter")
+            || lower.contains("cable")
+        {
+            Self::InputVirtual
+        } else if lower.contains("loop")
+            || lower.contains("loopback")
+            || lower.contains("回环")
+            || lower.contains("环回")
+        {
+            Self::InputLoopback
+        } else {
+            Self::InputMic
+        }
+    }
+}
+
 /// 设备运行状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceStatus {
@@ -196,6 +249,8 @@ pub struct DeviceModel {
     pub format_support_reason: String,
     pub compatibility: DeviceCompatibility,
     pub status: DeviceStatus,
+    /// 用途分类（麦克风 / 回环 / 虚拟 / 输出），用于前端分组。
+    pub category: DeviceCategory,
 }
 
 impl DeviceModel {
@@ -230,6 +285,7 @@ impl DeviceModel {
             format_support_reason,
             compatibility,
             status,
+            category: DeviceCategory::classify(&info.name, flow),
         }
     }
 }

@@ -6,17 +6,26 @@ export interface PickerOption {
   hint?: string;
 }
 
+export interface PickerGroup {
+  title: string;
+  options: PickerOption[];
+}
+
 export default function PickerMenu({
   title,
   trigger,
   options,
+  groups,
   onSelect,
   onOpen,
   loading,
 }: {
   title: string;
   trigger: ReactNode;
-  options: PickerOption[];
+  /** 扁平选项（与 groups 二选一）。 */
+  options?: PickerOption[];
+  /** 分组选项；传入时按组渲染，每组单独显示标题。 */
+  groups?: PickerGroup[];
   onSelect: (value: string) => void;
   onOpen?: () => void;
   loading?: boolean;
@@ -40,28 +49,46 @@ export default function PickerMenu({
     if (next && onOpen) onOpen();
   }
 
+  const resolvedGroups: PickerGroup[] = groups ?? [
+    { title, options: options ?? [] },
+  ];
+  const allEmpty = resolvedGroups.every((g) => g.options.length === 0);
+
+  function renderOption(opt: PickerOption) {
+    return (
+      <div
+        key={opt.value}
+        className="dropdown-item"
+        onClick={() => {
+          onSelect(opt.value);
+          setOpen(false);
+        }}
+      >
+        <span className="dropdown-item-label">{opt.label}</span>
+        {opt.hint && <span className="dropdown-item-hint">{opt.hint}</span>}
+      </div>
+    );
+  }
+
   return (
     <div className="picker-root" ref={rootRef}>
       <div onClick={toggle}>{trigger}</div>
       {open && (
         <div className="dropdown-menu show">
-          <div className="dropdown-section-title">{title}</div>
           {loading ? (
             <div className="dropdown-item muted">加载中…</div>
-          ) : options.length === 0 ? (
+          ) : allEmpty ? (
             <div className="dropdown-item muted">暂无可用项</div>
           ) : (
-            options.map((opt) => (
-              <div
-                key={opt.value}
-                className="dropdown-item"
-                onClick={() => {
-                  onSelect(opt.value);
-                  setOpen(false);
-                }}
-              >
-                <span className="dropdown-item-label">{opt.label}</span>
-                {opt.hint && <span className="dropdown-item-hint">{opt.hint}</span>}
+            resolvedGroups.map((group, i) => (
+              <div key={group.title} className="dropdown-group">
+                {i > 0 && <div className="dropdown-divider" />}
+                <div className="dropdown-section-title">{group.title}</div>
+                {group.options.length === 0 ? (
+                  <div className="dropdown-item muted">—</div>
+                ) : (
+                  group.options.map(renderOption)
+                )}
               </div>
             ))
           )}
