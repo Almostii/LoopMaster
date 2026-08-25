@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { DEVICE_STATUS_LABEL } from "../types";
 import type { DeviceBrief, ExternalOutputBrief } from "../types";
 import { LoopToggle, VuMeter } from "./ui";
@@ -8,15 +9,14 @@ export default function MonitorCard({
   meterLevel,
   isOn,
   onToggle,
-  onRemove,
 }: {
   external: ExternalOutputBrief;
   device: DeviceBrief | undefined;
   meterLevel: number;
   isOn: boolean;
   onToggle: (externalId: string, on: boolean) => void;
-  onRemove: (externalId: string) => void;
 }) {
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const statusLabel = device ? DEVICE_STATUS_LABEL[device.status] : "未知";
 
   return (
@@ -68,12 +68,25 @@ export default function MonitorCard({
             </div>
           </div>
 
-          <button
-            className="btn-remove-card"
-            onClick={() => onRemove(external.id)}
+          <div
+            className={`node-options-toggle ${optionsOpen ? "open" : ""}`}
+            onClick={() => setOptionsOpen((v) => !v)}
           >
-            移除外部输出
-          </button>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+            <span>Options</span>
+          </div>
+          <div className={`node-options-content ${optionsOpen ? "show" : ""}`}>
+            <span className="option-hint">暂无可用选项</span>
+          </div>
         </div>
       </div>
     </div>
