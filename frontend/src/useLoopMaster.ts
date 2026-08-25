@@ -5,11 +5,13 @@ import {
   getRouteSnapshot,
   listAudioProcesses,
   listDevices,
+  loadConfig,
   onDeviceLost,
   onDeviceRestored,
   onEngineStateChanged,
   onEngineStatsChanged,
   requestReconnect,
+  saveConfig,
   startEngine,
   stopEngine,
   type RouteEditRequest,
@@ -157,6 +159,8 @@ export function useLoopMaster() {
         showNotice(formatError(e), "error");
       } finally {
         if (!isSend) busyRef.current = false;
+        // 自动持久化：每次编辑后把最新草稿写入配置文件（失败静默，不阻断操作）。
+        await saveConfig().catch(() => {});
         await refreshRoute();
         await refreshEngineState();
       }
@@ -429,13 +433,85 @@ function cleanProcessName(name: string): string {
     [runEdit],
   );
 
+  // ---------- 节点重命名 ----------
+
+  /** 重命名音源（仅改显示名，不影响拓扑；引擎需重启才反映到运行中图）。 */
+  const renameSource = useCallback(
+    async (id: string, displayName: string) => {
+      await runEdit(
+        { op: "set_source_name", id, display_name: displayName },
+        "已重命名音源",
+      );
+    },
+    [runEdit],
+  );
+
+  /** 重命名输出通道。 */
+  const renameOutputChannel = useCallback(
+    async (id: string, displayName: string) => {
+      await runEdit(
+        { op: "set_output_channel_name", id, display_name: displayName },
+        "已重命名输出通道",
+      );
+    },
+    [runEdit],
+  );
+
+  /** 重命名外部输出（Monitor）。 */
+  const renameExternalOutput = useCallback(
+    async (id: string, displayName: string) => {
+      await runEdit(
+        { op: "set_external_output_name", id, display_name: displayName },
+        "已重命名外部输出",
+      );
+    },
+    [runEdit],
+  );
+
+  // ---------- send 通道映射（channel map）编辑 ----------
+
+  /**
+   * 设置某条 send 的通道映射（input -> output 声道映射）。
+   * 该变更无对应的引擎热更新命令，需重启引擎才能生效；若引擎正在运行会
+   * 在 runEdit 内自动重启以应用（channel map 属拓扑级参数）。
+   */
+  const setSendChannelMap = useCallback(
+    async (sendId: string, channelMap: [number, number][]) => {
+      await runEdit(
+        {
+          op: "set_send_channel_map",
+          id: sendId,
+          channel_map: channelMap,
+        },
+        "已更新通道映射（重启引擎生效）",
+      );
+    },
+    [runEdit],
+  );
+
   // ---------- 事件订阅 ----------
 
   useEffect(() => {
     void (async () => {
-      await refreshAll();
-      // 路由为空时建立默认拓扑（1 输出通道 + 1 外部输出并连线）
-      await ensureDefaultTopology();
+      // 1) 设备/进程/引擎状态先行刷新（loadConfig 不依赖它们）。
+      await Promise.all([refreshDevices(), refreshProcesses(), refreshEngineState()]);
+      // 2) 尝试加载上次保存的路由配置。
+      let loaded = false;
+      try {
+        loaded = await loadConfig();
+      } catch (e) {
+        showNotice(formatError(e), "error");
+      }
+      if (loaded) {
+        // 已加载配置：直接刷新快照，不建立默认拓扑。
+        await refreshRoute();
+      } else {
+        // 无配置文件：刷新空快照后建立默认拓扑（仅首启/清空时）。
+        await refreshRoute();
+        await ensureDefaultTopology();
+        // 默认拓扑建立后自动持久化一次，避免下次启动又走默认初始化。
+        await saveConfig().catch(() => {});
+      }
     })();
 
     const unState = onEngineStateChanged((payload) => {
@@ -467,6 +543,56 @@ function cleanProcessName(name: string): string {
     return Math.round(raw * 100);
   }, [stats]);
 
+  // 把幅度（0..1）映射为 0..100 的电平值并夹紧。
+  const ampToLevel = useCallback((amp: number) => {
+    const raw = Math.min(1, Math.max(0, amp));
+    return Math.round(raw * 100);
+  }, []);
+
+  // 每条 send 的逐通道（L/R）峰值，键为 send id，值为 [L(0..100), R(0..100)]。
+  const sendMeter = useMemo(() => {
+    const map: Record<string, [number, number]> = {};
+    if (stats?.send_peaks) {
+      for (const [id, [l, r]] of Object.entries(stats.send_peaks)) {
+        map[id] = [ampToLevel(l), ampToLevel(r)];
+      }
+    }
+    return map;
+  }, [stats, ampToLevel]);
+
+  // 聚合某节点所有相关 send 的逐通道峰值（取 max），得到该节点的 L/R 电平。
+  // source / external 的 send 由 route 关联；channel 作为 send 的任一端参与。
+  const nodeMeter = useCallback(
+    (sendIds: string[]): [number, number] => {
+      let l = 0;
+      let r = 0;
+      for (const id of sendIds) {
+        const m = sendMeter[id];
+        if (m) {
+          if (m[0] > l) l = m[0];
+          if (m[1] > r) r = m[1];
+        }
+      }
+      return [l, r];
+    },
+    [sendMeter],
+  );
+
+  const sourceSendIds = useCallback(
+    (sourceId: string) => route.sends.filter((s) => s.source === sourceId).map((s) => s.id),
+    [route.sends],
+  );
+  const externalSendIds = useCallback(
+    (externalId: string) =>
+      route.sends.filter((s) => s.external_output === externalId).map((s) => s.id),
+    [route.sends],
+  );
+  const channelSendIds = useCallback(
+    (channelId: string) =>
+      route.sends.filter((s) => s.output_channel === channelId).map((s) => s.id),
+    [route.sends],
+  );
+
   return {
     captureDevices,
     renderDevices,
@@ -477,6 +603,11 @@ function cleanProcessName(name: string): string {
     notice,
     loading,
     meterLevel,
+    sendMeter,
+    nodeMeter,
+    sourceSendIds,
+    externalSendIds,
+    channelSendIds,
     setNotice,
     refreshAll,
     refreshDevices,
@@ -498,6 +629,10 @@ function cleanProcessName(name: string): string {
     setSendEnabled,
     setSendMuted,
     setSendGain,
+    renameSource,
+    renameOutputChannel,
+    renameExternalOutput,
+    setSendChannelMap,
   };
 }
 

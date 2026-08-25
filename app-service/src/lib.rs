@@ -862,8 +862,8 @@ fn spawn_event_loop(inner: Arc<EngineServiceInner>, stop: Arc<AtomicBool>) -> Jo
                     publish_transition(&inner, last_state, status.state);
                     last_state = Some(status.state);
                 }
-                if last_stats != Some(status.stats) {
-                    last_stats = Some(status.stats);
+                if last_stats.as_ref() != Some(&status.stats) {
+                    last_stats = Some(status.stats.clone());
                     broadcast(&inner, ServiceEvent::StatsChanged(status.stats));
                 }
                 thread::sleep(EVENT_POLL_INTERVAL);

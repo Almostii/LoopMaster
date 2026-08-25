@@ -62,10 +62,26 @@ export interface RouteEditRequest {
   enabled?: boolean;
   muted?: boolean;
   gain_db?: number;
+  channel_map?: [number, number][];
 }
 
 export function applyRouteEdit(request: RouteEditRequest): Promise<void> {
   return invoke("apply_route_edit", { request });
+}
+
+// ---------- 配置持久化 ----------
+
+/** 保存当前路由配置到本地配置文件（原子写入）。 */
+export function saveConfig(): Promise<void> {
+  return invoke("save_config");
+}
+
+/**
+ * 从本地配置文件加载路由，替换当前编辑草稿。
+ * 返回 true 表示已加载配置，false 表示文件不存在（需建立默认拓扑）。
+ */
+export function loadConfig(): Promise<boolean> {
+  return invoke<boolean>("load_config");
 }
 
 // ---------- 事件订阅 ----------
