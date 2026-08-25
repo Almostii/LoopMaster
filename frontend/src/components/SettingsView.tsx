@@ -1,14 +1,21 @@
-import { useState } from "react";
+import { useEffect } from "react";
+import type { AppSettings } from "../types";
 
 /**
- * 基础设置页 (占位骨架)。
- * 后续在此扩展具体设置项：音频引擎、设备默认、主题、快捷键等。
+ * 基础设置页。
+ * 数据来自 useLoopMaster 的 settings state，变更通过 onChange 上报并持久化。
  */
-export default function SettingsView() {
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark">("light");
-  const [startOnBoot, setStartOnBoot] = useState(false);
-  const [launchHidden, setLaunchHidden] = useState(false);
+export default function SettingsView({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (patch: Partial<AppSettings>) => void;
+}) {
+  // 主题应用到根元素 data-theme，供 CSS 变量切换（后续实现深色样式）。
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", settings.theme);
+  }, [settings.theme]);
 
   return (
     <div className="settings-view">
@@ -28,8 +35,8 @@ export default function SettingsView() {
           <div className="setting-control">
             <select
               className="setting-select"
-              value={theme}
-              onChange={(e) => setTheme(e.target.value as "light" | "dark")}
+              value={settings.theme}
+              onChange={(e) => onChange({ theme: e.target.value })}
             >
               <option value="light">浅色</option>
               <option value="dark">深色</option>
@@ -46,8 +53,8 @@ export default function SettingsView() {
             <label className="switch" title="开机自启动">
               <input
                 type="checkbox"
-                checked={startOnBoot}
-                onChange={(e) => setStartOnBoot(e.target.checked)}
+                checked={settings.start_on_boot}
+                onChange={(e) => onChange({ start_on_boot: e.target.checked })}
               />
               <span className="slider-round" />
             </label>
@@ -63,28 +70,13 @@ export default function SettingsView() {
             <label className="switch" title="启动时隐藏主窗口">
               <input
                 type="checkbox"
-                checked={launchHidden}
-                onChange={(e) => setLaunchHidden(e.target.checked)}
+                checked={settings.launch_hidden}
+                onChange={(e) => onChange({ launch_hidden: e.target.checked })}
               />
               <span className="slider-round" />
             </label>
           </div>
         </div>
-      </div>
-
-      <div className="settings-section">
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() => setShowAdvanced((v) => !v)}
-        >
-          {showAdvanced ? "收起高级选项" : "高级选项"}
-        </button>
-        {showAdvanced && (
-          <p className="setting-hint">
-            高级选项尚未实现，待确认具体需求后补充。
-          </p>
-        )}
       </div>
     </div>
   );
