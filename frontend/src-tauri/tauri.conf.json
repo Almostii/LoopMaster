@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "LoopMaster 音频路由",
         "width": 1024,
         "height": 700
