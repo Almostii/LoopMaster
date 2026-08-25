@@ -13,9 +13,12 @@
     "windows": [
       {
         "label": "main",
-        "title": "LoopMaster 音频路由",
+        "title": "LoopMaster",
         "width": 1024,
-        "height": 700
+        "height": 700,
+        "decorations": false,
+        "transparent": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {
