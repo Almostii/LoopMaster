@@ -290,6 +290,7 @@ button:disabled {
 /* ---------------- 画布容器 ---------------- */
 .router-canvas-wrap {
   flex: 1;
+  min-width: 0;
   background: var(--bg-canvas);
   position: relative;
   display: flex;
@@ -308,11 +309,11 @@ button:disabled {
 /* ---------------- 三列网格 ---------------- */
 .topology-grid {
   display: grid;
-  grid-template-columns: minmax(230px, 1fr) minmax(230px, 1fr) minmax(230px, 1fr);
-  gap: 52px;
+  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr);
+  gap: 32px;
   position: relative;
   z-index: 5;
-  min-width: 760px;
+  min-width: 0;
 }
 
 .topology-col {
@@ -1066,9 +1067,9 @@ button:disabled {
   overflow: hidden;
 }
 
-/* ---------------- 侧边栏 (窗口向左扩展) ---------------- */
-/* 侧边栏展开时占左侧 220px, 收起时用负 margin 移到屏外;
-   同时由前端把窗口向左扩展 220px, 保证主内容宽度不变 */
+/* ---------------- 侧边栏 (向窗口内弹出) ---------------- */
+/* 侧边栏作为 flex 子元素占左侧空间, 展开时挤压主内容而非遮挡;
+   收起时宽度收为 0, 主内容占满窗口 */
 .sidebar {
   width: 220px;
   flex: 0 0 220px;
@@ -1076,12 +1077,13 @@ button:disabled {
   border-right: 1px solid var(--border-light);
   display: flex;
   flex-direction: column;
-  transition: margin-left 0.22s ease;
+  transition: width 0.22s ease, flex-basis 0.22s ease;
   overflow: hidden;
   flex-shrink: 0;
 }
 .sidebar.is-collapsed {
-  margin-left: -220px;
+  width: 0;
+  flex-basis: 0;
 }
 
 .sidebar-nav {
