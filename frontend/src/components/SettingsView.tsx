@@ -9,8 +9,6 @@ export default function SettingsView() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [startOnBoot, setStartOnBoot] = useState(false);
   const [launchHidden, setLaunchHidden] = useState(false);
-  const [sampleRate, setSampleRate] = useState(48000);
-  const [bufferSize, setBufferSize] = useState(512);
 
   return (
     <div className="settings-view">
@@ -70,47 +68,6 @@ export default function SettingsView() {
               />
               <span className="slider-round" />
             </label>
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <h3 className="settings-section-title">音频引擎</h3>
-
-        <div className="setting-row">
-          <div className="setting-info">
-            <div className="setting-label">采样率</div>
-            <div className="setting-desc">音频引擎输出采样率 (Hz)</div>
-          </div>
-          <div className="setting-control">
-            <select
-              className="setting-select"
-              value={sampleRate}
-              onChange={(e) => setSampleRate(Number(e.target.value))}
-            >
-              <option value={44100}>44100 Hz</option>
-              <option value={48000}>48000 Hz</option>
-              <option value={96000}>96000 Hz</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="setting-row">
-          <div className="setting-info">
-            <div className="setting-label">缓冲大小</div>
-            <div className="setting-desc">音频缓冲区样本数 (越小延迟越低)</div>
-          </div>
-          <div className="setting-control">
-            <select
-              className="setting-select"
-              value={bufferSize}
-              onChange={(e) => setBufferSize(Number(e.target.value))}
-            >
-              <option value={256}>256</option>
-              <option value={512}>512</option>
-              <option value={1024}>1024</option>
-              <option value={2048}>2048</option>
-            </select>
           </div>
         </div>
       </div>
