@@ -302,7 +302,7 @@ function App() {
             >
               {route.sources.length === 0 ? (
                 <div className="empty-card">点击上方 + 添加音源。</div>
-              ) (
+              ) : (
                 route.sources.map((s) => (
                   <SourceCard
                     key={s.id}
