@@ -2,16 +2,23 @@
 
 正式前端技术栈为 `Tauri 2 + React + TypeScript`。本目录是前端工程，独立于根 Rust workspace，通过 `frontend/src-tauri` 路径依赖 `app-service` 作为唯一业务服务边界。
 
-## 当前状态（2026-08-25，分支 `codex/feature-tauri-init`）
+## 当前状态（2026-08-25，阶段 A + 阶段 B 完成）
 
-已完成第一阶段壳层初始化：
+### 阶段 A：壳层初始化（已合并）
 
-- Tauri 2 官方 React + TypeScript 模板已在本目录生成；
+- Tauri 2 官方 React + TypeScript 模板；
 - 最小窗口可启动，标题为「LoopMaster 音频路由」；
-- `frontend/src-tauri` 作为独立 Tauri crate（声明独立 `[workspace]`），通过路径依赖使用 `app-service`；
-- 提供 `list_devices` command 作为 src-tauri 访问 app-service 的最小验证接口；
-- React 最小页面调用 `list_devices` 展示设备枚举，用于验证命令链路；
-- `package-lock.json` 与 `src-tauri/Cargo.lock` 已提交，`node_modules`、`dist`、`target`、`gen/schemas` 均不入库。
+- `frontend/src-tauri` 作为独立 Tauri crate（声明独立 `[workspace]`），通过路径依赖使用 `app-service`。
+
+### 阶段 B：command/event 适配层闭环（分支 `codex/feature-tauri-command-event`）
+
+Tauri command/event 适配层已建立，React 通过命令访问 app-service、通过事件订阅引擎状态：
+
+- 只读命令：`list_devices`、`list_audio_processes`、`get_route_snapshot`、`get_engine_state`、`get_engine_stats`；
+- 写命令：`start_engine`、`stop_engine`、`request_reconnect`、`apply_route_edit`（拓扑变化会返回「需要重启」结构化错误）；
+- 事件：`engine-state-changed`、`engine-stats-changed`、`device-lost`、`device-restored`；
+- 引擎在首次 `start_engine` 时惰性创建（空图无法初始化，需至少一个 source 和一个 sink）；
+- React 界面：引擎状态徽标、引擎控制、音源添加、输出目标添加、路由连线、设备列表、状态/统计与错误/提示展示（中文界面）。
 
 ## 常用命令
 
@@ -19,8 +26,9 @@
 cd frontend
 npm install
 npm run tauri dev      # 启动 Tauri 开发窗口
-npm run build          # 仅前端构建
+npm run build          # 仅前端构建（tsc + vite）
 npx tauri build --no-bundle  # 构建应用二进制（不含安装器）
+cd src-tauri && cargo test   # 运行适配层单元测试
 ```
 
 ## 约定
@@ -34,4 +42,4 @@ npx tauri build --no-bundle  # 构建应用二进制（不含安装器）
 
 ## 后续
 
-下一阶段（阶段 B）实现 Tauri command/event 适配层闭环：`list_devices`、`list_audio_processes`、`get_route_snapshot`、引擎启停/重连、路由编辑，以及状态/统计/设备丢失恢复事件，再进入主路由工作区 MVP。
+阶段 C：实现主路由工作区 MVP（完整 Sources → Output Channels → External Outputs/Monitors 可视化路由表，每条 send 的启用/静音/增益/channel map，设备流向/格式/声道/兼容性/缺失状态，实时峰值/FIFO/discontinuity/重连次数）。阶段 D 前需真实设备门禁。
