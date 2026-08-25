@@ -35,6 +35,13 @@ export interface ExternalOutputBrief {
   display_name: string;
 }
 
+/** 应用设置（设置页持久化内容）。 */
+export interface AppSettings {
+  theme: string;
+  start_on_boot: boolean;
+  launch_hidden: boolean;
+}
+
 export interface SendBrief {
   id: string;
   source: string | null;
