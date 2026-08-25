@@ -1071,8 +1071,8 @@ button:disabled {
 /* 侧边栏作为 flex 子元素占左侧空间, 展开时挤压主内容而非遮挡;
    收起时宽度收为 0, 主内容占满窗口 */
 .sidebar {
-  width: 220px;
-  flex: 0 0 220px;
+  width: 172px;
+  flex: 0 0 172px;
   background: #f7f8fa;
   border-right: 1px solid var(--border-light);
   display: flex;
