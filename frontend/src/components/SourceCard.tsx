@@ -19,7 +19,6 @@ export default function SourceCard({
   onSetGain,
   onSetMuted,
   onRename,
-  onSetChannelMap,
   onSelect,
 }: {
   source: SourceBrief;

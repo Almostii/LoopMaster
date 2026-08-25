@@ -23,11 +23,22 @@ export default function TitleBar({
 
   const appWindow = getCurrentWindow();
 
+  // 拖拽区域的事件处理：Tauri 2 使用 data-tauri-drag-region 属性实现拖动，
+  // 需要 core:window:allow-start-dragging 权限。mousedown 命中可交互元素
+  // (按钮/开关/输入)时停止事件冒泡，避免误触发拖动。
+  function handleDragMouseDown(e: React.MouseEvent) {
+    const target = e.target as HTMLElement;
+    const interactive = target.closest("button, input, label.switch, a");
+    if (interactive) {
+      e.stopPropagation();
+    }
+  }
+
   async function handleMinimize() {
     try {
       await appWindow.minimize();
-    } catch (e) {
-      console.error("最小化窗口失败:", e);
+    } catch (err) {
+      console.error("最小化窗口失败:", err);
     }
   }
 
@@ -39,8 +50,8 @@ export default function TitleBar({
       } else {
         await appWindow.toggleMaximize();
       }
-    } catch (e) {
-      console.error("切换最大化失败:", e);
+    } catch (err) {
+      console.error("切换最大化失败:", err);
     }
   }
 
@@ -48,21 +59,25 @@ export default function TitleBar({
     // 后端 on_window_event 已拦截 CloseRequested 并 hide，前端调用 close 即可
     try {
       await appWindow.close();
-    } catch (e) {
-      console.error("关闭窗口失败:", e);
+    } catch (err) {
+      console.error("关闭窗口失败:", err);
     }
   }
 
   return (
-    <header className="titlebar" data-tauri-drag-region>
+    <header
+      className="titlebar"
+      data-tauri-drag-region
+      onMouseDown={handleDragMouseDown}
+    >
       <div className="titlebar-left">
-        <div className="brand-icon" data-tauri-drag-region>
+        <div className="brand-icon">
           <img src="/loopmaster-logo.svg" alt="" />
         </div>
         <span className="titlebar-app-name">LoopMaster</span>
       </div>
 
-      <div className="titlebar-center" data-tauri-drag-region>
+      <div className="titlebar-center">
         <div className={badgeClass} id="engine-status-badge">
           <span className={dotClass} />
           <span>音频路由 · {stateLabel}</span>
@@ -75,11 +90,7 @@ export default function TitleBar({
       </div>
 
       <div className="titlebar-right">
-        <label
-          className="switch"
-          title="总引擎开关"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <label className="switch" title="总引擎开关">
           <input
             type="checkbox"
             checked={engineState.running}
