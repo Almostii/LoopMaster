@@ -93,9 +93,12 @@ export default function WireLayer({
     return () => container.removeEventListener("pointerdown", onPointerDown);
   }, [svgRef, onWireClick]);
 
-  // 全局鼠标移动与松开：绘制临时连线 + 吸附
+  // 全局指针移动与松开：绘制临时连线 + 吸附
+  // 注意：必须使用 pointer 事件而非 mouse 事件。onPointerDown 中对
+  // pointerdown 调用了 preventDefault()，这会抑制浏览器生成的兼容 mouse
+  // 事件（mousemove/mouseup），若此处用 mouse 监听则拖拽完全收不到事件。
   useEffect(() => {
-    function onMove(e: MouseEvent) {
+    function onMove(e: PointerEvent) {
       const drag = dragRef.current;
       if (!drag || !svgRef.current) return;
       const svgRect = svgRef.current.getBoundingClientRect();
@@ -138,11 +141,11 @@ export default function WireLayer({
       setTemp(null);
     }
 
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
     return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
     };
   }, [onConnect, svgRef]);
 
