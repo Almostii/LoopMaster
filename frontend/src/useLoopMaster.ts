@@ -3,6 +3,7 @@ import {
   applyRouteEdit,
   getEngineState,
   getRouteSnapshot,
+  getSettings,
   listAudioProcesses,
   listDevices,
   loadConfig,
@@ -14,10 +15,12 @@ import {
   saveConfig,
   startEngine,
   stopEngine,
+  updateSettings as apiUpdateSettings,
   type RouteEditRequest,
 } from "./api";
 import { formatError, freshId } from "./lib";
 import type {
+  AppSettings,
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
@@ -49,6 +52,11 @@ export function useLoopMaster() {
   const [stats, setStats] = useState<EngineStatsEvent | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [loading, setLoading] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>({
+    theme: "light",
+    start_on_boot: false,
+    launch_hidden: false,
+  });
 
   const busyRef = useRef(false);
   const engineStateRef = useRef(engineState);
@@ -593,6 +601,30 @@ function cleanProcessName(name: string): string {
     [route.sends],
   );
 
+  /** 从后端加载应用设置并同步到本地 state。 */
+  const loadSettings = useCallback(async () => {
+    try {
+      const s = await getSettings();
+      setSettings(s);
+    } catch (e) {
+      console.error("加载设置失败:", e);
+    }
+  }, []);
+
+  /** 更新应用设置并持久化，成功后同步本地 state。 */
+  const updateSettings = useCallback(
+    async (patch: Partial<AppSettings>) => {
+      const next = await apiUpdateSettings({
+        theme: patch.theme,
+        start_on_boot: patch.start_on_boot,
+        launch_hidden: patch.launch_hidden,
+      });
+      setSettings(next);
+      return next;
+    },
+    [],
+  );
+
   return {
     captureDevices,
     renderDevices,
@@ -602,6 +634,9 @@ function cleanProcessName(name: string): string {
     stats,
     notice,
     loading,
+    settings,
+    loadSettings,
+    updateSettings,
     meterLevel,
     sendMeter,
     nodeMeter,

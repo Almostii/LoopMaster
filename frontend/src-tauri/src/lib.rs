@@ -34,6 +34,7 @@ use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineSt
 use tauri::Emitter;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri_plugin_autostart::ManagerExt;
 
 // ---------------------------------------------------------------------------
 // 前端 DTO（稳定、可审查，不直接暴露 Windows/引擎内部类型）
@@ -222,10 +223,59 @@ enum RouteEditRequest {
 ///
 /// `config_path` 为自动保存的目标配置文件（位于 Tauri `app_config_dir`
 /// 下的 `config.json`）；路径在启动时解析一次，命令层只负责读写。
+/// 应用设置 DTO（前端设置页持久化的内容）。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AppSettings {
+    theme: String,
+    start_on_boot: bool,
+    launch_hidden: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: "light".into(),
+            start_on_boot: false,
+            launch_hidden: false,
+        }
+    }
+}
+
+impl AppSettings {
+    /// 从配置文件的 `ui_state` 提取设置，读取失败或文件缺失时回退默认。
+    fn load_from_config(config_path: &std::path::Path) -> Self {
+        match AppConfig::load_from(config_path) {
+            Ok(config) => Self {
+                theme: config.ui_state.theme().to_string(),
+                start_on_boot: config.ui_state.start_on_boot,
+                launch_hidden: config.ui_state.launch_hidden,
+            },
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// 将设置合并回现有配置（保留路由图与缺失设备标记）并写盘。
+    fn save_to_config(&self, config_path: &std::path::Path) -> Result<(), ServiceErrorBrief> {
+        let mut config = match AppConfig::load_from(config_path) {
+            Ok(config) => config,
+            Err(ConfigError::NotFound(_)) => {
+                // 尚无配置文件：以空图构造，再由路由保存流程补充图内容。
+                AppConfig::new(loopmaster_audio_core::RouteGraph::default())
+            }
+            Err(e) => return Err(config_error_brief(e)),
+        };
+        config.ui_state.theme = self.theme.clone();
+        config.ui_state.start_on_boot = self.start_on_boot;
+        config.ui_state.launch_hidden = self.launch_hidden;
+        config.save_to(config_path).map_err(config_error_brief)
+    }
+}
+
 struct AppState {
     editor: Mutex<RouteEditor>,
     engine: Mutex<Option<EngineService>>,
     config_path: PathBuf,
+    settings: Mutex<AppSettings>,
 }
 
 impl AppState {
@@ -234,6 +284,7 @@ impl AppState {
             editor: Mutex::new(RouteEditor::new(RouteGraph::default())),
             engine: Mutex::new(None),
             config_path,
+            settings: Mutex::new(AppSettings::default()),
         }
     }
 }
@@ -554,8 +605,17 @@ fn save_config(
         .editor
         .lock()
         .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
-    let config = AppConfig::new(editor.draft().clone());
+    let mut config = AppConfig::new(editor.draft().clone());
     drop(editor);
+    // 保留运行期设置，避免路由保存把设置字段重置为默认。
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?
+        .clone();
+    config.ui_state.theme = settings.theme;
+    config.ui_state.start_on_boot = settings.start_on_boot;
+    config.ui_state.launch_hidden = settings.launch_hidden;
     config
         .save_to(&state.config_path)
         .map_err(config_error_brief)
@@ -583,6 +643,64 @@ fn load_config(
         .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
     *editor = RouteEditor::new(graph);
     Ok(true)
+}
+
+/// 读取当前应用设置。
+#[tauri::command]
+fn get_settings(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> AppSettings {
+    let settings = state
+        .settings
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    settings
+}
+
+/// 更新应用设置并持久化到配置文件。
+///
+/// `theme` 为 `"light"` / `"dark"`，非法值回退为 `"light"`。更新成功后写盘
+/// 保留现有路由图，并同步到运行期设置缓存。
+#[tauri::command]
+fn update_settings(
+    theme: Option<String>,
+    start_on_boot: Option<bool>,
+    launch_hidden: Option<bool>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AppSettings, ServiceErrorBrief> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?
+        .clone();
+    if let Some(t) = theme {
+        settings.theme = if t == "dark" { "dark".into() } else { "light".into() };
+    }
+    if let Some(v) = start_on_boot {
+        settings.start_on_boot = v;
+        // 同步系统开机自启状态
+        let auto = app.autolaunch();
+        let result = if v {
+            auto.enable()
+        } else {
+            auto.disable()
+        };
+        if let Err(e) = result {
+            eprintln!("更新开机自启失败: {e}");
+        }
+    }
+    if let Some(v) = launch_hidden {
+        settings.launch_hidden = v;
+    }
+    settings.save_to_config(&state.config_path)?;
+    let mut slot = state
+        .settings
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    *slot = settings.clone();
+    Ok(settings)
 }
 
 /// 可重命名节点类型。
@@ -1053,10 +1171,23 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let handle = app.handle().clone();
             let config_path = resolve_config_path(&handle);
-            app.manage(Arc::new(AppState::new(config_path)));
+            let settings = AppSettings::load_from_config(&config_path);
+            let state = Arc::new(AppState::new(config_path));
+            {
+                let mut slot = state
+                    .settings
+                    .lock()
+                    .expect("设置锁未中毒");
+                *slot = settings.clone();
+            }
+            app.manage(state);
 
             // 系统托盘常驻：创建托盘图标与菜单（显示/隐藏/退出）
             if let Err(e) = setup_tray(app) {
@@ -1076,6 +1207,13 @@ pub fn run() {
                 });
             }
 
+            // 启动时若配置了"隐藏主窗口"，则不显示（仅驻留托盘）
+            if settings.launch_hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1092,6 +1230,8 @@ pub fn run() {
             process_icon_data_uri,
             save_config,
             load_config,
+            get_settings,
+            update_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

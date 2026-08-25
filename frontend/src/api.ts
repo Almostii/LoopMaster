@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  AppSettings,
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
@@ -82,6 +83,29 @@ export function saveConfig(): Promise<void> {
  */
 export function loadConfig(): Promise<boolean> {
   return invoke<boolean>("load_config");
+}
+
+// ---------- 应用设置 ----------
+
+/** 读取当前应用设置（主题/开机自启/启动隐藏）。 */
+export function getSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>("get_settings");
+}
+
+/**
+ * 更新应用设置并持久化。未提供的字段保持不变。
+ * @returns 更新后的完整设置。
+ */
+export function updateSettings(patch: {
+  theme?: string;
+  start_on_boot?: boolean;
+  launch_hidden?: boolean;
+}): Promise<AppSettings> {
+  return invoke<AppSettings>("update_settings", {
+    theme: patch.theme,
+    startOnBoot: patch.start_on_boot,
+    launchHidden: patch.launch_hidden,
+  });
 }
 
 // ---------- 事件订阅 ----------

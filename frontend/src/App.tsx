@@ -52,6 +52,9 @@ function App() {
     route,
     engineState,
     notice,
+    settings,
+    loadSettings,
+    updateSettings,
     nodeMeter,
     sourceSendIds,
     externalSendIds,
@@ -89,6 +92,12 @@ function App() {
   // 侧边栏状态 (默认展开, 向窗口内弹出, 不遮挡 sources)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeView, setActiveView] = useState<string>("router");
+
+  // 应用启动时加载持久化的设置
+  useEffect(() => {
+    void loadSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 应用启动/路由变化时，为已存在的进程来源补齐图标。
   useEffect(() => {
@@ -397,7 +406,10 @@ function App() {
         />
 
         {activeView === "settings" ? (
-          <SettingsView />
+          <SettingsView
+            settings={settings}
+            onChange={(patch) => void updateSettings(patch)}
+          />
         ) : activeView === "router" ? (
           <div className="router-canvas-wrap">
         <div className="topology-viewport" id="topology-viewport" onClick={handleCanvasClick}>
