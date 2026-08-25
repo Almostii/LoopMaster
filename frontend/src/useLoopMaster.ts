@@ -5,11 +5,13 @@ import {
   getRouteSnapshot,
   listAudioProcesses,
   listDevices,
+  loadConfig,
   onDeviceLost,
   onDeviceRestored,
   onEngineStateChanged,
   onEngineStatsChanged,
   requestReconnect,
+  saveConfig,
   startEngine,
   stopEngine,
   type RouteEditRequest,
@@ -157,6 +159,8 @@ export function useLoopMaster() {
         showNotice(formatError(e), "error");
       } finally {
         if (!isSend) busyRef.current = false;
+        // 自动持久化：每次编辑后把最新草稿写入配置文件（失败静默，不阻断操作）。
+        await saveConfig().catch(() => {});
         await refreshRoute();
         await refreshEngineState();
       }
@@ -433,9 +437,25 @@ function cleanProcessName(name: string): string {
 
   useEffect(() => {
     void (async () => {
-      await refreshAll();
-      // 路由为空时建立默认拓扑（1 输出通道 + 1 外部输出并连线）
-      await ensureDefaultTopology();
+      // 1) 设备/进程/引擎状态先行刷新（loadConfig 不依赖它们）。
+      await Promise.all([refreshDevices(), refreshProcesses(), refreshEngineState()]);
+      // 2) 尝试加载上次保存的路由配置。
+      let loaded = false;
+      try {
+        loaded = await loadConfig();
+      } catch (e) {
+        showNotice(formatError(e), "error");
+      }
+      if (loaded) {
+        // 已加载配置：直接刷新快照，不建立默认拓扑。
+        await refreshRoute();
+      } else {
+        // 无配置文件：刷新空快照后建立默认拓扑（仅首启/清空时）。
+        await refreshRoute();
+        await ensureDefaultTopology();
+        // 默认拓扑建立后自动持久化一次，避免下次启动又走默认初始化。
+        await saveConfig().catch(() => {});
+      }
     })();
 
     const unState = onEngineStateChanged((payload) => {
