@@ -372,7 +372,6 @@ function App() {
                     meterLevel={meterLevel}
                     isOn={isExternalEnabled(route, ext.id)}
                     onToggle={handleToggleExternal}
-                    onRemove={(id) => void removeExternalOutput(id)}
                   />
                 ))
               )}
