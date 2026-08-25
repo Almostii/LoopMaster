@@ -1417,7 +1417,8 @@ button:disabled {
 [data-theme="dark"] .sidebar,
 [data-theme="dark"] .sidebar-nav,
 [data-theme="dark"] .sidebar-footer-nav,
-[data-theme="dark"] .node-top-row {
+[data-theme="dark"] .node-top-row,
+[data-theme="dark"] .canvas-footer {
   background: var(--bg-card);
 }
 
