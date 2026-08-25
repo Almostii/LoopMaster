@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { formatDb, sendsForSource } from "../lib";
 import type { RouteProfileSnapshot, SourceBrief } from "../types";
-import { ChannelMapEditor, LoopToggle, VuMeter } from "./ui";
+import { LoopToggle, VuMeter } from "./ui";
 
 function stopProp(e: React.MouseEvent) {
   e.stopPropagation();
@@ -33,7 +33,6 @@ export default function SourceCard({
   onSetGain: (sendId: string, gainDb: number) => void;
   onSetMuted: (sendId: string, muted: boolean) => void;
   onRename: (sourceId: string, name: string) => void;
-  onSetChannelMap: (sendId: string, channelMap: [number, number][]) => void;
   onSelect: () => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -42,9 +41,6 @@ export default function SourceCard({
   const sends = sendsForSource(route, source.id);
   // 增益/静音作用于该音源的首条 send
   const primarySend = sends[0];
-  const [cmDraft, setCmDraft] = useState<[number, number][]>(
-    primarySend?.channel_map ?? [],
-  );
 
   function commitName() {
     const next = nameDraft.trim();
@@ -190,23 +186,7 @@ export default function SourceCard({
                     onChange={(e) => onSetMuted(primarySend.id, e.target.checked)}
                   />
                 </div>
-                <div className="option-row">
-                  <span className="option-label">通道映射</span>
-                  <ChannelMapEditor
-                    channelMap={cmDraft}
-                    onChange={setCmDraft}
-                  />
-                </div>
-                <button
-                  type="button"
-                  className="btn-apply"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSetChannelMap(primarySend.id, cmDraft);
-                  }}
-                >
-                  应用通道映射
-                </button>
+
               </>
             ) : (
               <span className="option-hint">尚未连线，无法设置增益/静音</span>

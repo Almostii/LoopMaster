@@ -75,7 +75,6 @@ function App() {
     renameSource,
     renameOutputChannel,
     renameExternalOutput,
-    setSendChannelMap,
   } = useLoopMaster();
 
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -362,7 +361,6 @@ function App() {
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
                     onSetMuted={(sendId, m) => void setSendMuted(sendId, m)}
                     onRename={(id, name) => void renameSource(id, name)}
-                    onSetChannelMap={(id, cm) => void setSendChannelMap(id, cm)}
                     onSelect={() => setSelectedCard({ type: "source", id: s.id })}
                   />
                   );
@@ -435,7 +433,6 @@ function App() {
                     onToggle={handleToggleExternal}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
                     onRename={(id, name) => void renameExternalOutput(id, name)}
-                    onSetChannelMap={(id, cm) => void setSendChannelMap(id, cm)}
                     onSelect={() => setSelectedCard({ type: "external", id: ext.id })}
                   />
                   );
