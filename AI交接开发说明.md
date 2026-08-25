@@ -63,16 +63,16 @@
 
 1. 进程来源只能是有 WASAPI 音频会话的程序。没有播放音频的程序不会出现在列表，这是设计边界，不要改成枚举全部进程后假装都可捕获。
 2. 当前刷新是手动触发。后续可以接入 WASAPI 音频会话通知或低频自动刷新，但必须保持后台执行，不能在 React/Tauri UI 线程调用设备枚举。
-3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；尚未实现的是 Tauri command/event 适配层和产品层 DTO。
+3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；Tauri command/event 适配层（阶段 B）已建立，完整的产品层 Route Profile 预设管理 UI 与主路由工作区（阶段 C）尚未实现。
 4. 当前配置 schema v2 的 JSON 校验、稳定 endpoint ID、缺失设备标记、v1 到 v2 迁移和原子保存已实现；完整 Route Profile 预设管理 UI 尚未实现。
 5. 运行中 source/sink 拓扑变化会返回“需要重启”；未来 Tauri UI 必须把这个行为映射为 Route Profile 的明确状态，不能悄悄丢弃修改。
 6. 多声道转换不是动态多声道路由。若未来要让用户把输入的任意物理声道独立发送到输出的任意物理声道，必须重新设计动态声道数、channel map、FIFO、Mixer 和 UI，不能只放宽兼容判断。
 7. Process Loopback 的显式格式请求依赖 Windows 系统/驱动接受该格式，Initialize 失败必须报告，不得假设所有系统必然支持。
-8. 旧 Slint UI 已归档；Tauri 2 + React 前端壳层已初始化（`codex/feature-tauri-init`），但完整 command/event 适配层和产品层 DTO 尚未实现。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
+8. 旧 Slint UI 已归档；Tauri 2 + React 前端壳层（阶段 A）与 command/event 适配层（阶段 B）已实现，主路由工作区（阶段 C）和完整产品层 Route Profile DTO 尚未完成。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；Tauri 2 + React 壳层初始化（第一步）已完成。下一步实现 Tauri command/event 适配层，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；Tauri 2 + React 壳层初始化（第一步）与 command/event 适配层（第二步）已完成。下一步实现主路由工作区 MVP（第三步），而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
 ### 第一步：初始化 Tauri 2 + React 工程（已完成）
 
@@ -83,21 +83,17 @@
 - 提供 `list_devices` 作为访问 app-service 的最小验证接口；
 - 最小窗口可启动，React 开发构建可重复执行，Rust workspace 不引入前端依赖。
 
-### 第二步：实现 Tauri command/event 与服务的命令/事件闭环
+### 第二步：实现 Tauri command/event 与服务的命令/事件闭环（已完成）
 
-目标主要是 frontend/、新生成的 frontend/src-tauri/ 和 app-service。旧 app/ 不应重新恢复。
+已于 2026-08-25 在 `codex/feature-tauri-command-event` 完成，见 `Doc/Log/2026-08-25-tauri-command-event.md`：
 
-任务：
+- 只读命令：`list_devices`、`list_audio_processes`、`get_route_snapshot`（Route Profile 投影）、`get_engine_state`、`get_engine_stats`；
+- 写命令：`start_engine`（引擎惰性创建）、`stop_engine`、`request_reconnect`、`apply_route_edit`（拓扑变化返回「需要重启」结构化错误）；
+- 事件闭环：`engine-state-changed`、`engine-stats-changed`、`device-lost`、`device-restored`，React 订阅事件更新展示状态；
+- 引擎在首次 `start_engine` 惰性创建（空图无法初始化，需至少一个 source 和一个 sink）；
+- React 界面（中文）提供引擎控制、音源添加、输出目标添加、路由连线、设备列表与状态/统计展示。
 
-- UI 只维护展示模型和用户意图；
-- 后台服务线程执行引擎启动、停止、路由提交、重连和设备刷新；
-- UI 使用结构化事件更新 Running、Degraded、Reconnecting、Failed、Stopped；
-- 统计刷新使用有界消息/快照，不让 UI 轮询直接读取实时内部结构；
-- 设备/进程列表有 loading、empty、unavailable、error 状态；
-- 保留当前“刷新音源”按钮，后续可增加低频自动刷新或 WASAPI 会话通知；
-- 路由拓扑变化必须向用户显示“需要重启”，不能悄悄丢弃修改。
-
-验收：UI 操作不阻塞音频线程；设备拔出后 UI 显示 degraded/reconnecting；恢复后显示 restored；错误包含可执行建议；切换列表顺序不会改变已选 endpoint。
+验收：UI 操作不阻塞音频线程；设备拔出后 UI 显示 degraded/reconnecting；恢复后显示 restored；错误包含可执行建议；切换列表顺序不会改变已选 endpoint。真实设备（拔出/恢复、VB-CABLE 闭环）需在阶段 D 实机门禁验证。
 
 ### 第三步：完成真正的 Tauri 2 + React MVP
 
@@ -131,13 +127,13 @@
 
 ## 5. 下一位 agent 的执行要求
 
-Tauri 壳层初始化（第一步）已完成。下一轮进入阶段 B：实现 Tauri command/event 适配层闭环。执行时应：
+Tauri 壳层初始化（第一步）与 command/event 适配层（第二步）已完成。下一轮进入阶段 C：实现主路由工作区 MVP。执行时应：
 
-1. 阅读本文、Doc/Main/1-8、`Doc/Log/2026-08-25-tauri-react-init.md` 和最近三份 Doc/Log；
-2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并从最新 `main` 创建新的 `codex/` 分支，不在 `codex/feature-tauri-init` 上堆叠；
-3. 实现前先审查 `SendSpec`、`RouteEditor`、`EngineService`、`AudioEngine::update_graph`、`list_devices` 的真实接口与文档差异；
-4. 先实现只读命令与事件闭环（`list_devices`、`list_audio_processes`、`get_route_snapshot`、引擎状态/统计、设备丢失/恢复事件），再实现写操作（引擎启停/重连、路由编辑）；
-5. 定义并冻结产品层 Route Profile DTO（Sources、Output Channels、External Outputs/Monitors），不把内部 Bus/Sink 直接暴露为产品概念，拓扑变化向用户明确显示「需要重启」；
+1. 阅读本文、Doc/Main/1-8、`Doc/Log/2026-08-25-tauri-command-event.md` 和最近三份 Doc/Log；
+2. 检查 `git status --short --branch` 和 `git log`，确认当前不在 `main` 上直接开发，并从最新 `main` 创建新的 `codex/` 分支，不在已合并的阶段分支上堆叠；
+3. 实现前先审查 `RouteEditRequest`、`RouteProfileSnapshot`、`EngineService`、`apply_route_edit`、`get_route_snapshot` 的真实接口与文档差异；
+4. 在 `get_route_snapshot` 返回的 Route Profile 视图模型上实现主路由工作区，不把内部 Bus/Sink 直接暴露为产品概念，拓扑变化向用户明确显示「需要重启」；
+5. 冻结产品层 Route Profile DTO（Sources、Output Channels、External Outputs/Monitors），每条 send 的启用/静音/增益/channel map 在 UI 可编辑；
 6. 让子 agent 分别承担实现、测试/审查、文档记录，主 agent 负责拆分、验收和合并；
 7. 每个逻辑问题使用独立中文提交，完成后先跑自动检查，再合并到 main；
 8. 完成后更新 Doc/Log，说明已完成、未完成、验证结果和下一步。
