@@ -19,7 +19,7 @@
 
 `.workbuddy/` 已加入 `.gitignore`，其中内容仅供本地 AI 记忆和运行使用，不要修改、删除、暂存或提交其整体内容。Library/ 是本地参考资料目录，不属于 Git，也不允许读取后直接复制第三方代码进正式工程。旧 Slint 前端完整归档在 Library/LoopMaster-Slint-archive-2026-08-25/app/。
 
-项目是 Windows 用户态音频路由器，不创建虚拟音频驱动。输出目标是系统中已经存在的物理设备或 VB-CABLE 等虚拟 endpoint。内部音频格式是 48 kHz / 32-bit IEEE float / stereo。
+项目是 Windows 用户态音频路由器，不创建虚拟音频驱动。产品工作流按 Loopback 的概念组织为 Route Profile、Sources、Output Channels、External Outputs 和可选 Monitors；输出目标是系统中已经存在的物理设备或 VB-CABLE 等虚拟 endpoint。内部音频格式是 48 kHz / 32-bit IEEE float / stereo。
 
 ## 2. 已完成能力
 
@@ -36,7 +36,7 @@
 
 ### 应用服务和前端
 
-- app-service 已提供设备模型、进程模型、路由编辑器、引擎创建/启动/停止/更新图的 M1 API。
+- app-service 已提供设备模型、进程模型、内部 RouteGraph 编辑器、引擎创建/启动/停止/更新图的 M1 API；产品层 Route Profile DTO 尚需由 Tauri 适配层定义。
 - 旧 Slint UI 曾可枚举 Process Loopback 来源和 Render 输出设备，现已归档；当前没有正式可运行的前端。
 - 来源列表是当前存在 WASAPI 音频会话的进程，不是所有 Windows 进程。
 - 已修复来源列表只在启动时枚举一次的问题：顶部有“刷新音源”按钮，枚举在后台线程执行，UI 定时器只接收结果，不执行 WASAPI 枚举。
@@ -63,16 +63,16 @@
 
 1. 进程来源只能是有 WASAPI 音频会话的程序。没有播放音频的程序不会出现在列表，这是设计边界，不要改成枚举全部进程后假装都可捕获。
 2. 当前刷新是手动触发。后续可以接入 WASAPI 音频会话通知或低频自动刷新，但必须保持后台执行，不能在 React/Tauri UI 线程调用设备枚举。
-3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；尚未实现的是 Tauri command/event 适配层。
-4. 配置 v1 的 JSON 校验、稳定 endpoint ID、缺失设备标记和原子写入已实现；schema 迁移和完整预设管理 UI 尚未实现。
-5. 运行中 source/sink 拓扑变化会返回“需要重启”；未来 Tauri UI 必须把这个行为做成明确的用户状态和命令，不能悄悄丢弃修改。
+3. `SendSpec.enabled`、`EngineCommand`、`ServiceEvent`、订阅机制和手动重连 API 已在 Rust 应用服务中实现；尚未实现的是 Tauri command/event 适配层和产品层 DTO。
+4. 当前配置 schema v2 的 JSON 校验、稳定 endpoint ID、缺失设备标记、v1 到 v2 迁移和原子保存已实现；完整 Route Profile 预设管理 UI 尚未实现。
+5. 运行中 source/sink 拓扑变化会返回“需要重启”；未来 Tauri UI 必须把这个行为映射为 Route Profile 的明确状态，不能悄悄丢弃修改。
 6. 多声道转换不是动态多声道路由。若未来要让用户把输入的任意物理声道独立发送到输出的任意物理声道，必须重新设计动态声道数、channel map、FIFO、Mixer 和 UI，不能只放宽兼容判断。
 7. Process Loopback 的显式格式请求依赖 Windows 系统/驱动接受该格式，Initialize 失败必须报告，不得假设所有系统必然支持。
 8. 旧 Slint UI 已归档；Tauri 2 + React 前端尚未初始化。新前端必须通过 Tauri command/event 进入 Rust 应用服务，不能把旧 UI 回调逻辑直接搬过去。
 
 ## 4. 下一阶段开发路线
 
-按照原开发路线，音频内核、设备恢复、路由图、应用服务契约和配置 v1 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；下一步从最新 `main` 创建 Tauri 2 + React 初始化分支，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
+按照原开发路线，音频内核、设备恢复、内部路由图、应用服务契约和配置 schema v2 已有实现；旧 Slint 前端已归档。总线图调用方兼容修复和 Rust workspace 门禁已经完成，迁移准备已进入 `main`；下一步从最新 `main` 创建 Tauri 2 + React 初始化分支，而不是立即扩展 ASIO、VST 或自有虚拟驱动。
 
 ### 第一步：从最新 main 初始化 Tauri 2 + React 工程
 
@@ -107,7 +107,7 @@
 
 任务：
 
-- 在一个主路由工作区实现多 source、多 sink、多 send 的可视化路由表；
+- 在一个主路由工作区实现 Route Profile 下多 Source、Output Channel、External Output/Monitor 和 mapping 的可视化路由表；
 - 每条 send 的启用、静音、增益和 channel map；
 - 在主路由工作区展示设备流向、格式、声道、兼容性和缺失状态；
 - 展示实时状态、峰值、packet/frame、FIFO、discontinuity、重连次数；
