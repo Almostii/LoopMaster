@@ -19,7 +19,6 @@ export default function MonitorCard({
   onToggle,
   onSetGain,
   onRename,
-  onSetChannelMap,
   onSelect,
 }: {
   external: ExternalOutputBrief;
