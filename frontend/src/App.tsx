@@ -9,6 +9,11 @@ import TitleBar from "./components/TitleBar";
 import Sidebar, { type SidebarItem } from "./components/Sidebar";
 import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
+import {
+  getCurrentWindow,
+  PhysicalPosition,
+  PhysicalSize,
+} from "@tauri-apps/api/window";
 import { useLoopMaster } from "./useLoopMaster";
 import { listAudioProcesses, processIconDataUri } from "./api";
 
@@ -85,9 +90,35 @@ function App() {
   >(null);
   // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
   const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
-  // 侧边栏状态
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // 侧边栏状态 (默认收起, 主内容占满原窗口)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [activeView, setActiveView] = useState<string>("router");
+  // 记录收起态时的窗口基准位置/大小, 供展开时向左扩展 220px
+  const sidebarBaseRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const sidebarInitRef = useRef(false);
+
+  // 侧边栏展开时把窗口向左扩展 220px(内容区宽度不变), 收起时恢复
+  useEffect(() => {
+    const appWindow = getCurrentWindow();
+    void (async () => {
+      const pos = await appWindow.outerPosition();
+      const size = await appWindow.outerSize();
+      if (!sidebarInitRef.current) {
+        // 首次挂载(sidebar 已收起): 记录基准, 不移动窗口
+        sidebarBaseRef.current = { x: pos.x, y: pos.y, w: size.width, h: size.height };
+        sidebarInitRef.current = true;
+        return;
+      }
+      const base = sidebarBaseRef.current!;
+      if (sidebarCollapsed) {
+        await appWindow.setPosition(new PhysicalPosition(base.x, base.y));
+        await appWindow.setSize(new PhysicalSize(base.w, base.h));
+      } else {
+        await appWindow.setPosition(new PhysicalPosition(base.x - 220, base.y));
+        await appWindow.setSize(new PhysicalSize(base.w + 220, base.h));
+      }
+    })();
+  }, [sidebarCollapsed]);
 
   // 应用启动/路由变化时，为已存在的进程来源补齐图标。
   useEffect(() => {
