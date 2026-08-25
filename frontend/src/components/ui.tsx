@@ -31,10 +31,13 @@ export function VuMeter({
   level,
   label,
   align = "left",
+  labelClass,
 }: {
   level: number; // 0..100
   label?: string;
   align?: "left" | "right";
+  /** 自定义标签样式类（如输出通道的宽标签 "Channel 1 (L)"） */
+  labelClass?: string;
 }) {
   const [shown, setShown] = useState(0);
   const rafRef = useRef<number | null>(null);
@@ -55,16 +58,21 @@ export function VuMeter({
     };
   }, [level]);
 
+  const defaultLeft = "label-source";
+  const defaultRight = "label-monitor";
+  const leftCls = labelClass ?? defaultLeft;
+  const rightCls = labelClass ?? defaultRight;
+
   return (
     <div className="channel-row">
       {label && align === "left" && (
-        <span className="channel-label label-source">{label}</span>
+        <span className={`channel-label ${leftCls}`}>{label}</span>
       )}
       <div className="vu-meter-wrap">
         <div className="vu-meter-bar" style={{ width: `${shown}%` }} />
       </div>
       {label && align === "right" && (
-        <span className="channel-label label-monitor">{label}</span>
+        <span className={`channel-label ${rightCls}`}>{label}</span>
       )}
     </div>
   );
