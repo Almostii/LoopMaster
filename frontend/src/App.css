@@ -1059,25 +1059,31 @@ button:disabled {
 /* ---------------- 主体区域 (App Main) ---------------- */
 .app-main {
   flex: 1;
-  display: flex;
+  display: block;
   min-height: 0;
   width: 100%;
   overflow: hidden;
+  position: relative;
 }
 
-/* ---------------- 侧边栏 ---------------- */
+/* ---------------- 侧边栏 (悬浮抽屉) ---------------- */
+/* 侧边栏不挤压主内容, 展开时浮在主内容之上; 收起到屏外 */
 .sidebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
   width: 220px;
-  flex-shrink: 0;
   background: #f7f8fa;
   border-right: 1px solid var(--border-light);
   display: flex;
   flex-direction: column;
-  transition: width 0.2s ease;
-  overflow: hidden;
+  transition: transform 0.22s ease;
+  z-index: 20;
+  box-shadow: 1px 0 4px rgba(0, 0, 0, 0.04);
 }
 .sidebar.is-collapsed {
-  width: 60px;
+  transform: translateX(-100%);
 }
 
 .sidebar-nav {
