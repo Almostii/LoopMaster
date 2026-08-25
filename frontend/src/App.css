@@ -1069,7 +1069,7 @@ button:disabled {
 
 /* ---------------- 侧边栏 (向窗口内弹出) ---------------- */
 /* 侧边栏作为 flex 子元素占左侧空间, 展开时挤压主内容而非遮挡;
-   收起时宽度收为 0, 主内容占满窗口 */
+   收起时保留窄条(仅图标), 主内容占余下空间 */
 .sidebar {
   width: 172px;
   flex: 0 0 172px;
@@ -1082,8 +1082,8 @@ button:disabled {
   flex-shrink: 0;
 }
 .sidebar.is-collapsed {
-  width: 0;
-  flex-basis: 0;
+  width: 60px;
+  flex-basis: 60px;
 }
 
 .sidebar-nav {
@@ -1135,6 +1135,14 @@ button:disabled {
 }
 .sidebar-item.is-active .sidebar-item-icon {
   color: var(--primary);
+}
+.sidebar-footer-nav {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-light);
+  padding: 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .sidebar-item-icon {
   width: 22px;
