@@ -44,18 +44,25 @@ function App() {
 
   const wires = useMemo(() => computeWires(route), [route]);
 
-  const sourceOptions: PickerOption[] = processes.map((p) => ({
-    value: String(p.pid),
-    label: p.name,
-    hint: `PID ${p.pid}`,
-  }));
-
-  // 麦克风与设备回环共用 capture 设备列表，按入口区分来源类型。
-  const captureOptions: PickerOption[] = captureDevices.map((d) => ({
-    value: d.id,
-    label: d.name,
-    hint: d.status,
-  }));
+  // 所有音频来源统一到一个 Picker：进程、麦克风、设备回环。
+  // value 使用前缀区分类型，handleSelectSource 解析后调用对应添加函数。
+  const sourceOptions: PickerOption[] = [
+    ...processes.map((p) => ({
+      value: `proc:${p.pid}`,
+      label: p.name,
+      hint: `PID ${p.pid}`,
+    })),
+    ...captureDevices.map((d) => ({
+      value: `mic:${d.id}`,
+      label: d.name,
+      hint: "麦克风",
+    })),
+    ...captureDevices.map((d) => ({
+      value: `loop:${d.id}`,
+      label: d.name,
+      hint: "设备回环",
+    })),
+  ];
 
   const externalOptions: PickerOption[] = renderDevices.map((d) => ({
     value: d.id,
@@ -143,19 +150,18 @@ function App() {
   }
 
   function handleSelectSource(value: string) {
-    const pid = Number(value);
-    const process = processes.find((p) => p.pid === pid);
-    if (process) void addSourceFromProcess(process);
-  }
-
-  function handleSelectMicDevice(value: string) {
-    const device = captureDevices.find((d) => d.id === value);
-    if (device) void addSourceFromDevice(device, "device_capture");
-  }
-
-  function handleSelectLoopbackDevice(value: string) {
-    const device = captureDevices.find((d) => d.id === value);
-    if (device) void addSourceFromDevice(device, "device_loopback");
+    const [kind, id] = value.split(":", 2);
+    if (kind === "proc") {
+      const pid = Number(id);
+      const process = processes.find((p) => p.pid === pid);
+      if (process) void addSourceFromProcess(process);
+    } else if (kind === "mic") {
+      const device = captureDevices.find((d) => d.id === id);
+      if (device) void addSourceFromDevice(device, "device_capture");
+    } else if (kind === "loop") {
+      const device = captureDevices.find((d) => d.id === id);
+      if (device) void addSourceFromDevice(device, "device_loopback");
+    }
   }
 
   function handleSelectExternal(value: string) {
@@ -193,41 +199,22 @@ function App() {
             >
               <div className="col-add-picker">
                 <PickerMenu
-                  title="应用程序进程 (Running Apps)"
+                  title="音频来源 (Audio Sources)"
                   trigger={
                     <button className="btn-add-node-wide">
-                      <span>＋ 添加进程音源</span>
+                      <span>＋ 添加音频来源</span>
                     </button>
                   }
                   options={sourceOptions}
                   onSelect={handleSelectSource}
-                  onOpen={() => void refreshProcesses()}
-                />
-                <PickerMenu
-                  title="麦克风 (Microphone)"
-                  trigger={
-                    <button className="btn-add-node-wide">
-                      <span>＋ 添加麦克风</span>
-                    </button>
-                  }
-                  options={captureOptions}
-                  onSelect={handleSelectMicDevice}
-                  onOpen={() => void refreshDevices()}
-                />
-                <PickerMenu
-                  title="设备回环 (Device Loopback)"
-                  trigger={
-                    <button className="btn-add-node-wide">
-                      <span>＋ 添加设备回环</span>
-                    </button>
-                  }
-                  options={captureOptions}
-                  onSelect={handleSelectLoopbackDevice}
-                  onOpen={() => void refreshDevices()}
+                  onOpen={() => {
+                    void refreshProcesses();
+                    void refreshDevices();
+                  }}
                 />
               </div>
               {route.sources.length === 0 ? (
-                <div className="empty-card">尚未添加音源。选择进程、麦克风或设备回环来源。</div>
+                <div className="empty-card">尚未添加音源。点击上方按钮选择进程、麦克风或设备回环来源。</div>
               ) : (
                 route.sources.map((s) => (
                   <SourceCard
