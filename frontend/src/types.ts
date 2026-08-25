@@ -4,6 +4,7 @@ export interface DeviceBrief {
   id: string;
   name: string;
   flow: "capture" | "render";
+  category: "input_mic" | "input_loopback" | "input_virtual" | "output";
   compatibility: "capture_ready" | "render_ready" | "unsupported";
   status: "active" | "unavailable" | "unsupported" | "error";
   format_description: string | null;

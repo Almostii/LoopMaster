@@ -813,14 +813,17 @@ button:disabled {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  min-width: 240px;
+  min-width: 220px;
+  max-width: min(360px, calc(100vw - 32px));
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
   background: var(--bg-glass);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-light);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-modal);
-  padding: 6px;
+  padding: 4px;
   z-index: 100;
   display: block;
   animation: fadeInMenu 0.15s ease-out;
@@ -831,20 +834,26 @@ button:disabled {
 }
 
 .dropdown-section-title {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
   color: var(--text-muted);
-  padding: 6px 8px 4px 8px;
+  padding: 4px 8px 2px 8px;
+}
+.dropdown-group + .dropdown-group { margin-top: 2px; }
+.dropdown-divider {
+  height: 1px;
+  background: var(--border-light);
+  margin: 2px 4px 4px 4px;
 }
 .dropdown-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 4px 8px;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-main);
   cursor: pointer;
   transition: background 0.1s;
@@ -853,7 +862,7 @@ button:disabled {
 .dropdown-item.muted { color: var(--text-muted); cursor: default; }
 .dropdown-item.muted:hover { background: transparent; color: var(--text-muted); }
 .dropdown-item-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dropdown-item-hint { font-size: 10px; opacity: 0.7; flex-shrink: 0; }
+.dropdown-item-hint { font-size: 9px; opacity: 0.7; flex-shrink: 0; }
 
 /* ---------------- Toast ---------------- */
 .toast-msg {

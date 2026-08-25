@@ -44,24 +44,48 @@ function App() {
 
   const wires = useMemo(() => computeWires(route), [route]);
 
-  // 所有音频来源统一到一个 Picker：进程、麦克风、设备回环。
+  // 所有音频来源按用途分组到同一个 Picker：进程、麦克风、设备回环、虚拟设备。
+  // 每个 capture 设备只按其后端分类（category）出现在其中一个组里，避免重复。
   // value 使用前缀区分类型，handleSelectSource 解析后调用对应添加函数。
-  const sourceOptions: PickerOption[] = [
-    ...processes.map((p) => ({
-      value: `proc:${p.pid}`,
-      label: p.name,
-      hint: `PID ${p.pid}`,
-    })),
-    ...captureDevices.map((d) => ({
-      value: `mic:${d.id}`,
-      label: d.name,
-      hint: "麦克风",
-    })),
-    ...captureDevices.map((d) => ({
-      value: `loop:${d.id}`,
-      label: d.name,
-      hint: "设备回环",
-    })),
+  const sourceGroups = [
+    {
+      title: "进程 (Process Loopback)",
+      options: processes.map((p) => ({
+        value: `proc:${p.pid}`,
+        label: p.name,
+        hint: `PID ${p.pid}`,
+      })),
+    },
+    {
+      title: "麦克风 / 输入设备 (Microphone)",
+      options: captureDevices
+        .filter((d) => d.category === "input_mic")
+        .map((d) => ({
+          value: `mic:${d.id}`,
+          label: d.name,
+          hint: "麦克风",
+        })),
+    },
+    {
+      title: "设备回环 (Device Loopback)",
+      options: captureDevices
+        .filter((d) => d.category === "input_loopback")
+        .map((d) => ({
+          value: `loop:${d.id}`,
+          label: d.name,
+          hint: "设备回环",
+        })),
+    },
+    {
+      title: "虚拟设备 (Virtual Device)",
+      options: captureDevices
+        .filter((d) => d.category === "input_virtual")
+        .map((d) => ({
+          value: `loop:${d.id}`,
+          label: d.name,
+          hint: "虚拟设备",
+        })),
+    },
   ];
 
   const externalOptions: PickerOption[] = renderDevices.map((d) => ({
@@ -205,7 +229,7 @@ function App() {
                       <span>＋ 添加音频来源</span>
                     </button>
                   }
-                  options={sourceOptions}
+                  groups={sourceGroups}
                   onSelect={handleSelectSource}
                   onOpen={() => {
                     void refreshProcesses();
