@@ -89,8 +89,8 @@ function App() {
   >(null);
   // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
   const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
-  // 侧边栏状态 (默认展开, 向窗口内弹出, 不遮挡 sources)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // 侧边栏状态 (默认收起, 向窗口内弹出, 不遮挡 sources)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [activeView, setActiveView] = useState<string>("router");
 
   // 应用启动时加载持久化的设置
