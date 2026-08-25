@@ -1,0 +1,32 @@
+# 独立 Tauri crate：声明为独立的 workspace root，脱离根 Rust workspace，
+# 避免影响根 workspace 的成员解析与构建时间（见前端交接说明 §2）。
+[workspace]
+
+[package]
+name = "loopmaster-frontend"
+version = "0.1.0"
+description = "LoopMaster 音频路由前端（Tauri 2 + React + TypeScript）"
+authors = ["LoopMaster"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "loopmaster_frontend_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# LoopMaster 应用服务：前端唯一业务服务边界。独立 Tauri crate 通过路径依赖
+# 使用 app-service（其再依赖 audio-core / audio-windows），不加入根 workspace。
+loopmaster-app-service = { path = "../../app-service" }
+
