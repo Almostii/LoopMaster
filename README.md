@@ -130,7 +130,6 @@ LoopMaster/
 │  ├─ src/           # React 源码（api/types/lib/hooks/components）
 │  ├─ src-tauri/     # Tauri 配置与 Rust 适配层
 │  └─ scripts/       # 构建辅助脚本（如安装包拷贝）
-├─ Doc/              # 私有内部设计文档与交接说明（仅私有仓库，不随公开仓库分发）
 ├─ LICENSE           # CC BY-NC 4.0
 └─ README.md
 ```
