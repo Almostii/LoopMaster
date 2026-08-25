@@ -1321,7 +1321,8 @@ mod tests {
     use super::*;
     use crate::AUDCLNT_E_DEVICE_INVALIDATED;
     use loopmaster_audio_core::{
-        EndpointId, RouteGraph, SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec,
+        BusId, BusSpec, EndpointId, RouteGraph, SendId, SendSpec, SinkId, SinkSpec, SourceId,
+        SourceKind, SourceSpec,
     };
 
     fn config(source_kind: SourceKind, source_count: usize) -> AudioEngineConfig {
@@ -1336,19 +1337,35 @@ mod tests {
             .collect::<Vec<_>>();
         let graph = RouteGraph {
             sources,
+            buses: vec![BusSpec {
+                id: BusId("mix".into()),
+                display_name: "Mix".into(),
+            }],
             sinks: vec![SinkSpec {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
             }],
-            sends: vec![SendSpec {
-                source_id: SourceId("source-0".into()),
-                sink_id: SinkId("sink".into()),
-                gain_db: 0.0,
-                muted: false,
-                enabled: true,
-                channel_map: Vec::new(),
-            }],
+            sends: vec![
+                SendSpec::SourceToBus {
+                    id: SendId("source-0-to-mix".into()),
+                    source_id: SourceId("source-0".into()),
+                    bus_id: BusId("mix".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+                SendSpec::BusToSink {
+                    id: SendId("mix-to-sink".into()),
+                    bus_id: BusId("mix".into()),
+                    sink_id: SinkId("sink".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+            ],
         };
         AudioEngineConfig::new(RouteGraphSnapshot::new(graph).unwrap())
     }
@@ -1364,6 +1381,7 @@ mod tests {
         assert!(AudioEngine::new(config(SourceKind::DeviceCapture, 2)).is_ok());
         let empty_graph = RouteGraph {
             sources: Vec::new(),
+            buses: Vec::new(),
             sinks: Vec::new(),
             sends: Vec::new(),
         };
@@ -1383,19 +1401,35 @@ mod tests {
                 process_id: Some(1234),
                 display_name: "process".into(),
             }],
+            buses: vec![BusSpec {
+                id: BusId("mix".into()),
+                display_name: "Mix".into(),
+            }],
             sinks: vec![SinkSpec {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
             }],
-            sends: vec![SendSpec {
-                source_id: SourceId("source-0".into()),
-                sink_id: SinkId("sink".into()),
-                gain_db: 0.0,
-                muted: false,
-                enabled: true,
-                channel_map: Vec::new(),
-            }],
+            sends: vec![
+                SendSpec::SourceToBus {
+                    id: SendId("source-0-to-mix".into()),
+                    source_id: SourceId("source-0".into()),
+                    bus_id: BusId("mix".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+                SendSpec::BusToSink {
+                    id: SendId("mix-to-sink".into()),
+                    bus_id: BusId("mix".into()),
+                    sink_id: SinkId("sink".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+            ],
         })
         .unwrap();
         assert!(AudioEngine::new(process_config).is_ok());
@@ -1409,19 +1443,35 @@ mod tests {
                 process_id: None,
                 display_name: "process".into(),
             }],
+            buses: vec![BusSpec {
+                id: BusId("mix".into()),
+                display_name: "Mix".into(),
+            }],
             sinks: vec![SinkSpec {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
             }],
-            sends: vec![SendSpec {
-                source_id: SourceId("source-0".into()),
-                sink_id: SinkId("sink".into()),
-                gain_db: 0.0,
-                muted: false,
-                enabled: true,
-                channel_map: Vec::new(),
-            }],
+            sends: vec![
+                SendSpec::SourceToBus {
+                    id: SendId("source-0-to-mix".into()),
+                    source_id: SourceId("source-0".into()),
+                    bus_id: BusId("mix".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+                SendSpec::BusToSink {
+                    id: SendId("mix-to-sink".into()),
+                    bus_id: BusId("mix".into()),
+                    sink_id: SinkId("sink".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+            ],
         })
         .unwrap();
         assert!(matches!(
@@ -1440,19 +1490,35 @@ mod tests {
                 process_id: Some(1234),
                 display_name: "process-1".into(),
             }],
+            buses: vec![BusSpec {
+                id: BusId("mix".into()),
+                display_name: "Mix".into(),
+            }],
             sinks: vec![SinkSpec {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
             }],
-            sends: vec![SendSpec {
-                source_id: SourceId("source-0".into()),
-                sink_id: SinkId("sink".into()),
-                gain_db: 0.0,
-                muted: false,
-                enabled: true,
-                channel_map: Vec::new(),
-            }],
+            sends: vec![
+                SendSpec::SourceToBus {
+                    id: SendId("source-0-to-mix".into()),
+                    source_id: SourceId("source-0".into()),
+                    bus_id: BusId("mix".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+                SendSpec::BusToSink {
+                    id: SendId("mix-to-sink".into()),
+                    bus_id: BusId("mix".into()),
+                    sink_id: SinkId("sink".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+            ],
         };
         let mut next = previous.clone();
         next.sources[0].process_id = Some(5678);
