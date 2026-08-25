@@ -282,14 +282,12 @@ function App() {
               title="Sources 音频来源"
               subtitle={`${route.sources.length} 个音源`}
               addTitle="添加音频来源"
-              onAdd={undefined}
-            >
-              <div className="col-add-picker">
+              addNode={
                 <PickerMenu
                   title="音频来源 (Audio Sources)"
                   trigger={
-                    <button className="btn-add-node-wide">
-                      <span>＋ 添加音频来源</span>
+                    <button className="btn-add-node" title="添加音频来源">
+                      +
                     </button>
                   }
                   groups={sourceGroups}
@@ -300,10 +298,11 @@ function App() {
                     void loadProcessIcons();
                   }}
                 />
-              </div>
+              }
+            >
               {route.sources.length === 0 ? (
-                <div className="empty-card">尚未添加音源。点击上方按钮选择进程、麦克风或设备回环来源。</div>
-              ) : (
+                <div className="empty-card">点击上方 + 添加音源。</div>
+              ) (
                 route.sources.map((s) => (
                   <SourceCard
                     key={s.id}
@@ -346,23 +345,22 @@ function App() {
               title="External Outputs 外部输出"
               subtitle={`${route.external_outputs.length} 个外部输出`}
               addTitle="添加外部输出"
-              onAdd={undefined}
-            >
-              <div className="col-add-picker">
+              addNode={
                 <PickerMenu
                   title="物理输出设备 (External Outputs)"
                   trigger={
-                    <button className="btn-add-node-wide">
-                      <span>＋ 添加外部输出</span>
+                    <button className="btn-add-node" title="添加外部输出">
+                      +
                     </button>
                   }
                   options={externalOptions}
                   onSelect={handleSelectExternal}
                   onOpen={() => void refreshDevices()}
                 />
-              </div>
+              }
+            >
               {route.external_outputs.length === 0 ? (
-                <div className="empty-card">尚未添加外部输出。点击上方按钮选择设备。</div>
+                <div className="empty-card">点击上方 + 添加外部输出。</div>
               ) : (
                 route.external_outputs.map((ext) => (
                   <MonitorCard
