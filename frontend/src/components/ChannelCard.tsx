@@ -1,19 +1,31 @@
 import type { ChannelBrief } from "../types";
 import { VuMeter } from "./ui";
 
+function stopProp(e: React.MouseEvent) {
+  e.stopPropagation();
+}
+
 export default function ChannelCard({
   channel,
   meterLevel,
-  meterHint = "全局捕获峰值",
+  isSelected,
   onRemove,
+  onSelect,
 }: {
   channel: ChannelBrief;
   meterLevel: number;
-  meterHint?: string;
+  isSelected: boolean;
   onRemove: (channelId: string) => void;
+  onSelect: () => void;
 }) {
   return (
-    <div className="node-card">
+    <div
+      className={`node-card ${isSelected ? "is-selected" : ""}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect();
+      }}
+    >
       <div className="node-card-body">
         <div className="node-top-row">
           <div className="node-title-group">
@@ -22,7 +34,10 @@ export default function ChannelCard({
           <button
             className="btn-remove-icon"
             title="移除输出通道"
-            onClick={() => onRemove(channel.id)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(channel.id);
+            }}
           >
             <svg
               width="12"
@@ -38,7 +53,6 @@ export default function ChannelCard({
         </div>
 
         <div className="node-content-padding">
-          <div className="meter-hint">{meterHint}</div>
           <div className="node-channels-wrapper">
             <div
               className="socket socket-left"
@@ -46,6 +60,7 @@ export default function ChannelCard({
               data-node-type="output"
               data-node-id={channel.id}
               title="输入插孔"
+              onClick={stopProp}
             />
             <div className="node-channels-list">
               <VuMeter
@@ -67,6 +82,7 @@ export default function ChannelCard({
               data-node-type="output"
               data-node-id={channel.id}
               title="输出插孔"
+              onClick={stopProp}
             />
           </div>
         </div>

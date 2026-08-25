@@ -1,28 +1,47 @@
+import { useState } from "react";
+import { formatDb, sendsForExternal } from "../lib";
 import { DEVICE_STATUS_LABEL } from "../types";
-import type { DeviceBrief, ExternalOutputBrief } from "../types";
+import type { DeviceBrief, ExternalOutputBrief, RouteProfileSnapshot } from "../types";
 import { LoopToggle, VuMeter } from "./ui";
+
+function stopProp(e: React.MouseEvent) {
+  e.stopPropagation();
+}
 
 export default function MonitorCard({
   external,
   device,
+  route,
   meterLevel,
-  meterHint = "全局捕获峰值",
   isOn,
+  isSelected,
   onToggle,
-  onRemove,
+  onSetGain,
+  onSelect,
 }: {
   external: ExternalOutputBrief;
   device: DeviceBrief | undefined;
+  route: RouteProfileSnapshot;
   meterLevel: number;
-  meterHint?: string;
   isOn: boolean;
+  isSelected: boolean;
   onToggle: (externalId: string, on: boolean) => void;
-  onRemove: (externalId: string) => void;
+  onSetGain: (sendId: string, gainDb: number) => void;
+  onSelect: () => void;
 }) {
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const statusLabel = device ? DEVICE_STATUS_LABEL[device.status] : "未知";
+  const sends = sendsForExternal(route, external.id);
+  const primarySend = sends[0];
 
   return (
-    <div className={`node-card ${isOn ? "" : "is-disabled"}`}>
+    <div
+      className={`node-card ${isOn ? "" : "is-disabled"} ${isSelected ? "is-selected" : ""}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect();
+      }}
+    >
       <div className="node-card-body">
         <div className="node-top-row">
           <div className="node-info-left">
@@ -48,15 +67,16 @@ export default function MonitorCard({
               <span className="node-subtext">状态：{statusLabel}</span>
             </div>
           </div>
-          <LoopToggle
-            checked={isOn}
-            title="切换监听开关"
-            onChange={(v) => onToggle(external.id, v)}
-          />
+          <div onClick={stopProp}>
+            <LoopToggle
+              checked={isOn}
+              title="切换监听开关"
+              onChange={(v) => onToggle(external.id, v)}
+            />
+          </div>
         </div>
 
         <div className="node-content-padding">
-          <div className="meter-hint">{meterHint}</div>
           <div className="node-channels-wrapper">
             <div
               className="socket socket-left"
@@ -64,6 +84,7 @@ export default function MonitorCard({
               data-node-type="external"
               data-node-id={external.id}
               title="输入插孔"
+              onClick={stopProp}
             />
             <div className="node-channels-list">
               <VuMeter level={meterLevel} label="Channel 1 (L)" align="right" />
@@ -71,12 +92,48 @@ export default function MonitorCard({
             </div>
           </div>
 
-          <button
-            className="btn-remove-card"
-            onClick={() => onRemove(external.id)}
+          <div
+            className={`node-options-toggle ${optionsOpen ? "open" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOptionsOpen((v) => !v);
+            }}
           >
-            移除外部输出
-          </button>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+            <span>Options</span>
+          </div>
+          <div className={`node-options-content ${optionsOpen ? "show" : ""}`} onClick={stopProp}>
+            {primarySend ? (
+              <div className="option-row">
+                <span className="option-label">增益 (Gain)</span>
+                <div className="option-control-group">
+                  <input
+                    type="range"
+                    className="device-slider"
+                    min={-24}
+                    max={12}
+                    step={0.5}
+                    value={primarySend.gain_db}
+                    onChange={(e) =>
+                      onSetGain(primarySend.id, Number(e.target.value))
+                    }
+                  />
+                  <span className="option-val">{formatDb(primarySend.gain_db)}</span>
+                </div>
+              </div>
+            ) : (
+              <span className="option-hint">尚未连线，无法设置增益</span>
+            )}
+          </div>
         </div>
       </div>
     </div>

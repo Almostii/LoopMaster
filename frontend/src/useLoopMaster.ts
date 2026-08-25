@@ -237,12 +237,17 @@ export function useLoopMaster() {
     [runEdit],
   );
 
+function cleanProcessName(name: string): string {
+  // 去掉 .exe / .EXE 等可执行后缀
+  return name.replace(/\.exe$/i, "");
+}
+
   /** 从进程回环添加音源（Process Loopback）。 */
   const addSourceFromProcess = useCallback(
     async (process: ProcessBrief) => {
       await addSourceWithAutoConnect({
         kind: "process_loopback",
-        display_name: `${process.name}（PID ${process.pid}）`,
+        display_name: cleanProcessName(process.name),
         endpoint_id: null,
         process_id: process.pid,
       });
@@ -253,10 +258,9 @@ export function useLoopMaster() {
   /** 从设备添加音源：麦克风（device_capture）或设备回环（device_loopback）。 */
   const addSourceFromDevice = useCallback(
     async (device: DeviceBrief, kind: "device_capture" | "device_loopback") => {
-      const label = kind === "device_capture" ? "麦克风" : "设备回环";
       await addSourceWithAutoConnect({
         kind,
-        display_name: `${label} · ${device.name}`,
+        display_name: device.name,
         endpoint_id: device.id,
         process_id: null,
       });
@@ -390,7 +394,7 @@ export function useLoopMaster() {
 
   const removeSend = useCallback(
     async (sendId: string) => {
-      await runEdit({ op: "remove_send", send_id: sendId }, "已删除连线");
+      await runEdit({ op: "remove_send", id: sendId }, "已删除连线");
     },
     [runEdit],
   );
