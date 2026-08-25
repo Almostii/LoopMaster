@@ -45,8 +45,18 @@ export default function ChannelCard({
               title="输入插孔"
             />
             <div className="node-channels-list">
-              <VuMeter level={meterLevel} label="Channel 1 (L)" align="left" />
-              <VuMeter level={meterLevel} label="Channel 2 (R)" align="left" />
+              <VuMeter
+                level={meterLevel}
+                label="Channel 1 (L)"
+                align="left"
+                labelClass="label-channel"
+              />
+              <VuMeter
+                level={meterLevel}
+                label="Channel 2 (R)"
+                align="left"
+                labelClass="label-channel"
+              />
             </div>
             <div
               className="socket socket-right"
