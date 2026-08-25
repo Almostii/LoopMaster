@@ -9,6 +9,7 @@ import TitleBar from "./components/TitleBar";
 import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
+import { listAudioProcesses, processIconDataUri } from "./api";
 
 function App() {
   const {
@@ -41,6 +42,8 @@ function App() {
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [selectedWireId, setSelectedWireId] = useState<string | null>(null);
+  // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
+  const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
 
   const wires = useMemo(() => computeWires(route), [route]);
 
@@ -54,6 +57,7 @@ function App() {
         value: `proc:${p.pid}`,
         label: p.name,
         hint: `PID ${p.pid}`,
+        icon: procIconMap[p.pid] ?? null,
       })),
     },
     {
@@ -193,6 +197,24 @@ function App() {
     if (device) void addExternalOutput(device);
   }
 
+  /** 打开来源 Picker 时，为进程并行加载应用图标（data URI）。 */
+  async function loadProcessIcons() {
+    try {
+      const procs = await listAudioProcesses();
+      const entries = await Promise.all(
+        procs
+          .filter((p) => p.executable_path)
+          .map(async (p) => {
+            const uri = await processIconDataUri(p.executable_path!);
+            return [p.pid, uri] as const;
+          }),
+      );
+      setProcIconMap(Object.fromEntries(entries));
+    } catch {
+      /* 图标加载失败不影响主流程，列表仍显示无图标项 */
+    }
+  }
+
   return (
     <div className="app-container mode-stereo">
       <TitleBar engineState={engineState} onToggleEngine={handleToggleEngine} />
@@ -234,6 +256,7 @@ function App() {
                   onOpen={() => {
                     void refreshProcesses();
                     void refreshDevices();
+                    void loadProcessIcons();
                   }}
                 />
               </div>

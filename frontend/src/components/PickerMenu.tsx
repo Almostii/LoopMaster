@@ -4,6 +4,7 @@ export interface PickerOption {
   value: string;
   label: string;
   hint?: string;
+  icon?: string | null;
 }
 
 export interface PickerGroup {
@@ -64,6 +65,11 @@ export default function PickerMenu({
           setOpen(false);
         }}
       >
+        {opt.icon ? (
+          <img className="dropdown-item-icon" src={opt.icon} alt="" />
+        ) : (
+          <span className="dropdown-item-icon dropdown-item-icon-placeholder" />
+        )}
         <span className="dropdown-item-label">{opt.label}</span>
         {opt.hint && <span className="dropdown-item-hint">{opt.hint}</span>}
       </div>

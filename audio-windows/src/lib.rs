@@ -8,10 +8,12 @@ use loopmaster_audio_core::{
 use thiserror::Error;
 
 mod format_conversion;
+mod process_icon;
 mod process_loopback;
 mod runtime;
 
 pub use format_conversion::SampleEncoding;
+pub use process_icon::process_icon_data_uri;
 pub use process_loopback::ProcessLoopbackSource;
 pub use runtime::{
     AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineState, AudioEngineStats,

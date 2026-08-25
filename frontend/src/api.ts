@@ -18,6 +18,13 @@ export function listAudioProcesses(): Promise<ProcessBrief[]> {
   return invoke<ProcessBrief[]>("list_audio_processes");
 }
 
+/** 返回进程可执行文件图标的 PNG data URI；无图标或平台不支持时返回 null。 */
+export function processIconDataUri(executablePath: string): Promise<string | null> {
+  return invoke<string | null>("process_icon_data_uri", {
+    executablePath,
+  });
+}
+
 export function getRouteSnapshot(): Promise<RouteProfileSnapshot> {
   return invoke<RouteProfileSnapshot>("get_route_snapshot");
 }
