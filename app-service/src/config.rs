@@ -204,6 +204,26 @@ pub struct UiState {
     /// 加载时按 endpoint ID 匹配，缺失设备标记为 unavailable。
     #[serde(default)]
     pub missing_endpoints: Vec<EndpointId>,
+    /// 外观主题："light" | "dark"。默认浅色。
+    #[serde(default)]
+    pub theme: String,
+    /// 是否开机自启动。
+    #[serde(default)]
+    pub start_on_boot: bool,
+    /// 启动时是否隐藏主窗口（仅驻留系统托盘）。
+    #[serde(default)]
+    pub launch_hidden: bool,
+}
+
+impl UiState {
+    /// 取当前主题，缺失/非法时回退到浅色。
+    pub fn theme(&self) -> &str {
+        if self.theme == "dark" {
+            "dark"
+        } else {
+            "light"
+        }
+    }
 }
 
 /// 配置加载/保存错误。
