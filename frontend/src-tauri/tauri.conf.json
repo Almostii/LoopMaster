@@ -32,6 +32,9 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
+    "resources": {
+      "icons/tray-icon.png": "resources/icons/tray-icon.png"
+    },
     "windows": {
       "nsis": {
         "displayLanguageSelector": true,

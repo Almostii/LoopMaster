@@ -33,6 +33,7 @@ use loopmaster_audio_core::{
 use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineStatus};
 use tauri::Emitter;
 use tauri::menu::{Menu, MenuItem};
+use tauri::path::BaseDirectory;
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_autostart::ManagerExt;
 
@@ -1222,10 +1223,29 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
-    // 使用独立的高分辨率 PNG 作为托盘图标，避免 Windows 选用 ICO 中过小尺寸导致模糊。
-    // dev 模式下工作目录为 src-tauri，故使用相对路径；打包后需确保该文件位于同一目录或 resources。
-    let icon = tauri::image::Image::from_path("icons/tray-icon.png")
-        .map_err(|e| format!("加载托盘图标失败: {e}"))?;
+    // 托盘图标的候选加载路径（按优先级尝试），覆盖 dev 与各种打包布局：
+    // 1. 打包后资源目录：<install>/resources/icons/tray-icon.png
+    // 2. 打包/开发目录：<exe_dir>/icons/tray-icon.png（Tauri 默认会把 icons/ 复制到安装根）
+    // 3. dev 模式相对路径：icons/tray-icon.png
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(p) = app
+        .path()
+        .resolve("icons/tray-icon.png", BaseDirectory::Resource)
+    {
+        candidates.push(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("icons/tray-icon.png"));
+            candidates.push(dir.join("resources/icons/tray-icon.png"));
+        }
+    }
+    candidates.push(std::path::PathBuf::from("icons/tray-icon.png"));
+
+    let icon = candidates
+        .iter()
+        .find_map(|p| tauri::image::Image::from_path(p).ok())
+        .ok_or_else(|| "所有候选路径均无法加载托盘图标".to_string())?;
 
     TrayIconBuilder::new()
         .icon(icon)
@@ -1278,8 +1298,9 @@ pub fn run() {
             app.manage(state);
 
             // 系统托盘常驻：创建托盘图标与菜单（显示/隐藏/退出）
-            if let Err(e) = setup_tray(app) {
-                eprintln!("创建系统托盘失败: {e}");
+            let tray_ok = setup_tray(app).is_ok();
+            if !tray_ok {
+                eprintln!("创建系统托盘失败");
             }
 
             // 关闭主窗口时隐藏而非退出，使音频路由在后台持续运行
@@ -1295,8 +1316,9 @@ pub fn run() {
                 });
             }
 
-            // 启动时若配置了"隐藏主窗口"，则不显示（仅驻留托盘）
-            if settings.launch_hidden {
+            // 启动时若配置了"隐藏主窗口"，则不显示（仅驻留托盘）。
+            // 若托盘创建失败，为避免应用完全不可控，强制显示主窗口。
+            if settings.launch_hidden && tray_ok {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
