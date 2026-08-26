@@ -22,6 +22,7 @@ export interface SourceBrief {
   display_name: string;
   endpoint_id: string | null;
   process_id: number | null;
+  executable_path: string | null;
 }
 
 export interface ChannelBrief {

@@ -175,6 +175,7 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recove
             kind: SourceKind::DeviceCapture,
             endpoint_id: Some(EndpointId(capture_id.to_owned())),
             process_id: None,
+            executable_path: None,
             display_name: "capture".to_owned(),
         }],
         buses: vec![BusSpec {
@@ -221,6 +222,7 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             kind: SourceKind::ProcessLoopback,
             endpoint_id: None,
             process_id: Some(pid),
+            executable_path: None,
             display_name: format!("process:{pid}"),
         }],
         buses: vec![BusSpec {
@@ -263,6 +265,7 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             kind: SourceKind::DeviceLoopback,
             endpoint_id: Some(EndpointId(loopback_render_id.to_owned())),
             process_id: None,
+            executable_path: None,
             display_name: "loopback".to_owned(),
         }],
         buses: vec![BusSpec {
@@ -382,6 +385,7 @@ fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             kind: SourceKind::ProcessLoopback,
             endpoint_id: None,
             process_id: Some(pid),
+            executable_path: None,
             display_name: format!("process:{pid}"),
         }],
         buses: vec![BusSpec {
@@ -558,6 +562,7 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
             kind: SourceKind::ProcessLoopback,
             endpoint_id: None,
             process_id: Some(pid),
+            executable_path: None,
             display_name: format!("process:{pid}"),
         }],
         buses: vec![BusSpec {
@@ -809,6 +814,7 @@ fn run_capture_render_test(
             kind: SourceKind::DeviceCapture,
             endpoint_id: Some(capture_endpoint.clone()),
             process_id: None,
+            executable_path: None,
             display_name: "capture".to_owned(),
         }],
         buses: vec![BusSpec {

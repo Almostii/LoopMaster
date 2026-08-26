@@ -471,6 +471,12 @@ pub enum RouteEdit {
         send_id: SendId,
         channel_map: Vec<(u16, u16)>,
     },
+    /// 更新 ProcessLoopback 声源的 PID（进程重启后按可执行路径重新匹配）。
+    /// 用于服务层把失效 PID 自动重绑到新 PID；触发拓扑变化需引擎重启。
+    SetSourceProcessId {
+        source_id: SourceId,
+        process_id: Option<u32>,
+    },
 }
 
 /// 路由编辑会话：UI 编辑暂存配置，提交后整体校验并冻结为快照。
@@ -595,6 +601,18 @@ impl RouteEditor {
                         channel_map: value, ..
                     } => *value = channel_map,
                 }
+            }
+            RouteEdit::SetSourceProcessId {
+                source_id,
+                process_id,
+            } => {
+                let source = self
+                    .draft
+                    .sources
+                    .iter_mut()
+                    .find(|source| source.id == source_id)
+                    .ok_or_else(|| RouteGraphError::MissingSource(source_id.0.clone()))?;
+                source.process_id = process_id;
             }
         }
         if let Err(error) = self.draft.validate() {
@@ -937,6 +955,7 @@ mod tests {
             kind: loopmaster_audio_core::SourceKind::ProcessLoopback,
             endpoint_id: None,
             process_id: Some(1),
+            executable_path: None,
             display_name: id.into(),
         }
     }
@@ -1323,6 +1342,7 @@ mod bus_tests {
             kind: SourceKind::ProcessLoopback,
             endpoint_id: None,
             process_id: Some(1),
+            executable_path: None,
             display_name: id.into(),
         }
     }
