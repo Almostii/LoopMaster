@@ -71,6 +71,11 @@ pub struct SourceSpec {
     pub kind: SourceKind,
     pub endpoint_id: Option<EndpointId>,
     pub process_id: Option<u32>,
+    /// ProcessLoopback 声源的稳定身份（可执行文件完整路径）。
+    /// PID 在进程重启后会失效，此路径用于把失效的声源自动重新绑定到新 PID。
+    /// 旧配置（无此字段）通过 `#[serde(default)]` 回退为 `None`。
+    #[serde(default)]
+    pub executable_path: Option<String>,
     pub display_name: String,
 }
 
@@ -259,6 +264,7 @@ mod route_graph_tests {
             kind: SourceKind::DeviceCapture,
             endpoint_id: endpoint.map(|value| EndpointId(value.into())),
             process_id: None,
+            executable_path: None,
             display_name: id.into(),
         }
     }

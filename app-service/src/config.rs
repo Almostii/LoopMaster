@@ -261,6 +261,7 @@ mod tests {
             kind: SourceKind::DeviceCapture,
             endpoint_id: Some(EndpointId(format!("endpoint-{id}"))),
             process_id: None,
+            executable_path: None,
             display_name: id.into(),
         }
     }
@@ -473,6 +474,7 @@ mod v2_tests {
                 kind: SourceKind::DeviceCapture,
                 endpoint_id: Some(EndpointId("endpoint-source".into())),
                 process_id: None,
+                executable_path: None,
                 display_name: "Source".into(),
             }],
             buses: vec![BusSpec {

@@ -90,6 +90,8 @@ struct SourceBrief {
     display_name: String,
     endpoint_id: Option<String>,
     process_id: Option<u32>,
+    #[serde(default)]
+    executable_path: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -150,6 +152,8 @@ enum RouteEditRequest {
         display_name: String,
         endpoint_id: Option<String>,
         process_id: Option<u32>,
+        #[serde(default)]
+        executable_path: Option<String>,
     },
     RemoveSource {
         id: String,
@@ -607,6 +611,12 @@ fn forward_send_to_engine(
 fn save_config(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), ServiceErrorBrief> {
+    persist_config(&state)
+}
+
+/// 把当前编辑器草稿 + 运行期设置写入配置文件（原子写入）。
+/// 供 `save_config` 命令与后台进程监控线程复用。
+fn persist_config(state: &AppState) -> Result<(), ServiceErrorBrief> {
     let editor = state
         .editor
         .lock()
@@ -625,6 +635,75 @@ fn save_config(
     config
         .save_to(&state.config_path)
         .map_err(config_error_brief)
+}
+
+/// 进程声源自动重连：定期枚举当前音频进程，对失效的 ProcessLoopback
+/// 声源按可执行路径重新匹配新 PID，更新编辑图并持久化，向前端 emit
+/// `process-restored`。PID 未失效或无可执行路径时保持不动。
+fn spawn_process_watcher(app: tauri::AppHandle, state: Arc<AppState>) {
+    std::thread::Builder::new()
+        .name("loopmaster-process-watcher".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                // 枚举当前有音频会话的进程
+                let processes = match ProcessRepository::new()
+                    .and_then(|repo| repo.list_audio_processes())
+                {
+                    Ok(list) => list,
+                    Err(_) => continue,
+                };
+                // 收集失效的 ProcessLoopback 声源：(id, executable_path, 旧 pid)
+                let stale: Vec<(SourceId, String, u32)> = {
+                    let editor = state.editor.lock().expect("路由锁未中毒");
+                    editor
+                        .draft()
+                        .sources
+                        .iter()
+                        .filter(|s| s.kind == SourceKind::ProcessLoopback)
+                        .filter_map(|s| {
+                            let pid = s.process_id?;
+                            let path = s.executable_path.clone()?;
+                            let alive = processes.iter().any(|p| p.pid == pid);
+                            if alive {
+                                None
+                            } else {
+                                Some((s.id.clone(), path, pid))
+                            }
+                        })
+                        .collect()
+                };
+                for (source_id, path, old_pid) in stale {
+                    // 同一可执行路径下找新 PID
+                    let new_pid = processes
+                        .iter()
+                        .find(|p| p.executable_path.as_deref() == Some(path.as_str()) && p.pid != old_pid)
+                        .map(|p| p.pid);
+                    let Some(new_pid) = new_pid else {
+                        continue;
+                    };
+                    let applied = {
+                        let mut editor = state.editor.lock().expect("路由锁未中毒");
+                        editor.apply(RouteEdit::SetSourceProcessId {
+                            source_id: source_id.clone(),
+                            process_id: Some(new_pid),
+                        })
+                    };
+                    if applied.is_err() {
+                        continue;
+                    }
+                    let _ = persist_config(&state);
+                    let _ = app.emit(
+                        "process-restored",
+                        serde_json::json!({
+                            "source_id": source_id.0,
+                            "process_id": new_pid,
+                        }),
+                    );
+                }
+            }
+        })
+        .expect("创建进程监控线程失败");
 }
 
 /// 从配置文件加载路由，替换当前编辑器草稿。
@@ -892,6 +971,7 @@ impl RouteProfileSnapshot {
                 display_name: s.display_name.clone(),
                 endpoint_id: s.endpoint_id.as_ref().map(|e| e.0.clone()),
                 process_id: s.process_id,
+                executable_path: s.executable_path.clone(),
             })
             .collect();
 
@@ -1042,6 +1122,7 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             display_name,
             endpoint_id,
             process_id,
+            executable_path,
         } => {
             let kind = match kind.as_str() {
                 "device_capture" => SourceKind::DeviceCapture,
@@ -1054,6 +1135,7 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
                 kind,
                 endpoint_id: endpoint_id.map(EndpointId),
                 process_id,
+                executable_path,
                 display_name,
             })
         }
@@ -1220,6 +1302,10 @@ pub fn run() {
                 }
             }
 
+            // 后台进程监控：进程重启后按可执行路径自动重绑 ProcessLoopback 声源
+            let watcher_state = app.state::<Arc<AppState>>().inner().clone();
+            spawn_process_watcher(app.handle().clone(), watcher_state);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1259,6 +1345,7 @@ mod tests {
                 kind: SourceKind::ProcessLoopback,
                 endpoint_id: None,
                 process_id: Some(42),
+                executable_path: Some("C:/app-a.exe".into()),
                 display_name: "应用 A".into(),
             }],
             buses: vec![BusSpec {
@@ -1336,6 +1423,7 @@ mod tests {
                     display_name: "应用 A".into(),
                     endpoint_id: None,
                     process_id: Some(42),
+                    executable_path: Some("C:/app-a.exe".into()),
                 })
                 .unwrap(),
             )
@@ -1492,6 +1580,7 @@ mod tests {
             display_name: "x".into(),
             endpoint_id: None,
             process_id: None,
+            executable_path: None,
         });
         assert!(error.is_err());
     }
