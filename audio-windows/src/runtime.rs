@@ -1366,6 +1366,7 @@ mod tests {
                 kind: source_kind.clone(),
                 endpoint_id: Some(EndpointId(format!("capture-{index}"))),
                 process_id: None,
+                executable_path: None,
                 display_name: format!("Source {index}"),
             })
             .collect::<Vec<_>>();
@@ -1433,6 +1434,7 @@ mod tests {
                 kind: SourceKind::ProcessLoopback,
                 endpoint_id: None,
                 process_id: Some(1234),
+                executable_path: None,
                 display_name: "process".into(),
             }],
             buses: vec![BusSpec {
@@ -1475,6 +1477,7 @@ mod tests {
                 kind: SourceKind::ProcessLoopback,
                 endpoint_id: None,
                 process_id: None,
+                executable_path: None,
                 display_name: "process".into(),
             }],
             buses: vec![BusSpec {
@@ -1522,6 +1525,7 @@ mod tests {
                 kind: SourceKind::ProcessLoopback,
                 endpoint_id: None,
                 process_id: Some(1234),
+                executable_path: Some("C:/process-1.exe".into()),
                 display_name: "process-1".into(),
             }],
             buses: vec![BusSpec {

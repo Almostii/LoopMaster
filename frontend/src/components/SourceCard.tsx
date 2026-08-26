@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { formatDb, sendsForSource } from "../lib";
-import type { RouteProfileSnapshot, SourceBrief } from "../types";
+import type { DeviceBrief, RouteProfileSnapshot, SourceBrief } from "../types";
 import { LoopToggle, VuMeter } from "./ui";
 
 function stopProp(e: React.MouseEvent) {
@@ -15,6 +15,8 @@ export default function SourceCard({
   icon,
   isOn,
   isSelected,
+  silentHint,
+  onSwitchToDevice,
   onToggle,
   onSetGain,
   onSetMuted,
@@ -28,6 +30,9 @@ export default function SourceCard({
   icon?: string | null;
   isOn: boolean;
   isSelected: boolean;
+  /** 非 null 时表示该进程回环无音频，给出建议改用同名设备捕获的候选列表 */
+  silentHint?: DeviceBrief[] | null;
+  onSwitchToDevice?: (device: DeviceBrief) => void;
   onToggle: (sourceId: string, on: boolean) => void;
   onSetGain: (sendId: string, gainDb: number) => void;
   onSetMuted: (sendId: string, muted: boolean) => void;
@@ -137,6 +142,26 @@ export default function SourceCard({
               onClick={stopProp}
             />
           </div>
+
+          {silentHint && silentHint.length > 0 && (
+            <div className="node-switch-hint" onClick={stopProp}>
+              <div className="switch-hint-title">
+                该进程可能更适合用同名设备捕获：
+              </div>
+              <div className="switch-hint-devices">
+                {silentHint.map((d) => (
+                  <button
+                    key={d.id}
+                    className="switch-hint-btn"
+                    onClick={() => onSwitchToDevice?.(d)}
+                    title={`改用设备捕获：${d.name}`}
+                  >
+                    {d.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div
             className={`node-options-toggle ${optionsOpen ? "open" : ""}`}
