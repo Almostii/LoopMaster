@@ -87,8 +87,9 @@ function App() {
   const [selectedCard, setSelectedCard] = useState<
     { type: "source" | "channel" | "external"; id: string } | null
   >(null);
-  // 进程 PID -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
-  const [procIconMap, setProcIconMap] = useState<Record<number, string | null>>({});
+  // 进程可执行路径 -> 图标 data URI 缓存，打开来源 Picker 时按需加载。
+  // 不用 PID 作 key，因为进程重启后 PID 会变化。
+  const [procIconMap, setProcIconMap] = useState<Record<string, string | null>>({});
   // 侧边栏状态 (默认收起, 向窗口内弹出, 不遮挡 sources)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [activeView, setActiveView] = useState<string>("router");
@@ -100,13 +101,23 @@ function App() {
   }, []);
 
   // 应用启动/路由变化时，为已存在的进程来源补齐图标。
+  // 依赖加入 executable_path，保证进程重连/PID 变化后也会重新加载。
   useEffect(() => {
-    const hasProcessSource = route.sources.some((s) => s.process_id != null);
+    const hasProcessSource = route.sources.some((s) => s.executable_path);
     if (hasProcessSource) {
       void loadProcessIcons();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.sources.map((s) => s.id).join(",")]);
+  }, [route.sources.map((s) => `${s.id}:${s.executable_path ?? ""}`).join(",")]);
+
+  // 当活跃的音频进程列表出现新进程（如 firefox 开始播放）时，也补一下图标。
+  useEffect(() => {
+    const hasProcPath = processes.some((p) => p.executable_path);
+    if (hasProcPath) {
+      void loadProcessIcons();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processes.map((p) => p.executable_path).join(",")]);
 
   const wires = useMemo(() => computeWires(route), [route]);
 
@@ -176,8 +187,8 @@ function App() {
       options: processes.map((p) => ({
         value: `proc:${p.pid}`,
         label: p.name.replace(/\.exe$/i, ""),
-        icon: procIconMap[p.pid] ? (
-          <img className="dropdown-item-icon-img" src={procIconMap[p.pid]!} alt="" />
+        icon: procIconMap[p.executable_path ?? ""] ? (
+          <img className="dropdown-item-icon-img" src={procIconMap[p.executable_path ?? ""]!} alt="" />
         ) : undefined,
       })),
     },
@@ -351,17 +362,24 @@ function App() {
     if (device) void addExternalOutput(device);
   }
 
-  /** 为进程并行加载应用图标（data URI），供 Picker 和 SourceCard 使用。 */
+  /** 为进程并行加载应用图标（data URI），供 Picker 和 SourceCard 使用。
+   *  同时从已保存的 source.executable_path 与当前活跃的音频进程加载，
+   *  这样即使进程当前没在播放声音，配置里有的路径也能显示图标。 */
   async function loadProcessIcons() {
     try {
       const procs = await listAudioProcesses();
+      const procPaths = procs
+        .filter((p) => p.executable_path)
+        .map((p) => p.executable_path!);
+      const sourcePaths = route.sources
+        .filter((s) => s.executable_path)
+        .map((s) => s.executable_path!);
+      const paths = Array.from(new Set([...procPaths, ...sourcePaths]));
       const entries = await Promise.all(
-        procs
-          .filter((p) => p.executable_path)
-          .map(async (p) => {
-            const uri = await processIconDataUri(p.executable_path!);
-            return [p.pid, uri] as const;
-          }),
+        paths.map(async (path) => {
+          const uri = await processIconDataUri(path);
+          return [path, uri] as const;
+        }),
       );
       setProcIconMap(Object.fromEntries(entries));
     } catch {
@@ -445,7 +463,7 @@ function App() {
                     route={route}
                     meterL={ml}
                     meterR={mr}
-                    icon={s.process_id != null ? procIconMap[s.process_id] : undefined}
+                    icon={s.executable_path ? procIconMap[s.executable_path] : undefined}
                     isOn={isSourceEnabled(route, s.id)}
                     isSelected={selectedCard?.type === "source" && selectedCard.id === s.id}
                     onToggle={handleToggleSource}
