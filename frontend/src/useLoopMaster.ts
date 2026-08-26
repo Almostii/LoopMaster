@@ -270,17 +270,40 @@ function cleanProcessName(name: string): string {
     [addSourceWithAutoConnect],
   );
 
-  /** 从设备添加音源：麦克风（device_capture）或设备回环（device_loopback）。 */
+  /** 从设备添加音源：麦克风（device_capture）或设备回环（device_loopback）。
+   *  返回新创建的 source id，便于调用方迁移连线。 */
   const addSourceFromDevice = useCallback(
     async (device: DeviceBrief, kind: "device_capture" | "device_loopback") => {
-      await addSourceWithAutoConnect({
-        kind,
-        display_name: device.name,
-        endpoint_id: device.id,
-        process_id: null,
-      });
+      const srcId = freshId("src");
+      await runEdit(
+        {
+          op: "add_source",
+          id: srcId,
+          kind,
+          display_name: device.name,
+          endpoint_id: device.id,
+          process_id: null,
+          executable_path: undefined,
+        },
+        "已添加音源（拓扑变更需重启引擎生效）",
+      );
+      // 新建音源后，若已存在输出通道且该音源尚无连线，则自动连到第一个输出通道
+      const snap = await getRouteSnapshot();
+      const hasSend = snap.sends.some((s) => s.source === srcId);
+      if (!hasSend && snap.output_channels.length > 0) {
+        await runEdit(
+          {
+            op: "add_send",
+            id: freshId("send"),
+            source_id: srcId,
+            output_channel_id: snap.output_channels[0].id,
+          },
+          "已添加连线（拓扑变更需重启引擎生效）",
+        );
+      }
+      return srcId;
     },
-    [addSourceWithAutoConnect],
+    [runEdit],
   );
 
   const addOutputChannel = useCallback(async () => {
@@ -500,6 +523,53 @@ function cleanProcessName(name: string): string {
     [runEdit],
   );
 
+  /**
+   * 把一条 ProcessLoopback 音源切换为对应的设备捕获音源。
+   *
+   * 场景：某些软件（如 WO Mic）的控制进程本身不产生音频，真正的声音在
+   * 同名的虚拟麦克风设备里。当用户选了进程却发现没声音时，可一键改用
+   * 设备捕获，并保留原有的输出连线、增益、静音与通道映射。
+   */
+  const switchProcessSourceToDevice = useCallback(
+    async (oldSourceId: string, device: DeviceBrief) => {
+      // 1. 记录旧音源的连线配置
+      const snapBefore = await getRouteSnapshot();
+      const oldSends = snapBefore.sends.filter((s) => s.source === oldSourceId);
+      // 2. 删除旧进程音源
+      await removeSource(oldSourceId);
+      // 3. 创建同名的设备捕获音源（会自动连到第一个输出通道）
+      const newId = await addSourceFromDevice(device, "device_capture");
+      // 4. 移除自动创建的连线，改为按旧配置重建，保留增益/静音/通道映射
+      const snapAfter = await getRouteSnapshot();
+      const autoSend = snapAfter.sends.find((s) => s.source === newId);
+      if (autoSend) {
+        await removeSend(autoSend.id);
+      }
+      for (const oldSend of oldSends) {
+        const sendId = freshId("send");
+        await runEdit(
+          {
+            op: "add_send",
+            id: sendId,
+            source_id: newId,
+            output_channel_id: oldSend.output_channel ?? undefined,
+          },
+          "已迁移连线（拓扑变更需重启引擎生效）",
+        );
+        if (oldSend.gain_db !== 0) {
+          await setSendGain(sendId, oldSend.gain_db);
+        }
+        if (oldSend.muted) {
+          await setSendMuted(sendId, true);
+        }
+        if (oldSend.channel_map && oldSend.channel_map.length > 0) {
+          await setSendChannelMap(sendId, oldSend.channel_map);
+        }
+      }
+    },
+    [getRouteSnapshot, removeSource, addSourceFromDevice, removeSend, runEdit, setSendGain, setSendMuted, setSendChannelMap],
+  );
+
   // ---------- 事件订阅 ----------
 
   useEffect(() => {
@@ -664,6 +734,7 @@ function cleanProcessName(name: string): string {
     doReconnect,
     addSourceFromProcess,
     addSourceFromDevice,
+    switchProcessSourceToDevice,
     addOutputChannel,
     addExternalOutput,
     removeSource,
