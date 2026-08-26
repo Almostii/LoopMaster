@@ -44,6 +44,51 @@ function VirtualIcon() {
   );
 }
 
+/**
+ * 从进程名提取用于设备匹配的核心关键词。
+ * 例："WOMicClient" -> "womic"，"Discord" -> "discord"。
+ *
+ * 处理策略：
+ * 1. 去掉 .exe / Client / App / Service 等无意义后缀
+ * 2. 按大写边界/空格/下划线/连字符分词
+ * 3. 拼接剩余词（小写、去空格）作为核心
+ */
+function processCore(processName: string): string {
+  const base = processName.replace(/\.exe$/i, "");
+  const parts = base.split(/(?=[A-Z])|[\s_\-]+/).filter(Boolean);
+  const meaningful = parts
+    .map((p) => p.toLowerCase())
+    .filter((p) => !PROCESS_STOP_WORDS.has(p));
+  return meaningful.join("");
+}
+
+const PROCESS_STOP_WORDS = new Set([
+  "client", "app", "application", "service", "control", "agent", "launcher", "exe",
+]);
+const DEVICE_STOP_WORDS = new Set([
+  "device", "麦克风", "input", "virtual", "audio", "capture",
+]);
+
+/**
+ * 判断某进程是否可能对应某个输入设备（用于"无音频时建议改用设备捕获"）。
+ * 例：进程 "WOMicClient" 与设备 "WO Mic Device" 应匹配。
+ */
+function deviceMatchesProcess(device: { name: string }, processName: string): boolean {
+  const core = processCore(processName);
+  if (core.length < 3) return false;
+  const devNorm = device.name
+    .toLowerCase()
+    .replace(/\.exe$/i, "")
+    .split(/[\s_\-]+/)
+    .filter((w) => w && !DEVICE_STOP_WORDS.has(w))
+    .join("");
+  if (devNorm.includes(core)) return true;
+  if (core.includes(devNorm) && devNorm.length >= 3) return true;
+  return false;
+}
+
+
+
 function App() {
   const {
     captureDevices,
@@ -66,6 +111,7 @@ function App() {
     doStopEngine,
     addSourceFromProcess,
     addSourceFromDevice,
+    switchProcessSourceToDevice,
     addOutputChannel,
     addExternalOutput,
     removeSource,
@@ -93,6 +139,21 @@ function App() {
   // 侧边栏状态 (默认收起, 向窗口内弹出, 不遮挡 sources)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [activeView, setActiveView] = useState<string>("router");
+
+  // 检测「进程回环可能更适合改用设备捕获」的音源。
+  // 场景：某些软件（如 WO Mic）的控制进程本身不产生音频，真正的声音在
+  // 同名的虚拟麦克风设备里。只要进程名匹配到某个输入设备，就给出"改用设备"提示。
+  const switchableProcessSources = useMemo(() => {
+    const map = new Map<string, { sourceId: string; candidates: typeof captureDevices }>();
+    for (const s of route.sources) {
+      if (s.kind !== "process_loopback") continue;
+      const candidates = captureDevices.filter((d) => deviceMatchesProcess(d, s.display_name));
+      if (candidates.length > 0) {
+        map.set(s.id, { sourceId: s.id, candidates });
+      }
+    }
+    return map;
+  }, [route.sources, captureDevices]);
 
   // 应用启动时加载持久化的设置
   useEffect(() => {
@@ -466,6 +527,8 @@ function App() {
                     icon={s.executable_path ? procIconMap[s.executable_path] : undefined}
                     isOn={isSourceEnabled(route, s.id)}
                     isSelected={selectedCard?.type === "source" && selectedCard.id === s.id}
+                    silentHint={switchableProcessSources.get(s.id)?.candidates ?? null}
+                    onSwitchToDevice={(device) => void switchProcessSourceToDevice(s.id, device)}
                     onToggle={handleToggleSource}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
                     onSetMuted={(sendId, m) => void setSendMuted(sendId, m)}
