@@ -61,6 +61,7 @@ export interface RouteEditRequest {
   display_name?: string;
   endpoint_id?: string | null;
   process_id?: number | null;
+  executable_path?: string | null;
   source_id?: string;
   output_channel_id?: string;
   external_output_id?: string;
@@ -143,5 +144,14 @@ export function onDeviceRestored(
 ): Promise<UnlistenFn> {
   return listen<{ endpoint_id: string }>("device-restored", (e) =>
     handler(e.payload.endpoint_id),
+  );
+}
+
+/** 进程声源自动重连事件：ProcessLoopback 声源已按可执行路径重新绑定到新 PID。 */
+export function onProcessRestored(
+  handler: (sourceId: string, processId: number) => void,
+): Promise<UnlistenFn> {
+  return listen<{ source_id: string; process_id: number }>("process-restored", (e) =>
+    handler(e.payload.source_id, e.payload.process_id),
   );
 }

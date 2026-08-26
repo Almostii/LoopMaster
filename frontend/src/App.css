@@ -788,6 +788,37 @@ button:disabled {
 }
 .node-options-content.show { display: flex; }
 
+/* 进程建议改用设备捕获提示 */
+.node-switch-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(59, 130, 246, 0.10);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: var(--radius-md);
+}
+.switch-hint-title {
+  font-size: 10.5px;
+  color: #3b82f6;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+.switch-hint-devices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.switch-hint-btn {
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(59, 130, 246, 0.5);
+  background: rgba(59, 130, 246, 0.14);
+  color: #3b82f6;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.switch-hint-btn:hover { background: rgba(59, 130, 246, 0.28); }
+
 .option-row {
   display: flex;
   align-items: center;

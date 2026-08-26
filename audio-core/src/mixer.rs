@@ -477,6 +477,7 @@ mod tests {
             kind: SourceKind::DeviceCapture,
             endpoint_id: None,
             process_id: None,
+            executable_path: None,
             display_name: id.into(),
         }
     }
