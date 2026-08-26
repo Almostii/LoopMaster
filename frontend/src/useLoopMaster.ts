@@ -11,6 +11,7 @@ import {
   onDeviceRestored,
   onEngineStateChanged,
   onEngineStatsChanged,
+  onProcessRestored,
   requestReconnect,
   saveConfig,
   startEngine,
@@ -217,7 +218,7 @@ export function useLoopMaster() {
   /** 新增音源并自动连到第一个输出通道（若该音源尚无连线）。 */
   const addSourceWithAutoConnect = useCallback(
     async (
-      req: { kind: "process_loopback" | "device_capture" | "device_loopback"; display_name: string; endpoint_id: string | null; process_id: number | null },
+      req: { kind: "process_loopback" | "device_capture" | "device_loopback"; display_name: string; endpoint_id: string | null; process_id: number | null; executable_path?: string | null },
     ) => {
       const srcId = freshId("src");
       await runEdit(
@@ -228,6 +229,7 @@ export function useLoopMaster() {
           display_name: req.display_name,
           endpoint_id: req.endpoint_id,
           process_id: req.process_id,
+          executable_path: req.executable_path ?? null,
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
@@ -262,6 +264,7 @@ function cleanProcessName(name: string): string {
         display_name: cleanProcessName(process.name),
         endpoint_id: null,
         process_id: process.pid,
+        executable_path: process.executable_path,
       });
     },
     [addSourceWithAutoConnect],
@@ -535,14 +538,23 @@ function cleanProcessName(name: string): string {
     const unRestored = onDeviceRestored((endpointId) =>
       setNotice({ text: `设备已恢复：${endpointId}`, kind: "info" }),
     );
+    const unProcess = onProcessRestored((_sourceId, pid) => {
+      setNotice({ text: `进程声源已重新连接 (PID ${pid})`, kind: "info" });
+      void refreshAll();
+      // 引擎运行中：PID 已变，需重启以用新 PID 重建捕获流
+      if (engineStateRef.current.running) {
+        void doStartEngine();
+      }
+    });
 
     return () => {
       void unState.then((fn) => fn());
       void unStats.then((fn) => fn());
       void unLost.then((fn) => fn());
       void unRestored.then((fn) => fn());
+      void unProcess.then((fn) => fn());
     };
-  }, [refreshAll, refreshEngineState]);
+  }, [refreshAll, refreshEngineState, doStartEngine]);
 
   const meterLevel = useMemo(() => {
     if (!stats) return 0;
