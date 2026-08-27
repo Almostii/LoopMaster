@@ -74,7 +74,7 @@ export function getEngineState(): Promise<EngineStateBrief> {
 
 /** 返回当前应用版本号（如 "0.1.0"）。 */
 export function getAppVersion(): Promise<string> {
-  if (!isTauriRuntime) return Promise.resolve("0.1.2");
+  if (!isTauriRuntime) return Promise.resolve("1.0.0");
   return invoke<string>("get_app_version");
 }
 

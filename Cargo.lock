@@ -16,7 +16,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "loopmaster-app-service"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "loopmaster-audio-core",
  "loopmaster-audio-windows",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "loopmaster-audio-core"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "rtrb",
  "rubato",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "loopmaster-audio-windows"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "loopmaster-audio-core",
  "thiserror",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "loopmaster-diagnostics"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "loopmaster-audio-core",
  "loopmaster-audio-windows",
