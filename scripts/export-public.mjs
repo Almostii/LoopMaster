@@ -102,6 +102,19 @@ async function rimraf(target) {
   await fs.rm(target, { recursive: true, force: true });
 }
 
+function pathsOverlap(left, right) {
+  const relative = path.relative(left, right);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+async function validateRepositoryIsolation() {
+  const privateReal = await fs.realpath(PRIVATE_ROOT);
+  const publicReal = await fs.realpath(PUBLIC_ROOT);
+  if (pathsOverlap(privateReal, publicReal) || pathsOverlap(publicReal, privateReal)) {
+    throw new Error(`公开仓库必须与私有仓库完全隔离: private=${privateReal}, public=${publicReal}`);
+  }
+}
+
 async function main() {
   // 校验公开仓库存在且是个 git 仓库
   try {
@@ -112,14 +125,9 @@ async function main() {
     console.error('请先克隆公开仓库: git clone <url> LoopMaster-public');
     process.exit(1);
   }
+  await validateRepositoryIsolation();
 
-  // 1. 清空公开仓库中属于白名单的目录/文件 (保留 .git 及其它未列项)
-  for (const item of INCLUDE) {
-    const target = path.join(PUBLIC_ROOT, item);
-    await rimraf(target);
-  }
-
-  // 2. 从私有仓库收集白名单文件
+  // 删除目标前先完整收集源文件，避免配置或权限问题导致目标被清空后才失败。
   const files = [];
   for (const item of INCLUDE) {
     const src = path.join(PRIVATE_ROOT, item);
@@ -135,7 +143,13 @@ async function main() {
     }
   }
 
-  // 3. 写入公开仓库
+  // 1. 清空公开仓库中属于白名单的目录/文件 (保留 .git 及其它未列项)
+  for (const item of INCLUDE) {
+    const target = path.join(PUBLIC_ROOT, item);
+    await rimraf(target);
+  }
+
+  // 2. 写入公开仓库
   let copied = 0;
   for (const { abs, rel } of files) {
     const dest = path.join(PUBLIC_ROOT, rel);

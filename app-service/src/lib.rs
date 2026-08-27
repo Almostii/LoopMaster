@@ -686,6 +686,8 @@ struct EngineServiceInner {
     /// 最近一次成功提交的路由快照（send 级热更新的基准）。
     graph: Mutex<RouteGraphSnapshot>,
     subscribers: Mutex<Vec<mpsc::Sender<ServiceEvent>>>,
+    /// 当前异常会话中已经确认失效的 endpoint，恢复后用于发送配对事件。
+    faulted_endpoints: Mutex<Vec<EndpointId>>,
 }
 
 /// 应用服务：引擎的启动/停止/状态/路由提交/事件订阅入口。
@@ -705,6 +707,7 @@ impl EngineService {
             engine: Mutex::new(engine),
             graph: Mutex::new(snapshot),
             subscribers: Mutex::new(Vec::new()),
+            faulted_endpoints: Mutex::new(Vec::new()),
         });
         let event_stop = Arc::new(AtomicBool::new(false));
         let event_thread = spawn_event_loop(Arc::clone(&inner), Arc::clone(&event_stop));
@@ -877,7 +880,12 @@ fn spawn_event_loop(inner: Arc<EngineServiceInner>, stop: Arc<AtomicBool>) -> Jo
             while !stop.load(Ordering::Acquire) {
                 let status = inner.engine.lock().expect("引擎锁未中毒").status();
                 if last_state != Some(status.state) {
-                    publish_transition(&inner, last_state, status.state);
+                    publish_transition(
+                        &inner,
+                        last_state,
+                        status.state,
+                        status.last_error.as_deref(),
+                    );
                     last_state = Some(status.state);
                 }
                 if last_stats.as_ref() != Some(&status.stats) {
@@ -894,10 +902,10 @@ fn publish_transition(
     inner: &EngineServiceInner,
     previous: Option<AudioEngineState>,
     current: AudioEngineState,
+    last_error: Option<&str>,
 ) {
     broadcast(inner, ServiceEvent::StateChanged(current));
     let graph = inner.graph.lock().expect("路由锁未中毒").graph().clone();
-    let endpoints = graph_endpoints(&graph);
     let degraded = matches!(
         current,
         AudioEngineState::Degraded | AudioEngineState::Reconnecting
@@ -913,11 +921,22 @@ fn publish_transition(
             )
         );
     if degraded && was_running {
+        let endpoints = failed_graph_endpoints(&graph, last_error);
+        *inner
+            .faulted_endpoints
+            .lock()
+            .expect("故障 endpoint 锁未中毒") = endpoints.clone();
         for endpoint in &endpoints {
             broadcast(inner, ServiceEvent::DeviceLost(endpoint.clone()));
         }
     }
     if restored {
+        let endpoints = std::mem::take(
+            &mut *inner
+                .faulted_endpoints
+                .lock()
+                .expect("故障 endpoint 锁未中毒"),
+        );
         for endpoint in &endpoints {
             broadcast(inner, ServiceEvent::DeviceRestored(endpoint.clone()));
         }
@@ -938,397 +957,30 @@ fn graph_endpoints(graph: &RouteGraph) -> Vec<EndpointId> {
     endpoints
 }
 
+fn failed_graph_endpoints(graph: &RouteGraph, last_error: Option<&str>) -> Vec<EndpointId> {
+    let Some(last_error) = last_error else {
+        return Vec::new();
+    };
+    graph_endpoints(graph)
+        .into_iter()
+        .filter(|endpoint| error_mentions_endpoint(last_error, &endpoint.0))
+        .collect()
+}
+
+fn error_mentions_endpoint(error: &str, endpoint: &str) -> bool {
+    [
+        format!("endpoint={endpoint}"),
+        format!("endpoint=Some(\"{endpoint}\")"),
+        format!("endpoint_id={endpoint}"),
+        format!("endpoint_id=Some(\"{endpoint}\")"),
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
+}
+
 fn broadcast(inner: &EngineServiceInner, event: ServiceEvent) {
     let mut subscribers = inner.subscribers.lock().expect("订阅锁未中毒");
     subscribers.retain(|sender| sender.send(event.clone()).is_ok());
-}
-
-// 旧的 source -> sink 测试保留在历史代码中供迁移比对；Bus 模型由下方测试覆盖。
-#[cfg(all(test, any()))]
-mod tests {
-    use super::*;
-    use loopmaster_audio_windows::AudioEngineState;
-
-    fn source(id: &str) -> SourceSpec {
-        SourceSpec {
-            id: SourceId(id.into()),
-            kind: loopmaster_audio_core::SourceKind::ProcessLoopback,
-            endpoint_id: None,
-            process_id: Some(1),
-            executable_path: None,
-            display_name: id.into(),
-        }
-    }
-
-    fn sink(id: &str) -> SinkSpec {
-        SinkSpec {
-            id: SinkId(id.into()),
-            endpoint_id: EndpointId(format!("endpoint-{id}")),
-            display_name: id.into(),
-        }
-    }
-
-    fn send(source_id: &str, sink_id: &str) -> SendSpec {
-        SendSpec {
-            source_id: SourceId(source_id.into()),
-            sink_id: SinkId(sink_id.into()),
-            gain_db: 0.0,
-            muted: false,
-            enabled: true,
-            channel_map: Vec::new(),
-        }
-    }
-
-    fn editor() -> RouteEditor {
-        RouteEditor::new(RouteGraph {
-            sources: vec![source("a"), source("b")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out"), send("b", "out")],
-        })
-    }
-
-    fn endpoint(
-        flow: EndpointFlow,
-        sample_rate: u32,
-        bits_per_sample: u16,
-        channels: u16,
-        is_float: bool,
-        is_pcm: bool,
-    ) -> EndpointInfo {
-        EndpointInfo {
-            id: EndpointId("device".into()),
-            name: "Device".into(),
-            flow,
-            format: Some(AudioFormat {
-                sample_rate,
-                channels,
-            }),
-            bits_per_sample: Some(bits_per_sample),
-            channel_mask: Some(if channels == 2 { 3 } else { 0 }),
-            is_float: Some(is_float),
-            is_pcm: Some(is_pcm),
-        }
-    }
-
-    #[test]
-    fn applies_gain_and_mute_to_existing_send() {
-        let mut editor = editor();
-        editor
-            .apply(RouteEdit::SetSendGain {
-                source_id: SourceId("a".into()),
-                sink_id: SinkId("out".into()),
-                gain_db: -6.0,
-            })
-            .unwrap();
-        editor
-            .apply(RouteEdit::SetSendMuted {
-                source_id: SourceId("b".into()),
-                sink_id: SinkId("out".into()),
-                muted: true,
-            })
-            .unwrap();
-        let draft = editor.draft();
-        assert_eq!(draft.sends[0].gain_db, -6.0);
-        assert!(draft.sends[1].muted);
-        editor.commit().unwrap();
-    }
-
-    #[test]
-    fn rejects_edits_on_missing_send_and_source() {
-        let mut editor = editor();
-        assert_eq!(
-            editor
-                .apply(RouteEdit::SetSendGain {
-                    source_id: SourceId("ghost".into()),
-                    sink_id: SinkId("out".into()),
-                    gain_db: 0.0,
-                })
-                .unwrap_err(),
-            RouteGraphError::MissingSend("ghost->out".into())
-        );
-        assert_eq!(
-            editor
-                .apply(RouteEdit::RemoveSource(SourceId("ghost".into())))
-                .unwrap_err(),
-            RouteGraphError::MissingSource("ghost".into())
-        );
-    }
-
-    #[test]
-    fn removing_source_cascades_sends() {
-        let mut editor = editor();
-        editor
-            .apply(RouteEdit::RemoveSource(SourceId("a".into())))
-            .unwrap();
-        assert_eq!(editor.draft().sources.len(), 1);
-        assert_eq!(editor.draft().sends.len(), 1);
-        assert_eq!(editor.draft().sends[0].source_id, SourceId("b".into()));
-        editor.commit().unwrap();
-    }
-
-    #[test]
-    fn invalid_edit_does_not_mutate_draft() {
-        let mut editor = editor();
-        let before = editor.draft().clone();
-        assert!(editor.apply(RouteEdit::AddSource(source("a"))).is_err());
-        assert_eq!(editor.draft(), &before);
-    }
-
-    #[test]
-    fn device_projection_marks_native_capture_ready() {
-        let info = endpoint(EndpointFlow::Capture, 48_000, 32, 2, true, false);
-        let model = DeviceModel::from_endpoint(&info);
-        assert_eq!(model.compatibility, DeviceCompatibility::CaptureReady);
-        assert_eq!(model.status, DeviceStatus::Active);
-        assert_eq!(model.format_support, DeviceFormatSupport::Native);
-        assert_eq!(
-            model.native_format_description.as_deref(),
-            Some("48 kHz / 32-bit IEEE float / 2 声道")
-        );
-    }
-
-    #[test]
-    fn device_projection_keeps_pcm_44k_mono_selectable_with_conversion() {
-        let info = endpoint(EndpointFlow::Capture, 44_100, 16, 1, false, true);
-        let model = DeviceModel::from_endpoint(&info);
-        assert_eq!(model.compatibility, DeviceCompatibility::CaptureReady);
-        assert_eq!(model.status, DeviceStatus::Active);
-        assert_eq!(
-            model.format_support,
-            DeviceFormatSupport::ConversionRequired
-        );
-        assert_eq!(
-            model.native_format_description.as_deref(),
-            Some("44.1 kHz / 16-bit PCM / 1 声道")
-        );
-        assert!(model.format_support_reason.contains("转换为内部"));
-    }
-
-    #[test]
-    fn device_projection_marks_multichannel_render_as_conversion() {
-        let info = endpoint(EndpointFlow::Render, 48_000, 32, 6, true, false);
-        let model = DeviceModel::from_endpoint(&info);
-        assert_eq!(model.compatibility, DeviceCompatibility::RenderReady);
-        assert_eq!(
-            model.format_support,
-            DeviceFormatSupport::ConversionRequired
-        );
-        assert!(model.format_support_reason.contains("转换后写入"));
-    }
-
-    #[test]
-    fn device_projection_explains_unsupported_pcm_depth() {
-        let info = endpoint(EndpointFlow::Render, 48_000, 24, 2, false, true);
-        let model = DeviceModel::from_endpoint(&info);
-        assert_eq!(model.status, DeviceStatus::Unsupported);
-        assert_eq!(model.format_support, DeviceFormatSupport::Unsupported);
-        assert_eq!(
-            model.native_format_description.as_deref(),
-            Some("48 kHz / 24-bit PCM / 2 声道")
-        );
-        assert!(matches!(
-            model.compatibility,
-            DeviceCompatibility::Unsupported { ref reason }
-                if reason.contains("48 kHz / 24-bit PCM / 2 声道")
-        ));
-    }
-
-    #[test]
-    fn windows_error_includes_recovery_hint() {
-        let error = ServiceError::from(WindowsAudioError::HResult {
-            operation: "test",
-            hresult: -1,
-            endpoint_id: Some("endpoint".into()),
-        });
-        assert!(error.to_string().contains("建议："));
-    }
-
-    #[test]
-    fn engine_service_creates_stopped_engine() {
-        let graph = RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out")],
-        };
-        let service = EngineService::new(graph).unwrap();
-        assert!(!service.status().running);
-        assert_eq!(service.status().state, AudioEngineState::Stopped);
-    }
-
-    #[test]
-    fn set_send_enabled_keeps_muted_and_channel_map() {
-        let mut editor = editor();
-        let mut expected = send("a", "out");
-        expected.muted = true;
-        expected.gain_db = -3.0;
-        expected.channel_map = vec![(0, 0), (1, 1)];
-        editor.apply(RouteEdit::SetSend(expected.clone())).unwrap();
-
-        // 禁用 send：保留增益/静音/通道映射配置，仅 enabled 翻转。
-        editor
-            .apply(RouteEdit::SetSendEnabled {
-                source_id: SourceId("a".into()),
-                sink_id: SinkId("out".into()),
-                enabled: false,
-            })
-            .unwrap();
-        let disabled = editor
-            .draft()
-            .sends
-            .iter()
-            .find(|s| s.source_id.0 == "a")
-            .unwrap();
-        assert!(!disabled.enabled);
-        assert!(disabled.muted);
-        assert_eq!(disabled.gain_db, -3.0);
-        assert_eq!(disabled.channel_map, vec![(0, 0), (1, 1)]);
-
-        // 重新启用后配置原样恢复，与 muted（静音）语义明确区分。
-        editor
-            .apply(RouteEdit::SetSendEnabled {
-                source_id: SourceId("a".into()),
-                sink_id: SinkId("out".into()),
-                enabled: true,
-            })
-            .unwrap();
-        let re_enabled = editor
-            .draft()
-            .sends
-            .iter()
-            .find(|s| s.source_id.0 == "a")
-            .unwrap();
-        assert!(re_enabled.enabled);
-        assert!(re_enabled.muted);
-        assert_eq!(re_enabled.gain_db, -3.0);
-        editor.commit().unwrap();
-    }
-
-    #[test]
-    fn set_send_enabled_rejects_missing_send_without_mutating_draft() {
-        let mut editor = editor();
-        let before = editor.draft().clone();
-        let error = editor
-            .apply(RouteEdit::SetSendEnabled {
-                source_id: SourceId("ghost".into()),
-                sink_id: SinkId("out".into()),
-                enabled: false,
-            })
-            .unwrap_err();
-        assert_eq!(error, RouteGraphError::MissingSend("ghost->out".into()));
-        assert_eq!(editor.draft(), &before);
-    }
-
-    #[test]
-    fn send_commands_reject_when_engine_not_running() {
-        let graph = RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out")],
-        };
-        let service = EngineService::new(graph).unwrap();
-        let before = service.status();
-
-        // send 级命令只对运行中的引擎生效；引擎 Stopped 时拒绝且状态不变。
-        let gain_error = service
-            .command(EngineCommand::SetGain {
-                source_id: SourceId("a".into()),
-                sink_id: SinkId("out".into()),
-                gain_db: -6.0,
-            })
-            .unwrap_err();
-        assert!(matches!(gain_error, ServiceError::Rejected { .. }));
-
-        let unknown_send = service
-            .command(EngineCommand::SetMuted {
-                source_id: SourceId("ghost".into()),
-                sink_id: SinkId("out".into()),
-                muted: true,
-            })
-            .unwrap_err();
-        assert!(matches!(unknown_send, ServiceError::Rejected { .. }));
-
-        assert_eq!(service.status(), before);
-    }
-
-    #[test]
-    fn apply_route_topology_change_requires_restart() {
-        let graph = RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out")],
-        };
-        let service = EngineService::new(graph).unwrap();
-
-        // 拓扑变化（新增 sink）必须显式重启，引擎返回 EndpointChangeRequiresRestart。
-        let changed = RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out"), sink("second")],
-            sends: vec![send("a", "out")],
-        };
-        let snapshot = RouteGraphSnapshot::new(changed).unwrap();
-        let error = service
-            .command(EngineCommand::ApplyRoute(snapshot))
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ServiceError::Engine(AudioEngineError::EndpointChangeRequiresRestart)
-        ));
-    }
-
-    #[test]
-    fn service_error_preserves_hresult_endpoint_and_hint() {
-        let error = ServiceError::from(WindowsAudioError::HResult {
-            operation: "IAudioClient::Initialize",
-            hresult: -2,
-            endpoint_id: Some("endpoint-1".into()),
-        });
-        assert_eq!(error.hresult(), Some(-2));
-        assert_eq!(error.endpoint_id(), Some("endpoint-1"));
-        assert!(error.hint().is_some());
-        assert!(error.to_string().contains("HRESULT"));
-    }
-
-    #[test]
-    fn service_error_gives_device_specific_hint_for_format_errors() {
-        let error = ServiceError::from(WindowsAudioError::CaptureFormatUnsupported {
-            endpoint_id: "mic".into(),
-            sample_rate: 96_000,
-            bits_per_sample: 24,
-            channels: 2,
-        });
-        assert_eq!(error.hresult(), None);
-        assert_eq!(error.endpoint_id(), Some("mic"));
-        assert!(error.hint().unwrap().contains("格式"));
-    }
-
-    #[test]
-    fn request_reconnect_rejects_when_engine_not_started() {
-        let graph = RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out")],
-        };
-        let service = EngineService::new(graph).unwrap();
-        assert!(matches!(
-            service.request_reconnect().unwrap_err(),
-            ServiceError::NotReady(_)
-        ));
-    }
-
-    #[test]
-    fn subscribe_delivers_initial_state_snapshot() {
-        let graph = RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out")],
-        };
-        let service = EngineService::new(graph).unwrap();
-        let receiver = service.subscribe();
-        let first = receiver.recv_timeout(Duration::from_millis(500)).unwrap();
-        assert_eq!(first, ServiceEvent::StateChanged(AudioEngineState::Stopped));
-        let second = receiver.recv_timeout(Duration::from_millis(500)).unwrap();
-        assert!(matches!(second, ServiceEvent::StatsChanged(_)));
-    }
 }
 
 #[cfg(test)]
@@ -1492,5 +1144,20 @@ mod bus_tests {
             })
             .unwrap_err();
         assert!(matches!(error, ServiceError::Rejected { .. }));
+    }
+
+    #[test]
+    fn device_failure_events_only_target_the_reported_endpoint() {
+        let graph = graph();
+        let failed = failed_graph_endpoints(
+            &graph,
+            Some("WASAPI 设备失效, endpoint=Some(\"endpoint-out\")"),
+        );
+        assert_eq!(failed, vec![EndpointId("endpoint-out".into())]);
+    }
+
+    #[test]
+    fn unlocated_device_failure_does_not_report_every_endpoint() {
+        assert!(failed_graph_endpoints(&graph(), Some("设备失效但无 endpoint")).is_empty());
     }
 }
