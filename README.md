@@ -3,7 +3,7 @@
   <h1>LoopMaster 音频路由</h1>
   <p>Windows 桌面端音频路由与回环监听工具</p>
   <p>
-    <img alt="预发布状态" src="https://img.shields.io/badge/状态-0.1.0--alpha-E5A35F">
+    <img alt="正式版状态" src="https://img.shields.io/badge/状态-v1.0.0-2E8B57">
     <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&amp;logoColor=white">
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2.11-24C8DB?logo=tauri&amp;logoColor=white">
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust&amp;logoColor=white">
@@ -106,8 +106,8 @@ npm run build:installer
 
 ```text
 dist-installer/
-├── LoopMaster_0.1.0_x64-setup.exe   # NSIS 安装程序（推荐分发）
-└── LoopMaster_0.1.0_x64_zh-CN.msi   # MSI 安装包
+├── LoopMaster_1.0.0_x64-setup.exe   # NSIS 安装程序（推荐分发）
+└── LoopMaster_1.0.0_x64_zh-CN.msi   # MSI 安装包
 ```
 
 仅构建应用二进制（不含安装器）：
