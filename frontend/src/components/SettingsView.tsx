@@ -178,7 +178,7 @@ export default function SettingsView({
           <div className="setting-info">
             <div className="setting-label">检查更新</div>
             <div className="setting-desc">
-              当前版本 {update?.current ?? "…"}，检查 {UPDATE_REPO} 是否有新版本
+              当前版本 {(update?.current ?? appVersion) || "…"}，检查 {UPDATE_REPO} 是否有新版本
             </div>
           </div>
           <div className="setting-control">

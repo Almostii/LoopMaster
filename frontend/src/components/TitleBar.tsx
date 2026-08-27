@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { EngineStateBrief } from "../types";
+import { isTauriRuntime } from "../runtime";
 
 export default function TitleBar({
   engineState,
@@ -25,7 +26,8 @@ export default function TitleBar({
       failed: "失败",
     }[stateKey] ?? engineState.state;
 
-  const appWindow = getCurrentWindow();
+  // Vite 直开时没有 Tauri runtime；保留页面可渲染，窗口控制仅在桌面壳中启用。
+  const appWindow = isTauriRuntime ? getCurrentWindow() : null;
 
   // 拖拽区域的事件处理：Tauri 2 使用 data-tauri-drag-region 属性实现拖动，
   // 需要 core:window:allow-start-dragging 权限。mousedown 命中可交互元素
@@ -39,6 +41,7 @@ export default function TitleBar({
   }
 
   async function handleMinimize() {
+    if (!appWindow) return;
     try {
       await appWindow.minimize();
     } catch (err) {
@@ -47,6 +50,7 @@ export default function TitleBar({
   }
 
   async function handleToggleMaximize() {
+    if (!appWindow) return;
     try {
       const isMax = await appWindow.isMaximized();
       if (isMax) {
@@ -60,6 +64,7 @@ export default function TitleBar({
   }
 
   async function handleClose() {
+    if (!appWindow) return;
     // 后端 on_window_event 已拦截 CloseRequested 并 hide，前端调用 close 即可
     try {
       await appWindow.close();
@@ -128,7 +133,7 @@ export default function TitleBar({
           />
           <span className="slider-round" />
         </label>
-        <div className="window-controls">
+        {appWindow && <div className="window-controls">
           <button
             type="button"
             className="win-btn win-btn-min"
@@ -163,7 +168,7 @@ export default function TitleBar({
               <line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" strokeWidth="1" />
             </svg>
           </button>
-        </div>
+        </div>}
       </div>
     </header>
   );

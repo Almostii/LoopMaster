@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -23,6 +25,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "cross-env": "^10.1.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.11"
   }
 }

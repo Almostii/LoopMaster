@@ -21,20 +21,20 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use loopmaster_app_service::{AppConfig, ConfigError, DeviceCompatibility, DeviceStatus};
 use loopmaster_app_service::{
     DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, ProcessModel,
     ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent,
 };
-use loopmaster_app_service::{AppConfig, ConfigError};
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
     SourceId, SourceKind, SourceSpec,
 };
 use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineStatus};
-use tauri::Emitter;
 use tauri::menu::{Menu, MenuItem};
 use tauri::path::BaseDirectory;
 use tauri::tray::TrayIconBuilder;
+use tauri::Emitter;
 use tauri_plugin_autostart::ManagerExt;
 
 // ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ struct EngineStatsBrief {
 }
 
 /// 统一服务错误视图（保留分类、endpoint ID、HRESULT 与中文建议）。
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct ServiceErrorBrief {
     category: &'static str,
     message: String,
@@ -215,6 +215,12 @@ enum RouteEditRequest {
         id: String,
         channel_map: Vec<[u16; 2]>,
     },
+    ReplaceProcessSourceWithDevice {
+        old_source_id: String,
+        new_source_id: String,
+        endpoint_id: String,
+        display_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +283,7 @@ impl AppSettings {
 }
 
 struct AppState {
+    route_operation: Mutex<()>,
     editor: Mutex<RouteEditor>,
     engine: Mutex<Option<EngineService>>,
     config_path: PathBuf,
@@ -286,6 +293,7 @@ struct AppState {
 impl AppState {
     fn new(config_path: PathBuf) -> Self {
         Self {
+            route_operation: Mutex::new(()),
             editor: Mutex::new(RouteEditor::new(RouteGraph::default())),
             engine: Mutex::new(None),
             config_path,
@@ -335,6 +343,76 @@ fn ensure_engine(app: &tauri::AppHandle, state: &AppState) -> Result<bool, Servi
         .expect("创建事件转发线程失败");
     *engine_slot = Some(service);
     Ok(true)
+}
+
+fn validate_graph_endpoints(graph: &RouteGraph) -> Result<(), ServiceErrorBrief> {
+    let repository = DeviceRepository::new().map_err(service_error_brief)?;
+    let devices = repository.list_devices().map_err(service_error_brief)?;
+
+    for source in &graph.sources {
+        let expected = match source.kind {
+            SourceKind::DeviceCapture => Some(DeviceFlow::Capture),
+            SourceKind::DeviceLoopback => Some(DeviceFlow::Render),
+            SourceKind::ProcessLoopback => None,
+        };
+        if let Some(expected) = expected {
+            let endpoint = source.endpoint_id.as_ref().ok_or_else(|| {
+                ServiceErrorBrief::invalid_endpoint(
+                    None,
+                    format!("音源“{}”缺少 endpoint ID", source.display_name),
+                )
+            })?;
+            validate_endpoint(&devices, endpoint, expected, &source.display_name)?;
+        }
+    }
+    for sink in &graph.sinks {
+        validate_endpoint(
+            &devices,
+            &sink.endpoint_id,
+            DeviceFlow::Render,
+            &sink.display_name,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_endpoint(
+    devices: &[DeviceModel],
+    endpoint: &EndpointId,
+    expected: DeviceFlow,
+    display_name: &str,
+) -> Result<(), ServiceErrorBrief> {
+    let device = devices
+        .iter()
+        .find(|device| device.id == *endpoint)
+        .ok_or_else(|| {
+            ServiceErrorBrief::invalid_endpoint(
+                Some(endpoint.0.clone()),
+                format!("设备“{display_name}”当前不可用"),
+            )
+        })?;
+    if device.flow != expected {
+        return Err(ServiceErrorBrief::invalid_endpoint(
+            Some(endpoint.0.clone()),
+            format!(
+                "设备“{display_name}”流向错误：需要 {} endpoint，实际为 {} endpoint",
+                expected.as_str(),
+                device.flow.as_str()
+            ),
+        ));
+    }
+    let compatible = matches!(
+        (&device.compatibility, expected),
+        (DeviceCompatibility::CaptureReady, DeviceFlow::Capture)
+            | (DeviceCompatibility::RenderReady, DeviceFlow::Render)
+    );
+    if !compatible || device.status != DeviceStatus::Active {
+        return Err(ServiceErrorBrief::invalid_endpoint(
+            Some(endpoint.0.clone()),
+            format!("设备“{display_name}”与当前音频格式不兼容"),
+        ));
+    }
+    Ok(())
 }
 
 fn forward_event(app: &tauri::AppHandle, event: ServiceEvent) {
@@ -448,6 +526,17 @@ fn start_engine(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), ServiceErrorBrief> {
+    let _operation = state
+        .route_operation
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    {
+        let editor = state
+            .editor
+            .lock()
+            .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+        validate_graph_endpoints(editor.draft())?;
+    }
     // 1) 若已有引擎实例，先停止并丢弃，确保用最新图重建。
     {
         let mut engine_slot = state.engine.lock().expect("引擎锁未中毒");
@@ -510,50 +599,141 @@ fn apply_route_edit(
     state: tauri::State<'_, Arc<AppState>>,
     request: RouteEditRequest,
 ) -> Result<(), ServiceErrorBrief> {
-    // 1) 写入暂存图（编辑器草稿），保持与拓扑/显示一致。
-    // 锁范围收窄到仅改草稿，避免与引擎锁形成循环等待（start_engine 为 engine→editor）。
-    {
-        let mut editor = state
-            .editor
-            .lock()
-            .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
-        // 节点重命名在壳层处理：app-service 的 RouteEdit 不直接支持 display_name
-        // 覆盖，故重建编辑图（仅改 display_name，不影响拓扑）。其余 op 走标准映射。
-        match &request {
-            RouteEditRequest::SetSourceName { id, display_name } => {
-                apply_rename(&mut editor, RenameTarget::Source, id, display_name.clone())
-                    .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
-            }
-            RouteEditRequest::SetOutputChannelName { id, display_name } => {
-                apply_rename(
-                    &mut editor,
-                    RenameTarget::OutputChannel,
-                    id,
-                    display_name.clone(),
-                )
-                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
-            }
-            RouteEditRequest::SetExternalOutputName { id, display_name } => {
-                apply_rename(
-                    &mut editor,
-                    RenameTarget::ExternalOutput,
-                    id,
-                    display_name.clone(),
-                )
-                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
-            }
-            _ => {
-                let edit =
-                    request_to_route_edit(request.clone()).map_err(ServiceErrorBrief::graph)?;
-                editor
-                    .apply(edit)
-                    .map_err(|e| ServiceErrorBrief::graph(e.to_string()))?;
+    let _operation = state
+        .route_operation
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    let mut next_editor = state
+        .editor
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?
+        .clone();
+    apply_request_to_editor(&mut next_editor, &request)?;
+
+    // 运行中先更新引擎；失败则不替换草稿，保证两者仍指向同一版本。
+    forward_send_to_engine(&state, &request)?;
+    let mut editor = state
+        .editor
+        .lock()
+        .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
+    *editor = next_editor;
+    Ok(())
+}
+
+fn apply_request_to_editor(
+    editor: &mut RouteEditor,
+    request: &RouteEditRequest,
+) -> Result<(), ServiceErrorBrief> {
+    match request {
+        RouteEditRequest::SetSourceName { id, display_name } => {
+            apply_rename(editor, RenameTarget::Source, id, display_name.clone())
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+        RouteEditRequest::SetOutputChannelName { id, display_name } => apply_rename(
+            editor,
+            RenameTarget::OutputChannel,
+            id,
+            display_name.clone(),
+        )
+        .map_err(|e| ServiceErrorBrief::graph(e.to_string())),
+        RouteEditRequest::SetExternalOutputName { id, display_name } => apply_rename(
+            editor,
+            RenameTarget::ExternalOutput,
+            id,
+            display_name.clone(),
+        )
+        .map_err(|e| ServiceErrorBrief::graph(e.to_string())),
+        RouteEditRequest::ReplaceProcessSourceWithDevice {
+            old_source_id,
+            new_source_id,
+            endpoint_id,
+            display_name,
+        } => {
+            let repository = DeviceRepository::new().map_err(service_error_brief)?;
+            let devices = repository.list_devices().map_err(service_error_brief)?;
+            validate_endpoint(
+                &devices,
+                &EndpointId(endpoint_id.clone()),
+                DeviceFlow::Capture,
+                display_name,
+            )?;
+            replace_process_source_with_device(
+                editor,
+                old_source_id,
+                new_source_id,
+                endpoint_id,
+                display_name,
+            )
+        }
+        RouteEditRequest::AddSource {
+            kind,
+            endpoint_id: Some(endpoint_id),
+            display_name,
+            ..
+        } if kind == "device_capture" || kind == "device_loopback" => {
+            let expected = if kind == "device_capture" {
+                DeviceFlow::Capture
+            } else {
+                DeviceFlow::Render
+            };
+            let repository = DeviceRepository::new().map_err(service_error_brief)?;
+            let devices = repository.list_devices().map_err(service_error_brief)?;
+            validate_endpoint(
+                &devices,
+                &EndpointId(endpoint_id.clone()),
+                expected,
+                display_name,
+            )?;
+            let edit = request_to_route_edit(request.clone()).map_err(ServiceErrorBrief::graph)?;
+            editor
+                .apply(edit)
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+        _ => {
+            let edit = request_to_route_edit(request.clone()).map_err(ServiceErrorBrief::graph)?;
+            editor
+                .apply(edit)
+                .map_err(|e| ServiceErrorBrief::graph(e.to_string()))
+        }
+    }
+}
+
+fn replace_process_source_with_device(
+    editor: &mut RouteEditor,
+    old_source_id: &str,
+    new_source_id: &str,
+    endpoint_id: &str,
+    display_name: &str,
+) -> Result<(), ServiceErrorBrief> {
+    let mut graph = editor.draft().clone();
+    let source = graph
+        .sources
+        .iter_mut()
+        .find(|source| source.id.0 == old_source_id)
+        .ok_or_else(|| ServiceErrorBrief::graph(format!("source 不存在: {old_source_id}")))?;
+    if source.kind != SourceKind::ProcessLoopback {
+        return Err(ServiceErrorBrief::graph(format!(
+            "source 不是 ProcessLoopback: {old_source_id}"
+        )));
+    }
+    source.id = SourceId(new_source_id.to_owned());
+    source.kind = SourceKind::DeviceCapture;
+    source.endpoint_id = Some(EndpointId(endpoint_id.to_owned()));
+    source.process_id = None;
+    source.executable_path = None;
+    source.display_name = display_name.to_owned();
+    for send in &mut graph.sends {
+        if let SendSpec::SourceToBus { source_id, .. } = send {
+            if source_id.0 == old_source_id {
+                *source_id = SourceId(new_source_id.to_owned());
             }
         }
     }
-
-    // 2) send 级热更新转发到运行中的引擎（仅 Running 态，否则草稿已在步骤 1 更新）。
-    forward_send_to_engine(&state, &request)
+    graph
+        .validate()
+        .map_err(|error| ServiceErrorBrief::graph(error.to_string()))?;
+    *editor = RouteEditor::new(graph);
+    Ok(())
 }
 
 /// 将 send 级路由编辑转发给运行中的引擎，使其立即生效。
@@ -609,9 +789,7 @@ fn forward_send_to_engine(
 /// 保存的是**草稿图**（`RouteEditor.draft()`），即当前 UI 展示的拓扑，与引擎
 /// 是否运行无关；引擎运行中的热更新也已同步进草稿，故保存即反映最新状态。
 #[tauri::command]
-fn save_config(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<(), ServiceErrorBrief> {
+fn save_config(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErrorBrief> {
     persist_config(&state)
 }
 
@@ -648,12 +826,11 @@ fn spawn_process_watcher(app: tauri::AppHandle, state: Arc<AppState>) {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 // 枚举当前有音频会话的进程
-                let processes = match ProcessRepository::new()
-                    .and_then(|repo| repo.list_audio_processes())
-                {
-                    Ok(list) => list,
-                    Err(_) => continue,
-                };
+                let processes =
+                    match ProcessRepository::new().and_then(|repo| repo.list_audio_processes()) {
+                        Ok(list) => list,
+                        Err(_) => continue,
+                    };
                 // 收集失效的 ProcessLoopback 声源：(id, executable_path, 旧 pid)
                 let stale: Vec<(SourceId, String, u32)> = {
                     let editor = state.editor.lock().expect("路由锁未中毒");
@@ -678,7 +855,9 @@ fn spawn_process_watcher(app: tauri::AppHandle, state: Arc<AppState>) {
                     // 同一可执行路径下找新 PID
                     let new_pid = processes
                         .iter()
-                        .find(|p| p.executable_path.as_deref() == Some(path.as_str()) && p.pid != old_pid)
+                        .find(|p| {
+                            p.executable_path.as_deref() == Some(path.as_str()) && p.pid != old_pid
+                        })
                         .map(|p| p.pid);
                     let Some(new_pid) = new_pid else {
                         continue;
@@ -714,9 +893,7 @@ fn spawn_process_watcher(app: tauri::AppHandle, state: Arc<AppState>) {
 /// `Err` 以便前端提示。加载成功后标记缺失设备，后续 UI 按 endpoint 可用性
 /// 决定是否自动启动引擎。
 #[tauri::command]
-fn load_config(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<bool, ServiceErrorBrief> {
+fn load_config(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, ServiceErrorBrief> {
     let config = match AppConfig::load_from(&state.config_path) {
         Ok(config) => config,
         Err(ConfigError::NotFound(_)) => return Ok(false),
@@ -733,14 +910,8 @@ fn load_config(
 
 /// 读取当前应用设置。
 #[tauri::command]
-fn get_settings(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> AppSettings {
-    let settings = state
-        .settings
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+fn get_settings(state: tauri::State<'_, Arc<AppState>>) -> AppSettings {
+    let settings = state.settings.lock().map(|g| g.clone()).unwrap_or_default();
     settings
 }
 
@@ -756,37 +927,56 @@ fn update_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<AppSettings, ServiceErrorBrief> {
-    let mut settings = state
+    let previous = state
         .settings
         .lock()
         .map_err(|_| ServiceErrorBrief::lock_poisoned())?
         .clone();
+    let mut settings = previous.clone();
     if let Some(t) = theme {
-        settings.theme = if t == "dark" { "dark".into() } else { "light".into() };
+        settings.theme = if t == "dark" {
+            "dark".into()
+        } else {
+            "light".into()
+        };
     }
     if let Some(v) = start_on_boot {
-        settings.start_on_boot = v;
-        // 同步系统开机自启状态
-        let auto = app.autolaunch();
-        let result = if v {
-            auto.enable()
-        } else {
-            auto.disable()
-        };
-        if let Err(e) = result {
-            eprintln!("更新开机自启失败: {e}");
+        if v != previous.start_on_boot {
+            set_autostart(&app, v)?;
         }
+        settings.start_on_boot = v;
     }
     if let Some(v) = launch_hidden {
         settings.launch_hidden = v;
     }
-    settings.save_to_config(&state.config_path)?;
+    if let Err(error) = settings.save_to_config(&state.config_path) {
+        if settings.start_on_boot != previous.start_on_boot {
+            let _ = set_autostart(&app, previous.start_on_boot);
+        }
+        return Err(error);
+    }
     let mut slot = state
         .settings
         .lock()
         .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
     *slot = settings.clone();
     Ok(settings)
+}
+
+fn set_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<(), ServiceErrorBrief> {
+    let auto = app.autolaunch();
+    let result = if enabled {
+        auto.enable()
+    } else {
+        auto.disable()
+    };
+    result.map_err(|error| ServiceErrorBrief {
+        category: "autostart",
+        message: format!("更新开机自启失败: {error}"),
+        endpoint_id: None,
+        hresult: None,
+        hint: Some("请检查系统权限后重试".into()),
+    })
 }
 
 /// 可重命名节点类型。
@@ -950,14 +1140,14 @@ impl EngineStatsBrief {
             fifo_overflows: stats.fifo_overflows,
             fifo_underflows: stats.fifo_underflows,
             discontinuities: stats.discontinuities,
-        reconnect_attempts: stats.reconnect_attempts,
-        captured_peak: stats.captured_peak,
-        send_peaks: stats
-            .send_peaks
-            .iter()
-            .map(|(id, peaks)| (id.clone(), vec![peaks[0], peaks[1]]))
-            .collect(),
-    }
+            reconnect_attempts: stats.reconnect_attempts,
+            captured_peak: stats.captured_peak,
+            send_peaks: stats
+                .send_peaks
+                .iter()
+                .map(|(id, peaks)| (id.clone(), vec![peaks[0], peaks[1]]))
+                .collect(),
+        }
     }
 }
 
@@ -1056,6 +1246,16 @@ fn source_kind_str(kind: SourceKind) -> &'static str {
 }
 
 impl ServiceErrorBrief {
+    fn invalid_endpoint(endpoint_id: Option<String>, message: String) -> Self {
+        Self {
+            category: "device",
+            message,
+            endpoint_id,
+            hresult: None,
+            hint: Some("请刷新设备列表并选择与音频方向匹配的设备".into()),
+        }
+    }
+
     fn lock_poisoned() -> Self {
         Self {
             category: "internal",
@@ -1100,10 +1300,9 @@ fn config_error_brief(error: ConfigError) -> ServiceErrorBrief {
         ConfigError::NotFound(_) => ("config_not_found", Some("尚无已保存的配置".into())),
         ConfigError::Io(_) => ("config_io", Some("配置文件读写失败".into())),
         ConfigError::Json(_) => ("config_json", Some("配置文件格式损坏，已忽略".into())),
-        ConfigError::UnsupportedSchemaVersion(v) => (
-            "config_schema",
-            Some(format!("配置文件版本 {v} 不受支持").into()),
-        ),
+        ConfigError::UnsupportedSchemaVersion(v) => {
+            ("config_schema", Some(format!("配置文件版本 {v} 不受支持")))
+        }
         ConfigError::Graph(_) => ("config_graph", Some("配置文件路由图校验失败".into())),
     };
     ServiceErrorBrief {
@@ -1206,7 +1405,8 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
         // 在 apply_route_edit 中单独处理，不走此函数。
         RouteEditRequest::SetSourceName { .. }
         | RouteEditRequest::SetOutputChannelName { .. }
-        | RouteEditRequest::SetExternalOutputName { .. } => {
+        | RouteEditRequest::SetExternalOutputName { .. }
+        | RouteEditRequest::ReplaceProcessSourceWithDevice { .. } => {
             unreachable!("重命名 op 应在 apply_route_edit 中提前处理")
         }
     })
@@ -1289,10 +1489,7 @@ pub fn run() {
             let settings = AppSettings::load_from_config(&config_path);
             let state = Arc::new(AppState::new(config_path));
             {
-                let mut slot = state
-                    .settings
-                    .lock()
-                    .expect("设置锁未中毒");
+                let mut slot = state.settings.lock().expect("设置锁未中毒");
                 *slot = settings.clone();
             }
             app.manage(state);
@@ -1605,5 +1802,58 @@ mod tests {
             executable_path: None,
         });
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn process_source_replacement_preserves_send_parameters_atomically() {
+        let mut editor = RouteEditor::new(sample_graph());
+        replace_process_source_with_device(
+            &mut editor,
+            "src-a",
+            "src-device",
+            "capture-endpoint",
+            "虚拟麦克风",
+        )
+        .unwrap();
+
+        let graph = editor.draft();
+        let source = &graph.sources[0];
+        assert_eq!(source.id, SourceId("src-device".into()));
+        assert_eq!(source.kind, SourceKind::DeviceCapture);
+        assert_eq!(
+            source.endpoint_id,
+            Some(EndpointId("capture-endpoint".into()))
+        );
+        assert_eq!(source.process_id, None);
+        assert_eq!(source.executable_path, None);
+
+        let send = graph
+            .sends
+            .iter()
+            .find(|send| send.id() == &SendId("s1".into()))
+            .unwrap();
+        assert!(matches!(
+            send,
+            SendSpec::SourceToBus { source_id, .. }
+                if source_id == &SourceId("src-device".into())
+        ));
+        assert_eq!(send.gain_db(), -3.0);
+        assert!(send.muted());
+        assert!(send.enabled());
+    }
+
+    #[test]
+    fn invalid_process_source_replacement_keeps_original_graph() {
+        let mut editor = RouteEditor::new(sample_graph());
+        let before = editor.draft().clone();
+        assert!(replace_process_source_with_device(
+            &mut editor,
+            "missing",
+            "src-device",
+            "capture-endpoint",
+            "虚拟麦克风",
+        )
+        .is_err());
+        assert_eq!(editor.draft(), &before);
     }
 }
