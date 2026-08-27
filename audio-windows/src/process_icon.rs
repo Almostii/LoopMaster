@@ -10,20 +10,32 @@ use std::ptr;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HGLOBAL, MAX_PATH};
 use windows::Win32::Graphics::GdiPlus::{
-    GdiplusShutdown, GdiplusStartup, GdipCreateBitmapFromHICON, GdipDisposeImage,
-    GdipSaveImageToStream, GdiplusStartupInput, GdiplusStartupOutput, GpBitmap, GpImage, Status,
+    GdipCreateBitmapFromHICON, GdipDisposeImage, GdipSaveImageToStream, GdiplusShutdown,
+    GdiplusStartup, GdiplusStartupInput, GdiplusStartupOutput, GpBitmap, GpImage, Status,
 };
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 use windows::Win32::UI::Shell::{
-    ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
-    SHGFI_SHELLICONSIZE, SHGFI_USEFILEATTRIBUTES,
+    ExtractIconExW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SHELLICONSIZE,
+    SHGFI_USEFILEATTRIBUTES,
 };
 use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
 
 /// PNG 编码器 CLSID：{557CF406-1A04-11D3-9A73-0000F81EF32E}
 const PNG_ENCODER_CLSID: windows::core::GUID =
     windows::core::GUID::from_u128(0x557CF406_1A04_11D3_9A73_0000F81EF32E);
+
+#[cfg(windows)]
+struct GdipImageGuard(*mut GpImage);
+
+#[cfg(windows)]
+impl Drop for GdipImageGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { GdipDisposeImage(self.0) };
+        }
+    }
+}
 
 /// 返回可执行文件图标的 PNG data URI（`data:image/png;base64,...`），失败返回 `None`。
 pub fn process_icon_data_uri(executable_path: &str) -> Option<String> {
@@ -65,17 +77,15 @@ fn extract_icon_base64(path: &str) -> Option<String> {
         if status != Status(0) || bitmap.is_null() {
             return None;
         }
-        let image = bitmap as *mut GpImage;
-        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), false) }.ok()?;
-        let status = unsafe {
-            GdipSaveImageToStream(image, &stream, &PNG_ENCODER_CLSID, ptr::null())
-        };
+        let image = GdipImageGuard(bitmap.cast());
+        // delete_on_release=true：IStream 释放时同时释放内部 HGLOBAL。
+        let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL::default(), true) }.ok()?;
+        let status =
+            unsafe { GdipSaveImageToStream(image.0, &stream, &PNG_ENCODER_CLSID, ptr::null()) };
         if status != Status(0) {
-            unsafe { GdipDisposeImage(image) };
             return None;
         }
         let bytes = read_stream_to_end(&stream)?;
-        unsafe { GdipDisposeImage(image) };
         if bytes.is_empty() {
             return None;
         }
@@ -92,7 +102,9 @@ fn extract_icon_base64(path: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn extract_first_icon_from_exe(path: &str) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+fn extract_first_icon_from_exe(
+    path: &str,
+) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::Win32::UI::WindowsAndMessaging::HICON;
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let mut large: [HICON; 1] = [HICON(ptr::null_mut())];
@@ -101,8 +113,8 @@ fn extract_first_icon_from_exe(path: &str) -> Option<windows::Win32::UI::Windows
         ExtractIconExW(
             PCWSTR(wide.as_ptr()),
             0,
-            Some(large.as_mut_ptr() as *mut HICON),
-            Some(small.as_mut_ptr() as *mut HICON),
+            Some(large.as_mut_ptr()),
+            Some(small.as_mut_ptr()),
             1,
         )
     };
@@ -132,7 +144,8 @@ fn extract_shell_icon(path: &str) -> Option<windows::Win32::UI::WindowsAndMessag
             PCWSTR(wide.as_ptr()),
             FILE_ATTRIBUTE_NORMAL,
             Some(&mut info),
-            std::mem::size_of::<SHFILEINFOW>() as u32,
+            u32::try_from(std::mem::size_of::<SHFILEINFOW>())
+                .expect("SHFILEINFOW 大小应可表示为 u32"),
             SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SHELLICONSIZE | SHGFI_USEFILEATTRIBUTES,
         )
     };
@@ -144,9 +157,7 @@ fn extract_shell_icon(path: &str) -> Option<windows::Win32::UI::WindowsAndMessag
 }
 
 #[cfg(windows)]
-fn read_stream_to_end(
-    stream: &windows::Win32::System::Com::IStream,
-) -> Option<Vec<u8>> {
+fn read_stream_to_end(stream: &windows::Win32::System::Com::IStream) -> Option<Vec<u8>> {
     use windows::Win32::System::Com::STREAM_SEEK_SET;
 
     // GdipSaveImageToStream 写完后流指针在末尾，必须 seek 到开头再读。
@@ -162,7 +173,11 @@ fn read_stream_to_end(
     loop {
         let mut read: u32 = 0;
         let hr = unsafe {
-            stream.Read(buffer.as_mut_ptr() as *mut _, buffer.len() as u32, Some(&mut read))
+            stream.Read(
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as u32,
+                Some(&mut read),
+            )
         };
         if hr.is_err() {
             return None;
@@ -177,9 +192,8 @@ fn read_stream_to_end(
 
 #[cfg(windows)]
 fn base64_encode(bytes: &[u8]) -> String {
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = *chunk.get(1).unwrap_or(&0) as u32;

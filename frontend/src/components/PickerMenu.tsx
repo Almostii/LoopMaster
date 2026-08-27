@@ -6,6 +6,7 @@ export interface PickerOption {
   label: string;
   hint?: string;
   icon?: ReactNode;
+  disabled?: boolean;
 }
 
 export interface PickerGroup {
@@ -110,8 +111,10 @@ export default function PickerMenu({
     return (
       <div
         key={opt.value}
-        className="dropdown-item"
+        className={`dropdown-item${opt.disabled ? " disabled" : ""}`}
+        aria-disabled={opt.disabled}
         onClick={() => {
+          if (opt.disabled) return;
           onSelect(opt.value);
           setOpen(false);
         }}

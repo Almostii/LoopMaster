@@ -130,6 +130,7 @@ export function useLoopMaster() {
     "add_send",
     "add_send_to_output",
     "remove_send",
+    "replace_process_source_with_device",
   ]);
 
   // send 级热更新（enabled/muted/gain）：直接下发给运行中的引擎，不需重启，
@@ -148,6 +149,7 @@ export function useLoopMaster() {
         if (busyRef.current) return;
         busyRef.current = true;
       }
+      let succeeded = false;
       try {
         await applyRouteEdit(req);
         if (isSend) {
@@ -164,15 +166,17 @@ export function useLoopMaster() {
             showNotice(okMessage);
           }
         }
+        succeeded = true;
       } catch (e) {
         showNotice(formatError(e), "error");
       } finally {
         if (!isSend) busyRef.current = false;
-        // 自动持久化：每次编辑后把最新草稿写入配置文件（失败静默，不阻断操作）。
-        await saveConfig().catch(() => {});
+        // 只有编辑和运行态同步都成功后才持久化。
+        if (succeeded) await saveConfig().catch(() => {});
         await refreshRoute();
         await refreshEngineState();
       }
+      return succeeded;
     },
     [showNotice, refreshRoute, refreshEngineState, stopEngine, startEngine],
   );
@@ -221,7 +225,7 @@ export function useLoopMaster() {
       req: { kind: "process_loopback" | "device_capture" | "device_loopback"; display_name: string; endpoint_id: string | null; process_id: number | null; executable_path?: string | null },
     ) => {
       const srcId = freshId("src");
-      await runEdit(
+      const added = await runEdit(
         {
           op: "add_source",
           id: srcId,
@@ -233,6 +237,7 @@ export function useLoopMaster() {
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
+      if (!added) return;
       // 新建音源后，若已存在输出通道且该音源尚无连线，则自动连到第一个输出通道
       const snap = await getRouteSnapshot();
       const hasSend = snap.sends.some((s) => s.source === srcId);
@@ -275,7 +280,7 @@ function cleanProcessName(name: string): string {
   const addSourceFromDevice = useCallback(
     async (device: DeviceBrief, kind: "device_capture" | "device_loopback") => {
       const srcId = freshId("src");
-      await runEdit(
+      const added = await runEdit(
         {
           op: "add_source",
           id: srcId,
@@ -287,6 +292,7 @@ function cleanProcessName(name: string): string {
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
+      if (!added) return null;
       // 新建音源后，若已存在输出通道且该音源尚无连线，则自动连到第一个输出通道
       const snap = await getRouteSnapshot();
       const hasSend = snap.sends.some((s) => s.source === srcId);
@@ -372,21 +378,23 @@ function cleanProcessName(name: string): string {
 
   const addExternalOutput = useCallback(
     async (device: DeviceBrief) => {
-      await runEdit(
+      const externalId = freshId("out");
+      const added = await runEdit(
         {
           op: "add_external_output",
-          id: freshId("out"),
+          id: externalId,
           endpoint_id: device.id,
           display_name: device.name,
         },
         "已添加外部输出（拓扑变更需重启引擎生效）",
       );
+      if (!added) return;
 
       // 自动把新外部输出与第一个输出通道连线（若存在且尚未连线）。
       // 该 send 与 add_external_output 同属一次拓扑变更，start_engine 会重建引擎生效。
       const latest = await getRouteSnapshot();
       const channel = latest.output_channels[0];
-      const external = latest.external_outputs[latest.external_outputs.length - 1];
+      const external = latest.external_outputs.find((output) => output.id === externalId);
       if (channel && external) {
         const existing = latest.sends.find(
           (s) =>
@@ -532,42 +540,18 @@ function cleanProcessName(name: string): string {
    */
   const switchProcessSourceToDevice = useCallback(
     async (oldSourceId: string, device: DeviceBrief) => {
-      // 1. 记录旧音源的连线配置
-      const snapBefore = await getRouteSnapshot();
-      const oldSends = snapBefore.sends.filter((s) => s.source === oldSourceId);
-      // 2. 删除旧进程音源
-      await removeSource(oldSourceId);
-      // 3. 创建同名的设备捕获音源（会自动连到第一个输出通道）
-      const newId = await addSourceFromDevice(device, "device_capture");
-      // 4. 移除自动创建的连线，改为按旧配置重建，保留增益/静音/通道映射
-      const snapAfter = await getRouteSnapshot();
-      const autoSend = snapAfter.sends.find((s) => s.source === newId);
-      if (autoSend) {
-        await removeSend(autoSend.id);
-      }
-      for (const oldSend of oldSends) {
-        const sendId = freshId("send");
-        await runEdit(
-          {
-            op: "add_send",
-            id: sendId,
-            source_id: newId,
-            output_channel_id: oldSend.output_channel ?? undefined,
-          },
-          "已迁移连线（拓扑变更需重启引擎生效）",
-        );
-        if (oldSend.gain_db !== 0) {
-          await setSendGain(sendId, oldSend.gain_db);
-        }
-        if (oldSend.muted) {
-          await setSendMuted(sendId, true);
-        }
-        if (oldSend.channel_map && oldSend.channel_map.length > 0) {
-          await setSendChannelMap(sendId, oldSend.channel_map);
-        }
-      }
+      await runEdit(
+        {
+          op: "replace_process_source_with_device",
+          old_source_id: oldSourceId,
+          new_source_id: freshId("src"),
+          endpoint_id: device.id,
+          display_name: device.name,
+        },
+        "已切换为设备捕获并保留全部连线参数",
+      );
     },
-    [getRouteSnapshot, removeSource, addSourceFromDevice, removeSend, runEdit, setSendGain, setSendMuted, setSendChannelMap],
+    [runEdit],
   );
 
   // ---------- 事件订阅 ----------
@@ -599,7 +583,17 @@ function cleanProcessName(name: string): string {
       // 状态事件仅携带 state/running；failed/last_error 等完整失败详情
       // 需重新拉取引擎状态快照，确保失败界面正确刷新。
       void refreshEngineState();
-      setNotice({ text: `引擎状态：${payload.running ? "运行中" : "已停止"}`, kind: "info" });
+      const labels: Record<string, string> = {
+        stopped: "已停止",
+        running: "运行中",
+        degraded: "设备异常",
+        reconnecting: "正在重连",
+        failed: "启动失败",
+      };
+      setNotice({
+        text: `引擎状态：${labels[payload.state] ?? payload.state}`,
+        kind: payload.state === "failed" || payload.state === "degraded" ? "error" : "info",
+      });
     });
     const unStats = onEngineStatsChanged((payload) => setStats(payload));
     const unLost = onDeviceLost((endpointId) =>

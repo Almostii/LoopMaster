@@ -787,6 +787,15 @@ button:disabled {
   border: 1px solid var(--border-light);
 }
 .node-options-content.show { display: flex; }
+.send-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light);
+}
+.send-options:first-child { padding-top: 0; border-top: 0; }
+.send-options-title { font-size: 10px; color: var(--text-muted); }
 
 /* 进程建议改用设备捕获提示 */
 .node-switch-hint {
@@ -1079,6 +1088,8 @@ button:disabled {
   transition: background 0.1s;
 }
 .dropdown-item:hover { background: var(--primary); color: white; }
+.dropdown-item.disabled { color: var(--text-muted); cursor: not-allowed; opacity: 0.65; }
+.dropdown-item.disabled:hover { background: transparent; color: var(--text-muted); }
 .dropdown-item.muted { color: var(--text-muted); cursor: default; }
 .dropdown-item.muted:hover { background: transparent; color: var(--text-muted); }
 .dropdown-item-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

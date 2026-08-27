@@ -77,6 +77,7 @@ export interface EngineStatsEvent {
   capture_packets: number;
   captured_frames: number;
   rendered_frames: number;
+  render_writes: number;
   fifo_overflows: number;
   fifo_underflows: number;
   discontinuities: number;
