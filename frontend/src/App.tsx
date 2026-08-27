@@ -12,6 +12,11 @@ import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
 import { listAudioProcesses, processIconDataUri } from "./api";
+import {
+  deviceAvailabilityLabel,
+  isDeviceSelectable,
+  sourceKindForDevice,
+} from "./deviceRouting";
 
 // 设备分组通用图标（进程使用真实应用图标）
 function MicIcon() {
@@ -147,7 +152,9 @@ function App() {
     const map = new Map<string, { sourceId: string; candidates: typeof captureDevices }>();
     for (const s of route.sources) {
       if (s.kind !== "process_loopback") continue;
-      const candidates = captureDevices.filter((d) => deviceMatchesProcess(d, s.display_name));
+      const candidates = captureDevices.filter(
+        (d) => isDeviceSelectable(d) && deviceMatchesProcess(d, s.display_name),
+      );
       if (candidates.length > 0) {
         map.set(s.id, { sourceId: s.id, candidates });
       }
@@ -239,9 +246,8 @@ function App() {
     [],
   );
 
-  // 所有音频来源按用途分组到同一个 Picker：进程、麦克风、设备回环、虚拟设备。
-  // 每个 capture 设备只按其后端分类（category）出现在其中一个组里，避免重复。
-  // value 使用前缀区分类型，handleSelectSource 解析后调用对应添加函数。
+  // category 只用于展示分组，真正的 source 类型由 endpoint 的 flow 决定：
+  // capture endpoint 走 DeviceCapture，render endpoint 才能走 DeviceLoopback。
   const sourceGroups = [
     {
       title: "进程 (Process Loopback)",
@@ -258,18 +264,22 @@ function App() {
       options: captureDevices
         .filter((d) => d.category === "input_mic")
         .map((d) => ({
-          value: `mic:${d.id}`,
+          value: `device:${d.id}`,
           label: d.name,
+          hint: deviceAvailabilityLabel(d),
+          disabled: !isDeviceSelectable(d),
           icon: <MicIcon />,
         })),
     },
     {
-      title: "设备回环 (Device Loopback)",
+      title: "回环输入设备 (Capture)",
       options: captureDevices
         .filter((d) => d.category === "input_loopback")
         .map((d) => ({
-          value: `loop:${d.id}`,
+          value: `device:${d.id}`,
           label: d.name,
+          hint: deviceAvailabilityLabel(d),
+          disabled: !isDeviceSelectable(d),
           icon: <LoopbackIcon />,
         })),
     },
@@ -278,17 +288,30 @@ function App() {
       options: captureDevices
         .filter((d) => d.category === "input_virtual")
         .map((d) => ({
-          value: `loop:${d.id}`,
+          value: `device:${d.id}`,
           label: d.name,
+          hint: deviceAvailabilityLabel(d),
+          disabled: !isDeviceSelectable(d),
           icon: <VirtualIcon />,
         })),
+    },
+    {
+      title: "播放设备回环 (Render Loopback)",
+      options: renderDevices.map((d) => ({
+        value: `device:${d.id}`,
+        label: d.name,
+        hint: deviceAvailabilityLabel(d),
+        disabled: !isDeviceSelectable(d),
+        icon: <LoopbackIcon />,
+      })),
     },
   ];
 
   const externalOptions: PickerOption[] = renderDevices.map((d) => ({
     value: d.id,
     label: d.name,
-    hint: d.status,
+    hint: deviceAvailabilityLabel(d),
+    disabled: !isDeviceSelectable(d),
   }));
 
   const deviceById = useMemo(() => {
@@ -409,12 +432,11 @@ function App() {
       const pid = Number(id);
       const process = processes.find((p) => p.pid === pid);
       if (process) void addSourceFromProcess(process);
-    } else if (kind === "mic") {
-      const device = captureDevices.find((d) => d.id === id);
-      if (device) void addSourceFromDevice(device, "device_capture");
-    } else if (kind === "loop") {
-      const device = captureDevices.find((d) => d.id === id);
-      if (device) void addSourceFromDevice(device, "device_loopback");
+    } else if (kind === "device") {
+      const device = [...captureDevices, ...renderDevices].find((d) => d.id === id);
+      if (device && isDeviceSelectable(device)) {
+        void addSourceFromDevice(device, sourceKindForDevice(device));
+      }
     }
   }
 
@@ -604,6 +626,7 @@ function App() {
                     isSelected={selectedCard?.type === "external" && selectedCard.id === ext.id}
                     onToggle={handleToggleExternal}
                     onSetGain={(sendId, g) => void setSendGain(sendId, g)}
+                    onSetMuted={(sendId, muted) => void setSendMuted(sendId, muted)}
                     onRename={(id, name) => void renameExternalOutput(id, name)}
                     onSelect={() => setSelectedCard({ type: "external", id: ext.id })}
                   />

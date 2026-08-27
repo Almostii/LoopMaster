@@ -249,219 +249,6 @@ fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(tmp_name)
 }
 
-// 旧 source -> sink 测试保留用于迁移 JSON 对照；由下方 V2 测试替代。
-#[cfg(all(test, any()))]
-mod tests {
-    use super::*;
-    use loopmaster_audio_core::{SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec};
-
-    fn source(id: &str) -> SourceSpec {
-        SourceSpec {
-            id: SourceId(id.into()),
-            kind: SourceKind::DeviceCapture,
-            endpoint_id: Some(EndpointId(format!("endpoint-{id}"))),
-            process_id: None,
-            executable_path: None,
-            display_name: id.into(),
-        }
-    }
-
-    fn sink(id: &str) -> SinkSpec {
-        SinkSpec {
-            id: SinkId(id.into()),
-            endpoint_id: EndpointId(format!("endpoint-{id}")),
-            display_name: id.into(),
-        }
-    }
-
-    fn send(source_id: &str, sink_id: &str) -> SendSpec {
-        SendSpec {
-            source_id: SourceId(source_id.into()),
-            sink_id: SinkId(sink_id.into()),
-            gain_db: 0.0,
-            muted: false,
-            enabled: true,
-            channel_map: Vec::new(),
-        }
-    }
-
-    fn graph() -> RouteGraph {
-        RouteGraph {
-            sources: vec![source("a")],
-            sinks: vec![sink("out")],
-            sends: vec![send("a", "out")],
-        }
-    }
-
-    #[test]
-    fn json_round_trip_preserves_config() {
-        let config = AppConfig::new(graph());
-        let json = config.to_json().unwrap();
-        let loaded = AppConfig::from_json(&json).unwrap();
-        assert_eq!(loaded, config);
-        assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn file_save_load_round_trip() {
-        let dir =
-            std::env::temp_dir().join(format!("loopmaster-config-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-        let _ = std::fs::remove_file(&path);
-
-        let config = AppConfig::new(graph());
-        config.save_to(&path).unwrap();
-        let loaded = AppConfig::load_from(&path).unwrap();
-        assert_eq!(loaded, config);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_file_reports_not_found() {
-        let dir =
-            std::env::temp_dir().join(format!("loopmaster-config-missing-{}", std::process::id()));
-        let path = dir.join("absent.json");
-        let error = AppConfig::load_from(&path).unwrap_err();
-        assert!(matches!(error, ConfigError::NotFound(_)));
-    }
-
-    #[test]
-    fn malformed_json_is_rejected() {
-        let error = AppConfig::from_json(b"{\"broken").unwrap_err();
-        assert!(matches!(error, ConfigError::Json(_)));
-    }
-
-    #[test]
-    fn unknown_schema_version_is_rejected() {
-        let mut config = AppConfig::new(graph());
-        config.schema_version = 999;
-        let json = config.to_json().unwrap();
-        let error = AppConfig::from_json(&json).unwrap_err();
-        assert!(matches!(error, ConfigError::UnsupportedSchemaVersion(999)));
-    }
-
-    #[test]
-    fn duplicate_graph_ids_are_rejected_on_load() {
-        let mut duplicate = graph();
-        duplicate.sources.push(source("a")); // 与已有 source 重复 ID
-        let config = AppConfig::new(duplicate);
-        let json = config.to_json().unwrap();
-        let error = AppConfig::from_json(&json).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigError::Graph(RouteGraphError::DuplicateSource(ref id)) if id == "a"
-        ));
-    }
-
-    #[test]
-    fn invalid_gain_is_rejected_on_load() {
-        let mut graph = graph();
-        graph.sends[0].gain_db = 99.0; // 超出 -60..=12 dB 范围
-        let config = AppConfig::new(graph);
-        let json = config.to_json().unwrap();
-        let error = AppConfig::from_json(&json).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigError::Graph(RouteGraphError::InvalidGain(99.0))
-        ));
-    }
-
-    #[test]
-    fn send_referencing_missing_source_is_rejected_on_load() {
-        let mut graph = graph();
-        graph.sends[0].source_id = SourceId("ghost".into());
-        let config = AppConfig::new(graph);
-        let json = config.to_json().unwrap();
-        let error = AppConfig::from_json(&json).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigError::Graph(RouteGraphError::MissingSource(ref id)) if id == "ghost"
-        ));
-    }
-
-    #[test]
-    fn config_without_ui_state_field_parses_with_defaults() {
-        // 模拟旧 JSON：没有 ui_state 字段，应回退到默认空状态。
-        let json = br#"{
-            "schema_version": 1,
-            "graph": {
-                "sources": [{
-                    "id": "a",
-                    "kind": "DeviceCapture",
-                    "endpoint_id": "endpoint-a",
-                    "process_id": null,
-                    "display_name": "a"
-                }],
-                "sinks": [{
-                    "id": "out",
-                    "endpoint_id": "endpoint-out",
-                    "display_name": "out"
-                }],
-                "sends": [{
-                    "source_id": "a",
-                    "sink_id": "out",
-                    "gain_db": 0.0,
-                    "muted": false,
-                    "enabled": true,
-                    "channel_map": []
-                }]
-            }
-        }"#;
-        let config = AppConfig::from_json(json).unwrap();
-        assert_eq!(config.ui_state, UiState::default());
-        assert!(config.ui_state.missing_endpoints.is_empty());
-    }
-
-    #[test]
-    fn mark_missing_endpoints_keeps_route_and_dedups() {
-        let mut config = AppConfig::new(graph());
-        config.mark_missing_endpoints(&[]); // 所有设备缺失
-        assert_eq!(
-            config.ui_state.missing_endpoints,
-            vec![
-                EndpointId("endpoint-a".into()),
-                EndpointId("endpoint-out".into())
-            ]
-        );
-        // 路由保留，不按名称替换
-        assert_eq!(config.graph.sources.len(), 1);
-        assert_eq!(config.graph.sinks.len(), 1);
-
-        // 全部可用后缺失列表清空
-        config.mark_missing_endpoints(&[
-            EndpointId("endpoint-a".into()),
-            EndpointId("endpoint-out".into()),
-        ]);
-        assert!(config.ui_state.missing_endpoints.is_empty());
-    }
-
-    #[test]
-    fn save_does_not_corrupt_previous_file_when_tmp_is_left_behind() {
-        let dir =
-            std::env::temp_dir().join(format!("loopmaster-config-atomic-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.json");
-
-        let first = AppConfig::new(graph());
-        first.save_to(&path).unwrap();
-
-        // 模拟上一次写入中断：同目录残留半截临时文件。
-        std::fs::write(temp_path_for(&path), b"{\"broken").unwrap();
-
-        // 新配置保存成功，目标文件为完整新内容，且可正常加载。
-        let mut second = first.clone();
-        second.graph.sends[0].gain_db = -6.0;
-        second.save_to(&path).unwrap();
-        let loaded = AppConfig::load_from(&path).unwrap();
-        assert_eq!(loaded, second);
-        assert!(!temp_path_for(&path).exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 #[cfg(test)]
 mod v2_tests {
     use super::*;
@@ -564,5 +351,77 @@ mod v2_tests {
     fn unknown_schema_version_is_rejected() {
         let error = AppConfig::from_json(br#"{"schema_version": 999, "graph": {}}"#).unwrap_err();
         assert!(matches!(error, ConfigError::UnsupportedSchemaVersion(999)));
+    }
+
+    #[test]
+    fn file_save_load_round_trip() {
+        let dir = std::env::temp_dir().join(format!(
+            "loopmaster-v2-config-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let config = AppConfig::new(graph());
+
+        config.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap(), config);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_json_and_missing_file_are_distinct_errors() {
+        assert!(matches!(
+            AppConfig::from_json(b"{broken").unwrap_err(),
+            ConfigError::Json(_)
+        ));
+        let path = std::env::temp_dir().join(format!(
+            "loopmaster-missing-config-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        assert!(matches!(
+            AppConfig::load_from(&path).unwrap_err(),
+            ConfigError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn save_replaces_stale_temporary_file_atomically() {
+        let dir = std::env::temp_dir().join(format!(
+            "loopmaster-v2-atomic-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut config = AppConfig::new(graph());
+        config.save_to(&path).unwrap();
+        std::fs::write(temp_path_for(&path), b"{broken").unwrap();
+
+        if let SendSpec::SourceToBus { gain_db, .. } = &mut config.graph.sends[0] {
+            *gain_db = -6.0;
+        }
+        config.save_to(&path).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap(), config);
+        assert!(!temp_path_for(&path).exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_endpoints_are_deduplicated_without_changing_graph() {
+        let mut config = AppConfig::new(graph());
+        let original = config.graph.clone();
+        config.mark_missing_endpoints(&[]);
+        assert_eq!(
+            config.ui_state.missing_endpoints,
+            vec![
+                EndpointId("endpoint-sink".into()),
+                EndpointId("endpoint-source".into())
+            ]
+        );
+        assert_eq!(config.graph, original);
     }
 }

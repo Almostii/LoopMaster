@@ -43,8 +43,6 @@ export default function SourceCard({
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(source.display_name);
   const sends = sendsForSource(route, source.id);
-  // 增益/静音作用于该音源的首条 send
-  const primarySend = sends[0];
 
   function commitName() {
     const next = nameDraft.trim();
@@ -183,8 +181,9 @@ export default function SourceCard({
             <span>Options</span>
           </div>
           <div className={`node-options-content ${optionsOpen ? "show" : ""}`} onClick={stopProp}>
-            {primarySend ? (
-              <>
+            {sends.length > 0 ? sends.map((send, index) => (
+              <div className="send-options" key={send.id}>
+                <div className="send-options-title">连线 {index + 1}</div>
                 <div className="option-row">
                   <span className="option-label">增益 (Gain)</span>
                   <div className="option-control-group">
@@ -194,25 +193,22 @@ export default function SourceCard({
                       min={-24}
                       max={12}
                       step={0.5}
-                      value={primarySend.gain_db}
-                      onChange={(e) =>
-                        onSetGain(primarySend.id, Number(e.target.value))
-                      }
+                      value={send.gain_db}
+                      onChange={(e) => onSetGain(send.id, Number(e.target.value))}
                     />
-                    <span className="option-val">{formatDb(primarySend.gain_db)}</span>
+                    <span className="option-val">{formatDb(send.gain_db)}</span>
                   </div>
                 </div>
                 <div className="option-row">
                   <span className="option-label">静音 (Mute)</span>
                   <input
                     type="checkbox"
-                    checked={primarySend.muted}
-                    onChange={(e) => onSetMuted(primarySend.id, e.target.checked)}
+                    checked={send.muted}
+                    onChange={(e) => onSetMuted(send.id, e.target.checked)}
                   />
                 </div>
-
-              </>
-            ) : (
+              </div>
+            )) : (
               <span className="option-hint">尚未连线，无法设置增益/静音</span>
             )}
           </div>
