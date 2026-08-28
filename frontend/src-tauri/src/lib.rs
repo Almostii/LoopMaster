@@ -28,8 +28,8 @@ use loopmaster_app_service::{
     RouteEditor, ServiceError, ServiceEvent, CAPS_VBAN_AUDIO,
 };
 use loopmaster_audio_core::{
-    BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
-    SourceId, SourceKind, SourceSpec,
+    BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkKind,
+    SinkSpec, SourceId, SourceKind, SourceSpec,
 };
 use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineStatus};
 use tauri::menu::{Menu, MenuItem};
@@ -142,6 +142,15 @@ struct ExternalOutputBrief {
     id: String,
     endpoint_id: String,
     display_name: String,
+    #[serde(default = "default_device_kind")]
+    kind: String,
+    #[serde(default)]
+    stream_name: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_device_kind() -> String {
+    "device".to_owned()
 }
 
 /// 引擎状态视图。
@@ -436,6 +445,8 @@ fn validate_graph_endpoints(graph: &RouteGraph) -> Result<(), ServiceErrorBrief>
             SourceKind::DeviceCapture => Some(DeviceFlow::Capture),
             SourceKind::DeviceLoopback => Some(DeviceFlow::Render),
             SourceKind::ProcessLoopback => None,
+            // VBAN 网络源不依赖真实设备。
+            SourceKind::Vban => None,
         };
         if let Some(expected) = expected {
             let endpoint = source.endpoint_id.as_ref().ok_or_else(|| {
@@ -448,6 +459,10 @@ fn validate_graph_endpoints(graph: &RouteGraph) -> Result<(), ServiceErrorBrief>
         }
     }
     for sink in &graph.sinks {
+        // VBAN 网络目标不依赖真实渲染设备，跳过 endpoint 校验。
+        if sink.kind == SinkKind::Vban {
+            continue;
+        }
         validate_endpoint(
             &devices,
             &sink.endpoint_id,
@@ -1436,6 +1451,11 @@ impl RouteProfileSnapshot {
                 id: s.id.0.clone(),
                 endpoint_id: s.endpoint_id.0.clone(),
                 display_name: s.display_name.clone(),
+                kind: match s.kind {
+                    SinkKind::Device => "device".to_owned(),
+                    SinkKind::Vban => "vban".to_owned(),
+                },
+                stream_name: s.stream_name.clone(),
             })
             .collect();
 
@@ -1496,6 +1516,7 @@ fn source_kind_str(kind: SourceKind) -> &'static str {
         SourceKind::DeviceCapture => "device_capture",
         SourceKind::DeviceLoopback => "device_loopback",
         SourceKind::ProcessLoopback => "process_loopback",
+        SourceKind::Vban => "vban",
     }
 }
 
@@ -1582,6 +1603,7 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
                 "device_capture" => SourceKind::DeviceCapture,
                 "device_loopback" => SourceKind::DeviceLoopback,
                 "process_loopback" => SourceKind::ProcessLoopback,
+                "vban" => SourceKind::Vban,
                 other => return Err(format!("未知 source 类型: {other}")),
             };
             RouteEdit::AddSource(SourceSpec {
@@ -1607,6 +1629,8 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             id: SinkId(id),
             endpoint_id: EndpointId(endpoint_id),
             display_name,
+            kind: SinkKind::Device,
+            stream_name: None,
         }),
         RouteEditRequest::RemoveExternalOutput { id } => RouteEdit::RemoveSink(SinkId(id)),
         RouteEditRequest::AddSend {
@@ -1846,6 +1870,8 @@ mod tests {
                 id: SinkId("out-1".into()),
                 endpoint_id: EndpointId("endpoint-1".into()),
                 display_name: "扬声器".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {

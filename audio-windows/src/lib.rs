@@ -17,7 +17,7 @@ pub use process_icon::process_icon_data_uri;
 pub use process_loopback::ProcessLoopbackSource;
 pub use runtime::{
     AudioEngine, AudioEngineConfig, AudioEngineError, AudioEngineState, AudioEngineStats,
-    AudioEngineStatus,
+    AudioEngineStatus, NetworkIoHandles,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

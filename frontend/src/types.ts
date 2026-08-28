@@ -34,6 +34,10 @@ export interface ExternalOutputBrief {
   id: string;
   endpoint_id: string;
   display_name: string;
+  /** 输出目标类型："device" | "vban"。旧版本无此字段时视为 "device"。 */
+  kind?: "device" | "vban";
+  /** VBAN 网络目标的流名（kind === "vban" 时使用）。 */
+  stream_name?: string | null;
 }
 
 /** 应用设置（设置页持久化内容）。 */

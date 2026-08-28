@@ -72,6 +72,9 @@ pub enum SourceKind {
     DeviceCapture,
     DeviceLoopback,
     ProcessLoopback,
+    /// VBAN 网络接收源：接收远端电脑经 UDP 发送的音频，作为本机混音输入。
+    /// 不依赖真实 WASAPI endpoint，`endpoint_id` 为 `None`。
+    Vban,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,11 +91,27 @@ pub struct SourceSpec {
     pub display_name: String,
 }
 
+/// 输出目标的类型。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SinkKind {
+    /// 物理/虚拟 WASAPI 渲染设备。
+    #[default]
+    Device,
+    /// VBAN 网络发送目标：把混音结果经 UDP 发送到远端电脑。
+    Vban,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SinkSpec {
     pub id: SinkId,
     pub endpoint_id: EndpointId,
     pub display_name: String,
+    /// 输出目标类型（默认 `Device`）。旧配置缺省时回退到 `Device`。
+    #[serde(default)]
+    pub kind: SinkKind,
+    /// VBAN 发送目标的流名（`SinkKind::Vban` 时使用）；`Device` 为 `None`。
+    #[serde(default)]
+    pub stream_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -182,6 +201,8 @@ pub enum RouteGraphError {
     DuplicateSourceEndpoint(String),
     #[error("sink endpoint ID 重复: {0}")]
     DuplicateSinkEndpoint(String),
+    #[error("VBAN 目标流名非法（须为 1..=16 字节可打印 ASCII）: {0}")]
+    InvalidVbanStreamName(String),
     #[error("source 不存在: {0}")]
     MissingSource(String),
     #[error("bus 不存在: {0}")]
@@ -216,7 +237,18 @@ impl RouteGraph {
             if !sink_ids.insert(sink.id.clone()) {
                 return Err(RouteGraphError::DuplicateSink(sink.id.0.clone()));
             }
-            if !sink_endpoints.insert(sink.endpoint_id.clone()) {
+            // 仅对真实渲染设备校验 endpoint 去重；VBAN 网络目标不依赖真实
+            // endpoint，其身份由 stream_name 标识。
+            if sink.kind == SinkKind::Vban {
+                // VBAN 目标必须携带合法流名（1..=16 字节可打印 ASCII）。
+                let name = sink.stream_name.as_deref().unwrap_or_default();
+                let valid = !name.is_empty()
+                    && name.len() <= crate::vban::packet::VBAN_STREAM_NAME_SIZE
+                    && name.bytes().all(|b| (32..=126).contains(&b));
+                if !valid {
+                    return Err(RouteGraphError::InvalidVbanStreamName(sink.id.0.clone()));
+                }
+            } else if !sink_endpoints.insert(sink.endpoint_id.clone()) {
                 return Err(RouteGraphError::DuplicateSinkEndpoint(
                     sink.endpoint_id.0.clone(),
                 ));
@@ -283,6 +315,8 @@ mod route_graph_tests {
             id: SinkId(id.into()),
             endpoint_id: EndpointId(endpoint.into()),
             display_name: id.into(),
+            kind: SinkKind::Device,
+            stream_name: None,
         }
     }
 

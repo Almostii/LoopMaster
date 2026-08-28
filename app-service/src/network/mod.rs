@@ -7,12 +7,14 @@
 //! 参考：[VBAN 局域网音频互通与传输方案]
 //! （../../../../Doc/网络传输与本地节点互通方案计划/1.VBAN局域网音频互通与传输方案.md）6 节。
 
+pub mod bridge;
 pub mod identity;
 pub mod mdns;
 pub mod network_discovery;
 pub mod receiver;
 pub mod sender;
 
+pub use bridge::{NetworkBridge, NetworkBridgeError, VbanSinkBridge, VbanSourceBridge};
 pub use identity::{
     default_device_name, NodeIdentity, NodeMeta, CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR,
     VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE,

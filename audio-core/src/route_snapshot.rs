@@ -26,7 +26,7 @@ impl RouteGraphSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EndpointId, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec};
+    use crate::{EndpointId, SinkId, SinkKind, SinkSpec, SourceId, SourceKind, SourceSpec};
 
     fn source(id: &str) -> SourceSpec {
         SourceSpec {
@@ -48,6 +48,8 @@ mod tests {
                 id: SinkId("s".into()),
                 endpoint_id: EndpointId("endpoint".into()),
                 display_name: "sink".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
             }],
             sends: Vec::new(),
         };
