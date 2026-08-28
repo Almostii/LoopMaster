@@ -23,8 +23,9 @@ use tauri::Manager;
 
 use loopmaster_app_service::{AppConfig, ConfigError, DeviceCompatibility, DeviceStatus};
 use loopmaster_app_service::{
-    DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, ProcessModel,
-    ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent,
+    DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, NetworkDiscovery,
+    NetworkEvent, NodeIdentity, NodeInfo, ProcessModel, ProcessRepository, RouteEdit, RouteEditor,
+    ServiceError, ServiceEvent,
 };
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
@@ -59,6 +60,41 @@ struct ProcessBrief {
     pid: u32,
     name: String,
     executable_path: Option<String>,
+}
+
+/// 本机网络身份概要。
+#[derive(Clone, Serialize)]
+struct NodeIdentityBrief {
+    node_id: String,
+    device_name: String,
+    network_enabled: bool,
+    web_port: u16,
+}
+
+/// 局域网发现的 VBAN 节点概要。
+#[derive(Clone, Serialize)]
+struct NetworkNodeBrief {
+    node_id: String,
+    name: String,
+    addresses: Vec<String>,
+    port: u16,
+    sample_rate: u32,
+    channels: u8,
+    caps: String,
+}
+
+impl NetworkNodeBrief {
+    fn from_node(node: &NodeInfo) -> Self {
+        Self {
+            node_id: node.node_id.clone(),
+            name: node.name.clone(),
+            addresses: node.addresses.iter().map(|ip| ip.to_string()).collect(),
+            port: node.port,
+            sample_rate: node.sample_rate,
+            channels: node.channels,
+            caps: node.caps.clone(),
+        }
+    }
 }
 
 /// send（连接）视图模型，覆盖启用/静音/增益/通道映射。
@@ -288,6 +324,10 @@ struct AppState {
     engine: Mutex<Option<EngineService>>,
     config_path: PathBuf,
     settings: Mutex<AppSettings>,
+    /// 本机网络身份缓存（首次启动时生成 node_id 并持久化）。
+    node_identity: Mutex<NodeIdentityBrief>,
+    /// 后台局域网节点监听服务。
+    discovery: Mutex<Option<NetworkDiscovery>>,
 }
 
 impl AppState {
@@ -298,6 +338,13 @@ impl AppState {
             engine: Mutex::new(None),
             config_path,
             settings: Mutex::new(AppSettings::default()),
+            node_identity: Mutex::new(NodeIdentityBrief {
+                node_id: String::new(),
+                device_name: String::new(),
+                network_enabled: false,
+                web_port: 0,
+            }),
+            discovery: Mutex::new(None),
         }
     }
 }
@@ -319,6 +366,41 @@ fn resolve_config_path(app: &tauri::AppHandle) -> PathBuf {
         return std::path::PathBuf::from("config.json");
     }
     dir.join("config.json")
+}
+
+/// 确保本机网络身份存在：读取配置中的 `network`，缺失 node_id 时生成并持久化。
+///
+/// 返回当前身份快照（含 network_enabled）。
+fn ensure_node_identity(state: &AppState) -> NodeIdentityBrief {
+    let mut cached = state.node_identity.lock().expect("身份锁未中毒");
+    if !cached.node_id.is_empty() {
+        return cached.clone();
+    }
+    let mut config = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => config,
+        Err(ConfigError::NotFound(_)) => {
+            AppConfig::new(loopmaster_audio_core::RouteGraph::default())
+        }
+        Err(_) => return cached.clone(),
+    };
+    if config.network.node_id.is_none() {
+        let identity = NodeIdentity::generate();
+        config.network.node_id = Some(identity.node_id.clone());
+        config.network.device_name = Some(identity.device_name);
+        let _ = config.save_to(&state.config_path);
+    }
+    let brief = NodeIdentityBrief {
+        node_id: config.network.node_id.clone().unwrap_or_default(),
+        device_name: config
+            .network
+            .device_name
+            .clone()
+            .unwrap_or_else(loopmaster_app_service::default_device_name),
+        network_enabled: config.network.network_enabled,
+        web_port: config.network.web_port,
+    };
+    *cached = brief.clone();
+    brief
 }
 
 /// 首次启动引擎时创建服务，并派生事件转发线程；重复调用返回 `false`。
@@ -442,6 +524,26 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// 返回本机网络身份（node_id/device_name/network_enabled/web_port）。
+#[tauri::command]
+fn get_node_identity(state: tauri::State<'_, Arc<AppState>>) -> NodeIdentityBrief {
+    ensure_node_identity(&state)
+}
+
+/// 返回当前局域网发现的 VBAN 节点列表快照。
+#[tauri::command]
+fn get_network_nodes(state: tauri::State<'_, Arc<AppState>>) -> Vec<NetworkNodeBrief> {
+    let slot = state.discovery.lock().expect("监听锁未中毒");
+    match slot.as_ref() {
+        Some(discovery) => discovery
+            .snapshot()
+            .iter()
+            .map(NetworkNodeBrief::from_node)
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 /// 枚举设备（后台执行，不阻塞 UI）。
@@ -814,6 +916,54 @@ fn persist_config(state: &AppState) -> Result<(), ServiceErrorBrief> {
     config
         .save_to(&state.config_path)
         .map_err(config_error_brief)
+}
+
+/// 启动局域网节点监听，并把节点上线/下线事件转发为 Tauri event。
+///
+/// 已在运行则无操作；线程退出（daemon 停止）时清空槽位以便再次启动。
+fn start_network_discovery(app: tauri::AppHandle, state: &AppState) {
+    let mut slot = state.discovery.lock().expect("监听锁未中毒");
+    if slot.is_some() {
+        return;
+    }
+    let mut discovery = match NetworkDiscovery::new() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("启动局域网监听失败: {e}");
+            return;
+        }
+    };
+    let events = discovery.subscribe();
+    if let Err(e) = discovery.start() {
+        eprintln!("启动局域网监听失败: {e}");
+        return;
+    }
+    // 事件转发线程：把上线/下线事件 emit 给前端。
+    let handle = app.clone();
+    thread::Builder::new()
+        .name("loopmaster-mdns-events".into())
+        .spawn(move || {
+            for event in events {
+                match event {
+                    NetworkEvent::NodeResolved(node) => {
+                        let _ = handle.emit(
+                            "node-resolved",
+                            serde_json::json!({
+                                "node": NetworkNodeBrief::from_node(&node),
+                            }),
+                        );
+                    }
+                    NetworkEvent::NodeRemoved(node_id) => {
+                        let _ = handle.emit(
+                            "node-removed",
+                            serde_json::json!({ "node_id": node_id }),
+                        );
+                    }
+                }
+            }
+        })
+        .expect("创建 mDNS 事件转发线程失败");
+    *slot = Some(discovery);
 }
 
 /// 进程声源自动重连：定期枚举当前音频进程，对失效的 ProcessLoopback
@@ -1494,6 +1644,15 @@ pub fn run() {
             }
             app.manage(state);
 
+            // 初始化本机网络身份（首次生成 node_id 并持久化），启动局域网监听。
+            let managed = app.state::<Arc<AppState>>().inner().clone();
+            {
+                let identity = ensure_node_identity(&managed);
+                if identity.network_enabled {
+                    start_network_discovery(app.handle().clone(), &managed);
+                }
+            }
+
             // 系统托盘常驻：创建托盘图标与菜单（显示/隐藏/退出）
             let tray_ok = setup_tray(app).is_ok();
             if !tray_ok {
@@ -1530,6 +1689,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             get_app_version,
+            get_node_identity,
+            get_network_nodes,
             list_devices,
             list_audio_processes,
             get_route_snapshot,

@@ -5,6 +5,10 @@ import type {
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
+  NetworkNodeBrief,
+  NodeIdentityBrief,
+  NodeRemovedEvent,
+  NodeResolvedEvent,
   ProcessBrief,
   RouteProfileSnapshot,
 } from "./types";
@@ -50,6 +54,25 @@ export function listDevices(): Promise<DeviceBrief[]> {
 export function listAudioProcesses(): Promise<ProcessBrief[]> {
   if (!isTauriRuntime) return Promise.resolve([]);
   return invoke<ProcessBrief[]>("list_audio_processes");
+}
+
+const emptyIdentity: NodeIdentityBrief = {
+  node_id: "",
+  device_name: "",
+  network_enabled: false,
+  web_port: 0,
+};
+
+/** 返回本机网络身份（node_id/device_name/network_enabled/web_port）。 */
+export function getNodeIdentity(): Promise<NodeIdentityBrief> {
+  if (!isTauriRuntime) return Promise.resolve(emptyIdentity);
+  return invoke<NodeIdentityBrief>("get_node_identity");
+}
+
+/** 返回当前局域网发现的 VBAN 节点列表快照。 */
+export function getNetworkNodes(): Promise<NetworkNodeBrief[]> {
+  if (!isTauriRuntime) return Promise.resolve([]);
+  return invoke<NetworkNodeBrief[]>("get_network_nodes");
 }
 
 /** 返回进程可执行文件图标的 PNG data URI；无图标或平台不支持时返回 null。 */
@@ -203,6 +226,22 @@ export function onDeviceRestored(
   if (!isTauriRuntime) return Promise.resolve(() => {});
   return listen<{ endpoint_id: string }>("device-restored", (e) =>
     handler(e.payload.endpoint_id),
+  );
+}
+
+export function onNodeResolved(
+  handler: (node: NetworkNodeBrief) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime) return Promise.resolve(() => {});
+  return listen<NodeResolvedEvent>("node-resolved", (e) => handler(e.payload.node));
+}
+
+export function onNodeRemoved(
+  handler: (nodeId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime) return Promise.resolve(() => {});
+  return listen<NodeRemovedEvent>("node-removed", (e) =>
+    handler(e.payload.node_id),
   );
 }
 

@@ -1507,3 +1507,168 @@ button:disabled {
 [data-theme="dark"] .slider-round:before {
   background: #ffffff;
 }
+
+/* ---------------- 设备页（网络设备查看） ---------------- */
+.device-view {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-canvas);
+  padding: 28px 32px 48px 32px;
+}
+.device-local-card {
+  background: #ffffff;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+.device-local-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.device-local-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--primary);
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+.device-local-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.device-local-status {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+.device-local-status.online {
+  color: #15803d;
+  background: #dcfce7;
+}
+.device-local-status.offline {
+  color: #64748b;
+  background: #f1f5f9;
+}
+.device-local-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 24px;
+}
+.device-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.device-meta-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.device-meta-value {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-mono {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+.device-nodes-section {
+  background: #ffffff;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+}
+.device-nodes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: 12px;
+}
+.device-nodes-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin: 0;
+}
+.device-nodes-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.device-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 28px 16px;
+  line-height: 1.7;
+}
+.device-error {
+  font-size: 13px;
+  color: #b91c1c;
+  text-align: center;
+  padding: 24px 16px;
+}
+.device-node-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.device-node-item {
+  padding: 12px 4px;
+}
+.device-node-item + .device-node-item {
+  border-top: 1px solid #f1f5f9;
+}
+.device-node-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.device-node-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.device-node-online {
+  font-size: 11px;
+  color: #15803d;
+  background: #dcfce7;
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+.device-node-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 6px 24px;
+}
+
+/* 深色主题下的设备页卡片 */
+[data-theme="dark"] .device-local-card,
+[data-theme="dark"] .device-nodes-section {
+  background: var(--bg-card);
+  border-color: var(--border-card);
+}
+[data-theme="dark"] .device-local-status.offline {
+  background: var(--bg-card-subtle);
+}
+[data-theme="dark"] .device-local-status.online,
+[data-theme="dark"] .device-node-online {
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.15);
+}
+[data-theme="dark"] .device-node-item + .device-node-item {
+  border-top-color: var(--border-card);
+}
