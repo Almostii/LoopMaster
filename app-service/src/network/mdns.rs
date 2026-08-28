@@ -8,7 +8,7 @@
 //! 参考专项文档 6.2/6.3 节。
 
 use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 
 use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
@@ -31,6 +31,19 @@ pub struct NodeInfo {
     pub channels: u8,
     /// 能力标识（逗号分隔）。
     pub caps: String,
+}
+
+impl NodeInfo {
+    /// 把节点地址 + 端口转换为可发送的 `SocketAddr` 列表。
+    ///
+    /// 用于把 mDNS 发现的节点作为 VBAN 发送目标（见 `sender`）。节点可能
+    /// 有多个 IPv4 地址，全部返回由上层选择或依次尝试。
+    pub fn to_socket_addrs(&self) -> Vec<SocketAddr> {
+        self.addresses
+            .iter()
+            .map(|ip| SocketAddr::new(std::net::IpAddr::V4(*ip), self.port))
+            .collect()
+    }
 }
 
 /// 网络发现事件。
