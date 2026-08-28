@@ -31,6 +31,29 @@ pub struct AppConfig {
     /// 预设附加的 UI 选择；**不保存设备列表索引**。
     #[serde(default)]
     pub ui_state: UiState,
+    /// 网络功能配置（mDNS 身份与开关）。
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+/// 网络功能配置（Phase 1 mDNS）。
+///
+/// 新增字段均用 `#[serde(default)]`，使旧 V2 配置缺省时自动回退到默认值，
+/// 不破坏既有配置兼容性。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    /// 稳定节点 ID（UUID v4）；缺失时由调用方按需生成并持久化。
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// 用户友好显示名；缺失时默认取 Windows 计算机名。
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// 网络功能开关：`false` 时不发布 mDNS、不绑定端口。
+    #[serde(default)]
+    pub network_enabled: bool,
+    /// 内嵌 Web 控制台端口（0 表示未开启）。
+    #[serde(default)]
+    pub web_port: u16,
 }
 
 impl AppConfig {
@@ -40,6 +63,7 @@ impl AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             graph,
             ui_state: UiState::default(),
+            network: NetworkConfig::default(),
         }
     }
 
@@ -130,6 +154,8 @@ struct V1Config {
     graph: V1Graph,
     #[serde(default)]
     ui_state: UiState,
+    #[serde(default)]
+    network: NetworkConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -195,6 +221,7 @@ fn migrate_v1(config: V1Config) -> Result<AppConfig, ConfigError> {
             sends,
         },
         ui_state: config.ui_state,
+        network: config.network,
     })
 }
 
