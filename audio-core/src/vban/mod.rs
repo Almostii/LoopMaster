@@ -6,4 +6,6 @@
 //!
 //! 参考：[VBAN 局域网音频互通与传输方案](../../../../Doc/网络传输与本地节点互通方案计划/1.VBAN局域网音频互通与传输方案.md)
 
+pub mod clock_drift;
+pub mod jitter;
 pub mod packet;

@@ -22,6 +22,8 @@ pub use resampler::{
 };
 pub use route_snapshot::RouteGraphSnapshot;
 pub use test_tone::{fill_block, TestToneConfig, TestToneKind, TonePhase};
+pub use vban::clock_drift::ClockDriftCompensator;
+pub use vban::jitter::{VBanJitterBuffer, VBanJitterError, VBanJitterStats};
 pub use vban::packet::{
     max_samples_per_channel, sample_rate_to_index, VBanBitFormat, VBanHeader, VBanPacketError,
     VBanProtocol, VBanStreamConfig, SAMPLE_RATE_INDEX_TO_HZ, VBAN_FRAME_WINDOW, VBAN_HEADER_SIZE,
