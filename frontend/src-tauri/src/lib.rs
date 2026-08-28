@@ -24,8 +24,8 @@ use tauri::Manager;
 use loopmaster_app_service::{AppConfig, ConfigError, DeviceCompatibility, DeviceStatus};
 use loopmaster_app_service::{
     DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, NetworkDiscovery,
-    NetworkEvent, NodeIdentity, NodeInfo, ProcessModel, ProcessRepository, RouteEdit, RouteEditor,
-    ServiceError, ServiceEvent,
+    NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, ProcessModel, ProcessRepository, RouteEdit,
+    RouteEditor, ServiceError, ServiceEvent, CAPS_VBAN_AUDIO,
 };
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
@@ -546,6 +546,48 @@ fn get_network_nodes(state: tauri::State<'_, Arc<AppState>>) -> Vec<NetworkNodeB
     }
 }
 
+/// 开启/关闭网络功能，并持久化到配置。
+///
+/// 开启：发布本机 VBAN 服务（Advertiser）+ 确保 Browser 监听。
+/// 关闭：下架本机服务（Browser 仍持续监听，便于发现其他电脑）。
+/// 返回更新后的本机身份（含新 `network_enabled`）。
+#[tauri::command]
+fn set_network_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<NodeIdentityBrief, ServiceErrorBrief> {
+    if enabled {
+        start_advertising(app, &state)?;
+    }
+    // 持久化 network_enabled 到配置；失败时若刚开启则回滚下架。
+    let mut config = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => config,
+        Err(ConfigError::NotFound(_)) => {
+            AppConfig::new(loopmaster_audio_core::RouteGraph::default())
+        }
+        Err(e) => return Err(config_error_brief(e)),
+    };
+    config.network.network_enabled = enabled;
+    if let Err(e) = config.save_to(&state.config_path) {
+        if enabled {
+            stop_advertising(&state); // 回滚已发布的 Advertiser
+        }
+        return Err(config_error_brief(e));
+    }
+    // 用缓存的身份 + 新的开关状态构造返回值，避免依赖 ensure_node_identity
+    // 的缓存短路导致返回旧 network_enabled。
+    let mut cached = state.node_identity.lock().expect("身份锁未中毒");
+    let brief = NodeIdentityBrief {
+        node_id: cached.node_id.clone(),
+        device_name: cached.device_name.clone(),
+        network_enabled: enabled,
+        web_port: cached.web_port,
+    };
+    *cached = brief.clone();
+    Ok(brief)
+}
+
 /// 枚举设备（后台执行，不阻塞 UI）。
 #[tauri::command]
 fn list_devices() -> Result<Vec<DeviceBrief>, ServiceErrorBrief> {
@@ -918,10 +960,11 @@ fn persist_config(state: &AppState) -> Result<(), ServiceErrorBrief> {
         .map_err(config_error_brief)
 }
 
-/// 启动局域网节点监听，并把节点上线/下线事件转发为 Tauri event。
+/// 启动局域网节点监听（Browser），并把节点上线/下线事件转发为 Tauri event。
 ///
 /// 已在运行则无操作；线程退出（daemon 停止）时清空槽位以便再次启动。
-fn start_network_discovery(app: tauri::AppHandle, state: &AppState) {
+/// Browser 独立于本机服务发布（Advertiser）持续运行，便于随时发现其他电脑。
+fn start_browser(app: tauri::AppHandle, state: &AppState) {
     let mut slot = state.discovery.lock().expect("监听锁未中毒");
     if slot.is_some() {
         return;
@@ -964,6 +1007,67 @@ fn start_network_discovery(app: tauri::AppHandle, state: &AppState) {
         })
         .expect("创建 mDNS 事件转发线程失败");
     *slot = Some(discovery);
+}
+
+/// 发布本机 VBAN 服务（开启网络功能）。Browser 未启动时先启动它。
+fn start_advertising(app: tauri::AppHandle, state: &AppState) -> Result<(), ServiceErrorBrief> {
+    // 确保 Browser 在监听。
+    if state.discovery.lock().expect("监听锁未中毒").is_none() {
+        start_browser(app, state);
+    }
+    let identity = ensure_node_identity(state);
+    if identity.node_id.is_empty() {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "本机节点 ID 无效，无法发布服务".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请检查配置文件后重试".into()),
+        });
+    }
+    let meta = NodeMeta {
+        node_id: identity.node_id.clone(),
+        name: identity.device_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        web_port: identity.web_port,
+        sample_rate: loopmaster_audio_core::INTERNAL_SAMPLE_RATE,
+        channels: loopmaster_audio_core::INTERNAL_CHANNELS as u8,
+        caps: format!("{CAPS_VBAN_AUDIO}"),
+    };
+    let node_identity = NodeIdentity {
+        node_id: identity.node_id,
+        device_name: identity.device_name,
+    };
+    let mut slot = state.discovery.lock().expect("监听锁未中毒");
+    let discovery = match slot.as_mut() {
+        Some(d) => d,
+        None => {
+            return Err(ServiceErrorBrief {
+                category: "network",
+                message: "局域网监听未启动".into(),
+                endpoint_id: None,
+                hresult: None,
+                hint: Some("请先开启网络功能".into()),
+            });
+        }
+    };
+    discovery
+        .start_advertiser(&node_identity, &meta)
+        .map_err(|e| ServiceErrorBrief {
+            category: "network",
+            message: format!("发布本机服务失败: {e}"),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请检查网络连接与端口占用后重试".into()),
+        })
+}
+
+/// 下架本机 VBAN 服务（关闭网络功能）。
+fn stop_advertising(state: &AppState) {
+    let mut slot = state.discovery.lock().expect("监听锁未中毒");
+    if let Some(discovery) = slot.as_mut() {
+        discovery.stop_advertiser();
+    }
 }
 
 /// 进程声源自动重连：定期枚举当前音频进程，对失效的 ProcessLoopback
@@ -1644,12 +1748,17 @@ pub fn run() {
             }
             app.manage(state);
 
-            // 初始化本机网络身份（首次生成 node_id 并持久化），启动局域网监听。
+            // 初始化本机网络身份（首次生成 node_id 并持久化），始终启动
+            // Browser 监听局域网节点；Advertiser 由用户在设备页手动开启。
             let managed = app.state::<Arc<AppState>>().inner().clone();
             {
                 let identity = ensure_node_identity(&managed);
+                let handle = app.handle().clone();
+                // Browser 持续监听（便于随时发现其他电脑）。
+                start_browser(handle.clone(), &managed);
+                // 若上次配置为已开启，恢复本机服务发布。
                 if identity.network_enabled {
-                    start_network_discovery(app.handle().clone(), &managed);
+                    let _ = start_advertising(handle, &managed);
                 }
             }
 
@@ -1691,6 +1800,7 @@ pub fn run() {
             get_app_version,
             get_node_identity,
             get_network_nodes,
+            set_network_enabled,
             list_devices,
             list_audio_processes,
             get_route_snapshot,

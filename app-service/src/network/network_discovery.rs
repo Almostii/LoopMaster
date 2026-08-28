@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::network::mdns::{MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
+use crate::network::identity::{NodeIdentity, NodeMeta};
+use crate::network::mdns::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
 
 /// 节点列表 + 订阅者（Arc 共享，供后台线程与外部同步访问）。
 struct DiscoveryState {
@@ -25,11 +26,14 @@ struct DiscoveryState {
 ///
 /// - [`Self::start`] 在后台线程持续监听 mDNS 事件并维护节点列表；
 /// - [`Self::snapshot`] 返回当前节点列表快照；
-/// - 节点上线/下线通过 [`Self::subscribe`] 订阅（`NetworkEvent`）。
+/// - 节点上线/下线通过 [`Self::subscribe`] 订阅（`NetworkEvent`）；
+/// - 本机服务发布通过 [`Self::start_advertiser`] / [`Self::stop_advertiser`] 控制。
 pub struct NetworkDiscovery {
     state: Arc<Mutex<DiscoveryState>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// 本机 mDNS 服务发布端（开启网络功能时注册，关闭时下架）。
+    advertiser: Mutex<Option<MdnsAdvertiser>>,
 }
 
 impl NetworkDiscovery {
@@ -42,7 +46,38 @@ impl NetworkDiscovery {
             })),
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             thread: None,
+            advertiser: Mutex::new(None),
         })
+    }
+
+    /// 注册本机 VBAN 服务（发布 `_loopmaster-vban._udp.local.`）。
+    ///
+    /// 开启网络功能时调用；重复调用无操作。注册失败返回错误（不改变状态）。
+    pub fn start_advertiser(
+        &mut self,
+        identity: &NodeIdentity,
+        meta: &NodeMeta,
+    ) -> Result<(), MdnsError> {
+        let mut slot = self.advertiser.lock().expect("广告锁未中毒");
+        if slot.is_some() {
+            return Ok(());
+        }
+        let advertiser = MdnsAdvertiser::register(identity, meta)?;
+        *slot = Some(advertiser);
+        Ok(())
+    }
+
+    /// 下架本机 VBAN 服务（关闭网络功能时调用；幂等）。
+    pub fn stop_advertiser(&mut self) {
+        let mut slot = self.advertiser.lock().expect("广告锁未中毒");
+        if let Some(advertiser) = slot.take() {
+            drop(advertiser); // Drop 触发 unregister + daemon.shutdown
+        }
+    }
+
+    /// 是否已发布本机服务（网络功能是否开启）。
+    pub fn is_advertising(&self) -> bool {
+        self.advertiser.lock().expect("广告锁未中毒").is_some()
     }
 
     /// 订阅节点上线/下线事件（多个订阅者会收到同一份事件）。
@@ -103,12 +138,13 @@ impl NetworkDiscovery {
         Ok(())
     }
 
-    /// 停止后台监听线程（幂等）。
+    /// 停止后台监听线程并下架本机服务（幂等）。
     pub fn shutdown(&mut self) {
         self.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        self.stop_advertiser();
     }
 
     /// 当前在线节点列表快照（按 node_id 排序，保证确定性）。

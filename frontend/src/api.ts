@@ -69,6 +69,12 @@ export function getNodeIdentity(): Promise<NodeIdentityBrief> {
   return invoke<NodeIdentityBrief>("get_node_identity");
 }
 
+/** 开启/关闭网络功能，返回更新后的本机身份。 */
+export function setNetworkEnabled(enabled: boolean): Promise<NodeIdentityBrief> {
+  if (!isTauriRuntime) return Promise.resolve(emptyIdentity);
+  return invoke<NodeIdentityBrief>("set_network_enabled", { enabled });
+}
+
 /** 返回当前局域网发现的 VBAN 节点列表快照。 */
 export function getNetworkNodes(): Promise<NetworkNodeBrief[]> {
   if (!isTauriRuntime) return Promise.resolve([]);

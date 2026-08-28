@@ -12,7 +12,8 @@ pub mod mdns;
 pub mod network_discovery;
 
 pub use identity::{
-    default_device_name, NodeIdentity, NodeMeta, VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE,
+    default_device_name, NodeIdentity, NodeMeta, CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR,
+    VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE,
 };
 pub use mdns::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
 pub use network_discovery::NetworkDiscovery;
