@@ -10,6 +10,7 @@ mod mixer;
 mod resampler;
 mod route_snapshot;
 mod test_tone;
+pub mod vban;
 
 pub use fifo::{
     AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
@@ -21,6 +22,12 @@ pub use resampler::{
 };
 pub use route_snapshot::RouteGraphSnapshot;
 pub use test_tone::{fill_block, TestToneConfig, TestToneKind, TonePhase};
+pub use vban::packet::{
+    max_samples_per_channel, sample_rate_to_index, VBanBitFormat, VBanHeader, VBanPacketError,
+    VBanProtocol, VBanStreamConfig, SAMPLE_RATE_INDEX_TO_HZ, VBAN_FRAME_WINDOW, VBAN_HEADER_SIZE,
+    VBAN_MAGIC, VBAN_MAX_PACKET_SIZE, VBAN_MAX_PAYLOAD_SIZE, VBAN_MAX_SAMPLES_PER_CHANNEL,
+    VBAN_STREAM_NAME_SIZE,
+};
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
