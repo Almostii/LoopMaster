@@ -16,10 +16,11 @@ mod engine;
 mod error;
 mod event;
 mod model;
+pub mod network;
 mod route;
 
 pub use command::EngineCommand;
-pub use config::{AppConfig, ConfigError, UiState, CURRENT_SCHEMA_VERSION};
+pub use config::{AppConfig, ConfigError, NetworkConfig, UiState, CURRENT_SCHEMA_VERSION};
 pub use engine::EngineService;
 pub use error::ServiceError;
 pub use event::{ServiceEvent, ServiceEventReceiver};
@@ -27,4 +28,5 @@ pub use model::{
     DeviceCategory, DeviceCompatibility, DeviceFlow, DeviceFormatSupport, DeviceModel,
     DeviceRepository, DeviceStatus, ProcessModel, ProcessRepository,
 };
+pub use network::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
 pub use route::{RouteEdit, RouteEditor};

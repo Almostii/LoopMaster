@@ -1,0 +1,14 @@
+//! 网络服务层：mDNS 服务发现与节点身份（Phase 1 第三项）。
+//!
+//! 本模块承载 VBAN 局域网节点的零配置发现（ZeroConf / mDNS）与稳定身份
+//! 管理，是 `app-service` 面向网络部分的入口。UDP 音频收发、Web 控制台等
+//! 后续在此扩展。
+//!
+//! 参考：[VBAN 局域网音频互通与传输方案]
+//! （../../../../Doc/网络传输与本地节点互通方案计划/1.VBAN局域网音频互通与传输方案.md）6 节。
+
+pub mod identity;
+pub mod mdns;
+
+pub use identity::{NodeIdentity, NodeMeta, VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE};
+pub use mdns::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
