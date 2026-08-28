@@ -10,6 +10,8 @@
 pub mod identity;
 pub mod mdns;
 pub mod network_discovery;
+pub mod receiver;
+pub mod sender;
 
 pub use identity::{
     default_device_name, NodeIdentity, NodeMeta, CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR,
@@ -17,3 +19,5 @@ pub use identity::{
 };
 pub use mdns::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
 pub use network_discovery::NetworkDiscovery;
+pub use receiver::{VBanReceiveError, VBanReceiveStats, VBanReceiver};
+pub use sender::{VBanSendError, VBanSender};

@@ -224,6 +224,7 @@ dependencies = [
  "loopmaster-audio-core",
  "loopmaster-audio-windows",
  "mdns-sd",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
