@@ -5,6 +5,7 @@ import {
   getNodeIdentity,
   onNodeRemoved,
   onNodeResolved,
+  setNetworkEnabled,
 } from "../api";
 
 const emptyIdentity: NodeIdentityBrief = {
@@ -79,6 +80,22 @@ export default function DeviceView() {
     };
   }, []);
 
+  // 切换网络功能开关
+  const [toggling, setToggling] = useState(false);
+  async function handleToggleNetwork(enabled: boolean) {
+    if (toggling) return;
+    setToggling(true);
+    try {
+      const updated = await setNetworkEnabled(enabled);
+      setIdentity(updated);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setToggling(false);
+    }
+  }
+
   return (
     <div className="device-view">
       {/* 本机身份卡 */}
@@ -93,6 +110,17 @@ export default function DeviceView() {
           >
             {identity.network_enabled ? "网络功能已开启" : "网络功能未开启"}
           </span>
+          <div className="device-local-switch">
+            <label className="switch" title="网络功能开关">
+              <input
+                type="checkbox"
+                checked={identity.network_enabled}
+                disabled={toggling}
+                onChange={(e) => void handleToggleNetwork(e.target.checked)}
+              />
+              <span className="slider-round" />
+            </label>
+          </div>
         </div>
         <div className="device-local-meta">
           <div className="device-meta-item">

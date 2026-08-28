@@ -30,6 +30,6 @@ pub use model::{
 };
 pub use network::{
     default_device_name, MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkDiscovery, NetworkEvent,
-    NodeIdentity, NodeInfo, NodeMeta,
+    NodeIdentity, NodeInfo, NodeMeta, CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR,
 };
 pub use route::{RouteEdit, RouteEditor};

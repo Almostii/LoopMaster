@@ -1537,6 +1537,10 @@ button:disabled {
   padding: 2px 10px;
   border-radius: 10px;
 }
+.device-local-switch {
+  margin-left: auto;
+  flex-shrink: 0;
+}
 .device-local-name {
   font-size: 16px;
   font-weight: 700;
