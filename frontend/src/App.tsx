@@ -8,6 +8,7 @@ import SourceCard from "./components/SourceCard";
 import TitleBar from "./components/TitleBar";
 import Sidebar, { type SidebarItem } from "./components/Sidebar";
 import SettingsView from "./components/SettingsView";
+import DeviceView from "./components/DeviceView";
 import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
@@ -499,6 +500,8 @@ function App() {
             settings={settings}
             onChange={(patch) => void updateSettings(patch)}
           />
+        ) : activeView === "devices" ? (
+          <DeviceView />
         ) : activeView === "router" ? (
           <div className="router-canvas-wrap">
         <div className="topology-viewport" id="topology-viewport" onClick={handleCanvasClick}>

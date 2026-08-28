@@ -9,6 +9,10 @@
 
 pub mod identity;
 pub mod mdns;
+pub mod network_discovery;
 
-pub use identity::{NodeIdentity, NodeMeta, VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE};
+pub use identity::{
+    default_device_name, NodeIdentity, NodeMeta, VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE,
+};
 pub use mdns::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
+pub use network_discovery::NetworkDiscovery;

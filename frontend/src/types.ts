@@ -107,3 +107,34 @@ export const DEVICE_STATUS_LABEL: Record<string, string> = {
   unsupported: "不支持",
   error: "错误",
 };
+
+// ---------- 网络设备（局域网 VBAN 节点） ----------
+
+/** 本机网络身份概要。 */
+export interface NodeIdentityBrief {
+  node_id: string;
+  device_name: string;
+  network_enabled: boolean;
+  web_port: number;
+}
+
+/** 局域网发现的 VBAN 节点概要。 */
+export interface NetworkNodeBrief {
+  node_id: string;
+  name: string;
+  addresses: string[];
+  port: number;
+  sample_rate: number;
+  channels: number;
+  caps: string;
+}
+
+/** 节点上线事件负载。 */
+export interface NodeResolvedEvent {
+  node: NetworkNodeBrief;
+}
+
+/** 节点下线事件负载。 */
+export interface NodeRemovedEvent {
+  node_id: string;
+}

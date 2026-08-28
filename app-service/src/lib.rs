@@ -28,5 +28,8 @@ pub use model::{
     DeviceCategory, DeviceCompatibility, DeviceFlow, DeviceFormatSupport, DeviceModel,
     DeviceRepository, DeviceStatus, ProcessModel, ProcessRepository,
 };
-pub use network::{MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkEvent, NodeInfo};
+pub use network::{
+    default_device_name, MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkDiscovery, NetworkEvent,
+    NodeIdentity, NodeInfo, NodeMeta,
+};
 pub use route::{RouteEdit, RouteEditor};
