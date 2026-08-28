@@ -222,7 +222,7 @@ export function useLoopMaster() {
   /** 新增音源并自动连到第一个输出通道（若该音源尚无连线）。 */
   const addSourceWithAutoConnect = useCallback(
     async (
-      req: { kind: "process_loopback" | "device_capture" | "device_loopback"; display_name: string; endpoint_id: string | null; process_id: number | null; executable_path?: string | null },
+      req: { kind: "process_loopback" | "device_capture" | "device_loopback" | "vban"; display_name: string; endpoint_id: string | null; process_id: number | null; executable_path?: string | null; stream_name?: string | null },
     ) => {
       const srcId = freshId("src");
       const added = await runEdit(
@@ -234,6 +234,7 @@ export function useLoopMaster() {
           endpoint_id: req.endpoint_id,
           process_id: req.process_id,
           executable_path: req.executable_path ?? null,
+          stream_name: req.stream_name ?? null,
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
@@ -310,6 +311,21 @@ function cleanProcessName(name: string): string {
       return srcId;
     },
     [runEdit],
+  );
+
+  /** 从 VBAN 网络节点添加音源（接收远端音频）。 */
+  const addVbanSource = useCallback(
+    async (displayName: string, streamName: string) => {
+      await addSourceWithAutoConnect({
+        kind: "vban",
+        display_name: displayName,
+        endpoint_id: null,
+        process_id: null,
+        executable_path: null,
+        stream_name: streamName,
+      });
+    },
+    [addSourceWithAutoConnect],
   );
 
   const addOutputChannel = useCallback(async () => {
@@ -399,6 +415,40 @@ function cleanProcessName(name: string): string {
         const existing = latest.sends.find(
           (s) =>
             s.output_channel === channel.id && s.external_output === external.id,
+        );
+        if (!existing) {
+          await addSendToOutput(channel.id, external.id);
+        }
+      }
+    },
+    [runEdit, addSendToOutput],
+  );
+
+  /** 添加 VBAN 网络发送目标（把混音发送到远端节点）。 */
+  const addVbanExternalOutput = useCallback(
+    async (displayName: string, streamName: string, remoteAddr: string) => {
+      const externalId = freshId("out");
+      const added = await runEdit(
+        {
+          op: "add_external_output",
+          id: externalId,
+          endpoint_id: "vban",
+          display_name: displayName,
+          kind: "vban",
+          stream_name: streamName,
+          remote_addr: remoteAddr,
+        },
+        "已添加网络输出（拓扑变更需重启引擎生效）",
+      );
+      if (!added) return;
+
+      // 自动连到第一个输出通道（若存在且尚未连线）。
+      const latest = await getRouteSnapshot();
+      const channel = latest.output_channels[0];
+      const external = latest.external_outputs.find((output) => output.id === externalId);
+      if (channel && external) {
+        const existing = latest.sends.find(
+          (s) => s.output_channel === channel.id && s.external_output === external.id,
         );
         if (!existing) {
           await addSendToOutput(channel.id, external.id);
@@ -728,9 +778,11 @@ function cleanProcessName(name: string): string {
     doReconnect,
     addSourceFromProcess,
     addSourceFromDevice,
+    addVbanSource,
     switchProcessSourceToDevice,
     addOutputChannel,
     addExternalOutput,
+    addVbanExternalOutput,
     removeSource,
     removeOutputChannel,
     removeExternalOutput,

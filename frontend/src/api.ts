@@ -139,6 +139,10 @@ export interface RouteEditRequest {
   endpoint_id?: string | null;
   process_id?: number | null;
   executable_path?: string | null;
+  /** VBAN 源/目标的流名（kind === "vban" 时使用）。 */
+  stream_name?: string | null;
+  /** VBAN 目标的远端地址（ip:port）。 */
+  remote_addr?: string | null;
   source_id?: string;
   output_channel_id?: string;
   external_output_id?: string;
