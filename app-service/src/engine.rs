@@ -11,6 +11,7 @@ use std::time::Duration;
 use loopmaster_audio_core::{EndpointId, RouteGraph, RouteGraphSnapshot, SendId, SendSpec};
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineState, AudioEngineStats, AudioEngineStatus,
+    NetworkIoHandles,
 };
 
 use crate::command::EngineCommand;
@@ -61,6 +62,19 @@ impl EngineService {
     /// 当前状态 + 统计（线程安全快照）。
     pub fn status(&self) -> AudioEngineStatus {
         self.inner.engine.lock().expect("引擎锁未中毒").status()
+    }
+
+    /// 取最近一次启动 session 的网络桥接句柄（若有）。
+    ///
+    /// 引擎启动后（supervisor 创建 worker 组时）网络源/目标的 FIFO 句柄可用；
+    /// 供网络桥接层据此启动 VBAN 收发线程。返回 `None` 表示尚无可用句柄
+    ///（引擎未运行或图中无网络节点）。
+    pub fn take_network_handles(&self) -> Option<NetworkIoHandles> {
+        self.inner
+            .engine
+            .lock()
+            .expect("引擎锁未中毒")
+            .recv_network_handles()
     }
 
     /// 提交命令；非法命令返回错误，引擎状态不变。
@@ -353,6 +367,8 @@ mod tests {
             id: SinkId(id.into()),
             endpoint_id: EndpointId(format!("endpoint-{id}")),
             display_name: id.into(),
+            kind: loopmaster_audio_core::SinkKind::Device,
+            stream_name: None,
         }
     }
 

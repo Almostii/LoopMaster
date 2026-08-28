@@ -1,7 +1,7 @@
 use loopmaster_audio_core::{
     fill_block, AudioFifo, AudioFormat, BusId, BusSpec, EndpointId, MixerPlan, RouteGraph,
-    RouteGraphSnapshot, SendId, SendSpec, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec,
-    TestToneConfig, TestToneKind, TonePhase,
+    RouteGraphSnapshot, SendId, SendSpec, SinkId, SinkKind, SinkSpec, SourceId, SourceKind,
+    SourceSpec, TestToneConfig, TestToneKind, TonePhase,
 };
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineState, EndpointFlow, EndpointFormat, EndpointInfo,
@@ -186,6 +186,8 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recove
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(render_id.to_owned()),
             display_name: "render".to_owned(),
+            kind: SinkKind::Device,
+            stream_name: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -233,6 +235,8 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(render_id.to_owned()),
             display_name: "render".to_owned(),
+            kind: SinkKind::Device,
+            stream_name: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -276,6 +280,8 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(sink_render_id.to_owned()),
             display_name: "render".to_owned(),
+            kind: SinkKind::Device,
+            stream_name: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -396,6 +402,8 @@ fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             id: SinkId("render".to_owned()),
             endpoint_id: EndpointId(render_id.to_owned()),
             display_name: "render".to_owned(),
+            kind: SinkKind::Device,
+            stream_name: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -574,11 +582,15 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
                 id: SinkId("sink-a".to_owned()),
                 endpoint_id: EndpointId(sink_a.to_owned()),
                 display_name: "sink-a".to_owned(),
+                kind: SinkKind::Device,
+                stream_name: None,
             },
             SinkSpec {
                 id: SinkId("sink-b".to_owned()),
                 endpoint_id: EndpointId(sink_b.to_owned()),
                 display_name: "sink-b".to_owned(),
+                kind: SinkKind::Device,
+                stream_name: None,
             },
         ],
         sends: vec![
@@ -825,6 +837,8 @@ fn run_capture_render_test(
             id: SinkId("render".to_owned()),
             endpoint_id: render_endpoint.clone(),
             display_name: "render".to_owned(),
+            kind: SinkKind::Device,
+            stream_name: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {

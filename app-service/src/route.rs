@@ -220,6 +220,8 @@ mod tests {
             id: SinkId(id.into()),
             endpoint_id: loopmaster_audio_core::EndpointId(format!("endpoint-{id}")),
             display_name: id.into(),
+            kind: loopmaster_audio_core::SinkKind::Device,
+            stream_name: None,
         }
     }
 

@@ -82,6 +82,11 @@ impl VBanReceiver {
         })
     }
 
+    /// 接收 socket 实际绑定的地址（端口 0 时由系统分配）。
+    pub fn local_addr(&self) -> Result<SocketAddr, VBanReceiveError> {
+        self.socket.local_addr().map_err(VBanReceiveError::Udp)
+    }
+
     /// 接收并解析下一个 VBAN 包（非阻塞）。
     ///
     /// - `Ok(true)`：成功解析并送入 Jitter Buffer；
@@ -203,9 +208,11 @@ mod tests {
     use proptest::prelude::*;
 
     fn random_port() -> u16 {
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
+        // 用 UDP socket 探测可用端口（与后续 UDP 绑定一致），获取后立即释放。
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        port
     }
 
     /// 自环往返：VBanSender 发送 → VBanReceiver 接收抽取 → 校验 PCM 一致。
@@ -310,10 +317,10 @@ mod tests {
     #[test]
     fn round_trip_float32_random_dims() {
         proptest::proptest!(|(channels in 1usize..=4usize, frames in 1usize..=64usize)| {
-            let port = random_port();
-            let bind_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            // 绑定端口 0，由系统分配，避免随机端口冲突。
             let frame_samples = frames * channels;
-            let mut receiver = VBanReceiver::bind(bind_addr, frame_samples).unwrap();
+            let mut receiver = VBanReceiver::bind("127.0.0.1:0".parse().unwrap(), frame_samples).unwrap();
+            let bind_addr = receiver.local_addr().unwrap();
             let samples: Vec<f32> = (0..frame_samples)
                 .map(|i| ((i % 97) as f32 / 97.0) - 0.5)
                 .collect();

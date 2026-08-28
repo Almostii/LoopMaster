@@ -279,7 +279,7 @@ fn temp_path_for(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod v2_tests {
     use super::*;
-    use loopmaster_audio_core::{SourceKind, SourceSpec};
+    use loopmaster_audio_core::{SinkKind, SourceKind, SourceSpec};
 
     fn graph() -> RouteGraph {
         RouteGraph {
@@ -299,6 +299,8 @@ mod v2_tests {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("endpoint-sink".into()),
                 display_name: "Sink".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -450,5 +452,29 @@ mod v2_tests {
             ]
         );
         assert_eq!(config.graph, original);
+    }
+
+    #[test]
+    fn sink_kind_serde_is_backward_compatible() {
+        use loopmaster_audio_core::SinkKind as K;
+
+        // 新格式：含 kind/stream_name。
+        let vban = SinkSpec {
+            id: SinkId("net".into()),
+            endpoint_id: EndpointId("vban-placeholder".into()),
+            display_name: "网络目标".into(),
+            kind: K::Vban,
+            stream_name: Some("Out".into()),
+        };
+        let json = serde_json::to_string(&vban).unwrap();
+        let round: SinkSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(round.kind, K::Vban);
+        assert_eq!(round.stream_name.as_deref(), Some("Out"));
+
+        // 旧格式：无 kind/stream_name 字段，反序列化回退默认（Device/None）。
+        let old_json = r#"{"id":"net","endpoint_id":"ep","display_name":"目标"}"#;
+        let old: SinkSpec = serde_json::from_str(old_json).unwrap();
+        assert_eq!(old.kind, K::Device);
+        assert_eq!(old.stream_name, None);
     }
 }
