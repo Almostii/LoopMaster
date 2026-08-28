@@ -176,6 +176,7 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recove
             endpoint_id: Some(EndpointId(capture_id.to_owned())),
             process_id: None,
             executable_path: None,
+            stream_name: None,
             display_name: "capture".to_owned(),
         }],
         buses: vec![BusSpec {
@@ -188,6 +189,7 @@ fn run_engine_test(capture_id: &str, render_id: &str, seconds: u64, allow_recove
             display_name: "render".to_owned(),
             kind: SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -225,6 +227,7 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             endpoint_id: None,
             process_id: Some(pid),
             executable_path: None,
+            stream_name: None,
             display_name: format!("process:{pid}"),
         }],
         buses: vec![BusSpec {
@@ -237,6 +240,7 @@ fn run_process_engine_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             display_name: "render".to_owned(),
             kind: SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -270,6 +274,7 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             endpoint_id: Some(EndpointId(loopback_render_id.to_owned())),
             process_id: None,
             executable_path: None,
+            stream_name: None,
             display_name: "loopback".to_owned(),
         }],
         buses: vec![BusSpec {
@@ -282,6 +287,7 @@ fn run_loopback_engine_test(loopback_render_id: &str, sink_render_id: &str, seco
             display_name: "render".to_owned(),
             kind: SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -392,6 +398,7 @@ fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             endpoint_id: None,
             process_id: Some(pid),
             executable_path: None,
+            stream_name: None,
             display_name: format!("process:{pid}"),
         }],
         buses: vec![BusSpec {
@@ -404,6 +411,7 @@ fn run_update_test(pid: u32, render_id: &str, seconds: u64) -> ! {
             display_name: "render".to_owned(),
             kind: SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {
@@ -571,6 +579,7 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
             endpoint_id: None,
             process_id: Some(pid),
             executable_path: None,
+            stream_name: None,
             display_name: format!("process:{pid}"),
         }],
         buses: vec![BusSpec {
@@ -584,6 +593,7 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
                 display_name: "sink-a".to_owned(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             },
             SinkSpec {
                 id: SinkId("sink-b".to_owned()),
@@ -591,6 +601,7 @@ fn run_multi_sink_test(pid: u32, sink_a: &str, sink_b: &str, seconds: u64) -> ! 
                 display_name: "sink-b".to_owned(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             },
         ],
         sends: vec![
@@ -827,6 +838,7 @@ fn run_capture_render_test(
             endpoint_id: Some(capture_endpoint.clone()),
             process_id: None,
             executable_path: None,
+            stream_name: None,
             display_name: "capture".to_owned(),
         }],
         buses: vec![BusSpec {
@@ -839,6 +851,7 @@ fn run_capture_render_test(
             display_name: "render".to_owned(),
             kind: SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }],
         sends: vec![
             SendSpec::SourceToBus {

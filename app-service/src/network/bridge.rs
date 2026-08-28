@@ -14,7 +14,11 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use loopmaster_audio_core::vban::packet::VBanBitFormat;
-use loopmaster_audio_core::AudioFifoConsumer;
+use loopmaster_audio_core::{
+    AudioFifoConsumer, RouteGraph, SinkId, SinkKind, SourceId, SourceKind, DEFAULT_BLOCK_FRAMES,
+    INTERNAL_CHANNELS, INTERNAL_SAMPLE_RATE,
+};
+use loopmaster_audio_windows::NetworkIoHandles;
 
 use crate::network::receiver::VBanReceiver;
 use crate::network::sender::VBanSender;
@@ -26,10 +30,8 @@ pub enum NetworkBridgeError {
     Bind(#[from] crate::network::receiver::VBanReceiveError),
     #[error("发送器初始化失败: {0}")]
     SenderInit(#[from] crate::network::sender::VBanSendError),
-    #[error("无网络源句柄")]
+    #[error("无网络源/目标句柄")]
     NoSources,
-    #[error("无网络目标句柄")]
-    NoSinks,
 }
 
 /// 一个 VBAN 接收源（网络接收 → 混音输入）。
@@ -67,6 +69,56 @@ pub struct NetworkBridge {
 }
 
 impl NetworkBridge {
+    /// 从引擎暴露的网络句柄 + 路由图推导网络桥接的源/目标参数，并启动桥接。
+    ///
+    /// `receiver_bind` 为本机 VBAN 接收 UDP 端口。遍历句柄中的 Vban source/
+    /// sink FIFO，与路由图中对应节点（按 SourceId/SinkId 匹配）的 stream_name、
+    /// remote_addr 组装成 `VbanSourceBridge`/`VbanSinkBridge`，再调用
+    /// [`Self::start`] 启动收发线程。
+    pub fn from_handles(
+        receiver_bind: SocketAddr,
+        graph: &RouteGraph,
+        handles: NetworkIoHandles,
+    ) -> Result<Self, NetworkBridgeError> {
+        let frame_samples = DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS;
+        let sources: Vec<VbanSourceBridge> = handles
+            .vban_source_producers
+            .into_iter()
+            .filter_map(|(SourceId(source_id), producer)| {
+                let spec = graph.sources.iter().find(|s| s.id.0 == source_id)?;
+                if spec.kind != SourceKind::Vban {
+                    return None;
+                }
+                Some(VbanSourceBridge {
+                    producer,
+                    stream_name: spec.stream_name.clone().unwrap_or_default(),
+                    frame_samples,
+                })
+            })
+            .collect();
+        let sinks: Vec<VbanSinkBridge> = handles
+            .vban_sink_consumers
+            .into_iter()
+            .filter_map(|(SinkId(sink_id), consumer)| {
+                let spec = graph.sinks.iter().find(|s| s.id.0 == sink_id)?;
+                if spec.kind != SinkKind::Vban {
+                    return None;
+                }
+                let target = spec.remote_addr.as_deref()?.parse().ok()?;
+                Some(VbanSinkBridge {
+                    consumer,
+                    stream_name: spec.stream_name.clone().unwrap_or_default(),
+                    target,
+                    sample_rate: INTERNAL_SAMPLE_RATE,
+                    channels: INTERNAL_CHANNELS,
+                    bit_format: VBanBitFormat::Float32,
+                    block_frames: DEFAULT_BLOCK_FRAMES,
+                })
+            })
+            .collect();
+        Self::start(receiver_bind, sources, sinks)
+    }
+
     /// 创建桥接并启动接收/发送线程。
     ///
     /// `receiver_bind` 为接收 UDP 端口，`sources` 为网络源（接收帧写入），
@@ -76,11 +128,10 @@ impl NetworkBridge {
         sources: Vec<VbanSourceBridge>,
         sinks: Vec<VbanSinkBridge>,
     ) -> Result<Self, NetworkBridgeError> {
-        if sources.is_empty() {
+        // 允许单边为空（如"网络输入→本机扬声器"或"本机麦克风→网络目标"的
+        // 不对称拓扑），但至少一边要有节点，否则无需桥接。
+        if sources.is_empty() && sinks.is_empty() {
             return Err(NetworkBridgeError::NoSources);
-        }
-        if sinks.is_empty() {
-            return Err(NetworkBridgeError::NoSinks);
         }
         let stop = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
@@ -289,6 +340,75 @@ mod tests {
             .zip(&outbound)
             .all(|(a, b)| (a - b).abs() < 1e-5));
 
+        bridge.shutdown();
+    }
+
+    /// 从 NetworkIoHandles + 路由图推导并启动桥接（含 Vban 源/目标）。
+    #[test]
+    fn from_handles_builds_bridge_from_graph() {
+        use loopmaster_audio_core::{
+            BusId, BusSpec, EndpointId, RouteGraph, SendId, SendSpec, SinkId, SinkSpec, SourceId,
+            SourceKind, SourceSpec,
+        };
+
+        // 构造含一个 Vban source + 一个 Vban sink 的路由图。
+        let graph = RouteGraph {
+            sources: vec![SourceSpec {
+                id: SourceId("net-in".into()),
+                kind: SourceKind::Vban,
+                endpoint_id: None,
+                process_id: None,
+                executable_path: None,
+                stream_name: Some("In".into()),
+                display_name: "网络输入".into(),
+            }],
+            buses: vec![BusSpec {
+                id: BusId("mix".into()),
+                display_name: "Mix".into(),
+            }],
+            sinks: vec![SinkSpec {
+                id: SinkId("net-out".into()),
+                endpoint_id: EndpointId("vban".into()),
+                display_name: "网络输出".into(),
+                kind: loopmaster_audio_core::SinkKind::Vban,
+                stream_name: Some("Out".into()),
+                remote_addr: Some("127.0.0.1:6999".into()),
+            }],
+            sends: vec![
+                SendSpec::SourceToBus {
+                    id: SendId("s1".into()),
+                    source_id: SourceId("net-in".into()),
+                    bus_id: BusId("mix".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+                SendSpec::BusToSink {
+                    id: SendId("s2".into()),
+                    bus_id: BusId("mix".into()),
+                    sink_id: SinkId("net-out".into()),
+                    gain_db: 0.0,
+                    muted: false,
+                    enabled: true,
+                    channel_map: Vec::new(),
+                },
+            ],
+        };
+        graph.validate().unwrap();
+
+        // 构造网络句柄：一个 Vban source producer + 一个 Vban sink consumer。
+        let (source_producer, _source_consumer) = AudioFifo::split(480 * 8, 2).unwrap();
+        let (_sink_producer, sink_consumer) = AudioFifo::split(480 * 8, 2).unwrap();
+        let handles = NetworkIoHandles {
+            vban_source_producers: vec![(SourceId("net-in".into()), source_producer)],
+            vban_sink_consumers: vec![(SinkId("net-out".into()), sink_consumer)],
+        };
+
+        let recv_port = random_port();
+        let receiver_bind: SocketAddr = format!("127.0.0.1:{recv_port}").parse().unwrap();
+        let mut bridge = NetworkBridge::from_handles(receiver_bind, &graph, handles).unwrap();
+        // 成功启动后清理。
         bridge.shutdown();
     }
 }
