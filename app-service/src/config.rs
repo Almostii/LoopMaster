@@ -289,6 +289,7 @@ mod v2_tests {
                 endpoint_id: Some(EndpointId("endpoint-source".into())),
                 process_id: None,
                 executable_path: None,
+                stream_name: None,
                 display_name: "Source".into(),
             }],
             buses: vec![BusSpec {
@@ -301,6 +302,7 @@ mod v2_tests {
                 display_name: "Sink".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -465,11 +467,13 @@ mod v2_tests {
             display_name: "网络目标".into(),
             kind: K::Vban,
             stream_name: Some("Out".into()),
+            remote_addr: Some("192.168.1.100:6980".into()),
         };
         let json = serde_json::to_string(&vban).unwrap();
         let round: SinkSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(round.kind, K::Vban);
         assert_eq!(round.stream_name.as_deref(), Some("Out"));
+        assert_eq!(round.remote_addr.as_deref(), Some("192.168.1.100:6980"));
 
         // 旧格式：无 kind/stream_name 字段，反序列化回退默认（Device/None）。
         let old_json = r#"{"id":"net","endpoint_id":"ep","display_name":"目标"}"#;

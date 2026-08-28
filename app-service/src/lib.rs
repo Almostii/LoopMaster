@@ -29,8 +29,9 @@ pub use model::{
     DeviceRepository, DeviceStatus, ProcessModel, ProcessRepository,
 };
 pub use network::{
-    default_device_name, MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkDiscovery, NetworkEvent,
-    NodeIdentity, NodeInfo, NodeMeta, VBanReceiveError, VBanReceiveStats, VBanReceiver,
-    VBanSendError, VBanSender, CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR,
+    default_device_name, MdnsAdvertiser, MdnsBrowser, MdnsError, NetworkBridge, NetworkBridgeError,
+    NetworkDiscovery, NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, VBanReceiveError,
+    VBanReceiveStats, VBanReceiver, VBanSendError, VBanSender, VbanSinkBridge, VbanSourceBridge,
+    CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR, VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE,
 };
 pub use route::{RouteEdit, RouteEditor};

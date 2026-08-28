@@ -23,9 +23,10 @@ use tauri::Manager;
 
 use loopmaster_app_service::{AppConfig, ConfigError, DeviceCompatibility, DeviceStatus};
 use loopmaster_app_service::{
-    DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, NetworkDiscovery,
-    NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, ProcessModel, ProcessRepository, RouteEdit,
-    RouteEditor, ServiceError, ServiceEvent, CAPS_VBAN_AUDIO,
+    DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, NetworkBridge,
+    NetworkDiscovery, NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, ProcessModel,
+    ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent, VBAN_SERVICE_PORT,
+    CAPS_VBAN_AUDIO,
 };
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkKind,
@@ -337,6 +338,8 @@ struct AppState {
     node_identity: Mutex<NodeIdentityBrief>,
     /// 后台局域网节点监听服务。
     discovery: Mutex<Option<NetworkDiscovery>>,
+    /// VBAN 网络桥接（网络 FIFO 与 UDP 收发对接）。
+    bridge: Mutex<Option<NetworkBridge>>,
 }
 
 impl AppState {
@@ -354,6 +357,7 @@ impl AppState {
                 web_port: 0,
             }),
             discovery: Mutex::new(None),
+            bridge: Mutex::new(None),
         }
     }
 }
@@ -696,7 +700,8 @@ fn start_engine(
             .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
         validate_graph_endpoints(editor.draft())?;
     }
-    // 1) 若已有引擎实例，先停止并丢弃，确保用最新图重建。
+    // 1) 若已有引擎实例，先停止并丢弃（含其网络桥接），确保用最新图重建。
+    stop_network_bridge(&state);
     {
         let mut engine_slot = state.engine.lock().expect("引擎锁未中毒");
         if let Some(old) = engine_slot.take() {
@@ -710,12 +715,18 @@ fn start_engine(
     let engine = engine.as_ref().expect("引擎已创建");
     engine
         .command(EngineCommand::Start)
-        .map_err(service_error_brief)
+        .map_err(service_error_brief)?;
+    // 3) 启动后异步轮询网络句柄，就绪后建立 VBAN 桥接。
+    let bridge_state = state.inner().clone();
+    spawn_network_bridge(app, bridge_state);
+    Ok(())
 }
 
 /// 停止引擎。引擎尚未创建时返回错误。
 #[tauri::command]
 fn stop_engine(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErrorBrief> {
+    // 停止网络桥接（其句柄依赖当前引擎 session）。
+    stop_network_bridge(&state);
     let engine = state.engine.lock().expect("引擎锁未中毒");
     match engine.as_ref() {
         Some(engine) => engine
@@ -733,18 +744,30 @@ fn stop_engine(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErro
 
 /// 从 Degraded/Reconnecting/Failed 手动触发重连。引擎尚未创建时返回错误。
 #[tauri::command]
-fn request_reconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErrorBrief> {
-    let engine = state.engine.lock().expect("引擎锁未中毒");
-    match engine.as_ref() {
-        Some(engine) => engine.request_reconnect().map_err(service_error_brief),
-        None => Err(ServiceErrorBrief {
-            category: "not_ready",
-            message: "引擎尚未启动".into(),
-            endpoint_id: None,
-            hresult: None,
-            hint: Some("请先启动引擎".into()),
-        }),
+fn request_reconnect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), ServiceErrorBrief> {
+    {
+        let engine = state.engine.lock().expect("引擎锁未中毒");
+        match engine.as_ref() {
+            Some(engine) => engine.request_reconnect().map_err(service_error_brief)?,
+            None => {
+                return Err(ServiceErrorBrief {
+                    category: "not_ready",
+                    message: "引擎尚未启动".into(),
+                    endpoint_id: None,
+                    hresult: None,
+                    hint: Some("请先启动引擎".into()),
+                });
+            }
+        }
     }
+    // 重连重建了引擎 session（新网络 FIFO），需重新建立网络桥接。
+    stop_network_bridge(&state);
+    let bridge_state = state.inner().clone();
+    spawn_network_bridge(app, bridge_state);
+    Ok(())
 }
 
 /// 应用一次路由编辑（写入暂存图并校验）。拓扑变化需重启会在
@@ -1083,6 +1106,64 @@ fn stop_advertising(state: &AppState) {
     if let Some(discovery) = slot.as_mut() {
         discovery.stop_advertiser();
     }
+}
+
+/// 停止 VBAN 网络桥接（幂等）。
+fn stop_network_bridge(state: &AppState) {
+    let mut slot = state.bridge.lock().expect("桥接锁未中毒");
+    if let Some(bridge) = slot.take() {
+        drop(bridge); // Drop 触发 shutdown + join
+    }
+}
+
+/// 异步建立 VBAN 网络桥接：引擎 Start 后 supervisor 后台创建 session 并发送
+/// 网络句柄，需轮询 `take_network_handles()` 直至就绪。
+fn spawn_network_bridge(app: tauri::AppHandle, state: Arc<AppState>) {
+    // 路由图中若无 VBAN 源/目标，无需桥接。
+    let has_vban = {
+        let editor = state.editor.lock().expect("路由锁未中毒");
+        let draft = editor.draft();
+        draft.sources.iter().any(|s| s.kind == SourceKind::Vban)
+            || draft.sinks.iter().any(|s| s.kind == SinkKind::Vban)
+    };
+    if !has_vban {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::Builder::new()
+        .name("loopmaster-bridge-wait".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                let engine = state.engine.lock().expect("引擎锁未中毒");
+                let handles = engine.as_ref().and_then(|e| e.take_network_handles());
+                drop(engine);
+                if let Some(handles) = handles {
+                    let graph = {
+                        let editor = state.editor.lock().expect("路由锁未中毒");
+                        editor.draft().clone()
+                    };
+                    let receiver_bind = format!("0.0.0.0:{}", VBAN_SERVICE_PORT)
+                        .parse()
+                        .expect("VBAN 端口常量合法");
+                    match NetworkBridge::from_handles(receiver_bind, &graph, handles) {
+                        Ok(bridge) => {
+                            let mut slot = state.bridge.lock().expect("桥接锁未中毒");
+                            *slot = Some(bridge);
+                            drop(slot);
+                            let _ = handle.emit("network-bridge-ready", serde_json::json!({}));
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("启动网络桥接失败: {e}");
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        })
+        .expect("创建网络桥接等待线程失败");
 }
 
 /// 进程声源自动重连：定期枚举当前音频进程，对失效的 ProcessLoopback
@@ -1612,6 +1693,7 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
                 endpoint_id: endpoint_id.map(EndpointId),
                 process_id,
                 executable_path,
+                stream_name: None,
                 display_name,
             })
         }
@@ -1631,6 +1713,7 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             display_name,
             kind: SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }),
         RouteEditRequest::RemoveExternalOutput { id } => RouteEdit::RemoveSink(SinkId(id)),
         RouteEditRequest::AddSend {
@@ -1860,6 +1943,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: Some(42),
                 executable_path: Some("C:/app-a.exe".into()),
+                stream_name: None,
                 display_name: "应用 A".into(),
             }],
             buses: vec![BusSpec {
@@ -1872,6 +1956,7 @@ mod tests {
                 display_name: "扬声器".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {

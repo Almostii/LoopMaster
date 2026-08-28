@@ -1430,6 +1430,7 @@ mod tests {
                 endpoint_id: Some(EndpointId(format!("capture-{index}"))),
                 process_id: None,
                 executable_path: None,
+                stream_name: None,
                 display_name: format!("Source {index}"),
             })
             .collect::<Vec<_>>();
@@ -1445,6 +1446,7 @@ mod tests {
                 display_name: "Render".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1500,6 +1502,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: Some(1234),
                 executable_path: None,
+                stream_name: None,
                 display_name: "process".into(),
             }],
             buses: vec![BusSpec {
@@ -1512,6 +1515,7 @@ mod tests {
                 display_name: "Render".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1545,6 +1549,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: None,
                 executable_path: None,
+                stream_name: None,
                 display_name: "process".into(),
             }],
             buses: vec![BusSpec {
@@ -1557,6 +1562,7 @@ mod tests {
                 display_name: "Render".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1595,6 +1601,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: Some(1234),
                 executable_path: Some("C:/process-1.exe".into()),
+                stream_name: None,
                 display_name: "process-1".into(),
             }],
             buses: vec![BusSpec {
@@ -1607,6 +1614,7 @@ mod tests {
                 display_name: "Render".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {

@@ -351,6 +351,7 @@ mod tests {
             endpoint_id: None,
             process_id: Some(1),
             executable_path: None,
+            stream_name: None,
             display_name: id.into(),
         }
     }
@@ -369,6 +370,7 @@ mod tests {
             display_name: id.into(),
             kind: loopmaster_audio_core::SinkKind::Device,
             stream_name: None,
+            remote_addr: None,
         }
     }
 

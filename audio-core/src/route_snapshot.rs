@@ -35,6 +35,7 @@ mod tests {
             endpoint_id: None,
             process_id: None,
             executable_path: None,
+            stream_name: None,
             display_name: id.into(),
         }
     }
@@ -50,6 +51,7 @@ mod tests {
                 display_name: "sink".into(),
                 kind: SinkKind::Device,
                 stream_name: None,
+                remote_addr: None,
             }],
             sends: Vec::new(),
         };
