@@ -201,6 +201,9 @@ enum RouteEditRequest {
         process_id: Option<u32>,
         #[serde(default)]
         executable_path: Option<String>,
+        /// VBAN 网络源（kind == "vban"）的接收流名。
+        #[serde(default)]
+        stream_name: Option<String>,
     },
     RemoveSource {
         id: String,
@@ -216,6 +219,15 @@ enum RouteEditRequest {
         id: String,
         endpoint_id: String,
         display_name: String,
+        /// 输出目标类型："device" | "vban"。
+        #[serde(default)]
+        kind: Option<String>,
+        /// VBAN 网络目标（kind == "vban"）的发送流名。
+        #[serde(default)]
+        stream_name: Option<String>,
+        /// VBAN 网络目标（kind == "vban"）的远端地址（ip:port）。
+        #[serde(default)]
+        remote_addr: Option<String>,
     },
     RemoveExternalOutput {
         id: String,
@@ -1679,6 +1691,7 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             endpoint_id,
             process_id,
             executable_path,
+            stream_name,
         } => {
             let kind = match kind.as_str() {
                 "device_capture" => SourceKind::DeviceCapture,
@@ -1687,13 +1700,15 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
                 "vban" => SourceKind::Vban,
                 other => return Err(format!("未知 source 类型: {other}")),
             };
+            // 仅 VBAN 源携带 stream_name；设备/进程源恒为 None。
+            let stream_name = (kind == SourceKind::Vban).then_some(stream_name).flatten();
             RouteEdit::AddSource(SourceSpec {
                 id: SourceId(id),
                 kind,
                 endpoint_id: endpoint_id.map(EndpointId),
                 process_id,
                 executable_path,
-                stream_name: None,
+                stream_name,
                 display_name,
             })
         }
@@ -1707,14 +1722,24 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             id,
             endpoint_id,
             display_name,
-        } => RouteEdit::AddSink(SinkSpec {
-            id: SinkId(id),
-            endpoint_id: EndpointId(endpoint_id),
-            display_name,
-            kind: SinkKind::Device,
-            stream_name: None,
-            remote_addr: None,
-        }),
+            kind,
+            stream_name,
+            remote_addr,
+        } => {
+            let is_vban = kind.as_deref() == Some("vban");
+            RouteEdit::AddSink(SinkSpec {
+                id: SinkId(id),
+                endpoint_id: EndpointId(endpoint_id),
+                display_name,
+                kind: if is_vban {
+                    SinkKind::Vban
+                } else {
+                    SinkKind::Device
+                },
+                stream_name: if is_vban { stream_name } else { None },
+                remote_addr: if is_vban { remote_addr } else { None },
+            })
+        }
         RouteEditRequest::RemoveExternalOutput { id } => RouteEdit::RemoveSink(SinkId(id)),
         RouteEditRequest::AddSend {
             id,
@@ -2025,6 +2050,7 @@ mod tests {
                     endpoint_id: None,
                     process_id: Some(42),
                     executable_path: Some("C:/app-a.exe".into()),
+                    stream_name: None,
                 })
                 .unwrap(),
             )
@@ -2047,6 +2073,9 @@ mod tests {
                     id: "out-1".into(),
                     endpoint_id: "endpoint-1".into(),
                     display_name: "扬声器".into(),
+                    kind: None,
+                    stream_name: None,
+                    remote_addr: None,
                 })
                 .unwrap(),
             )
@@ -2182,6 +2211,7 @@ mod tests {
             endpoint_id: None,
             process_id: None,
             executable_path: None,
+            stream_name: None,
         });
         assert!(error.is_err());
     }
