@@ -118,6 +118,11 @@ export default function DeviceView() {
     try {
       const updated = await setNetworkEnabled(enabled);
       setIdentity(updated);
+      // 关闭时立即清空节点列表，不等远端 mDNS 缓存（TTL）过期，
+      // 保证"局域网电脑"区与网络功能状态一致。
+      if (!updated.network_enabled) {
+        setNodes([]);
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -125,6 +130,13 @@ export default function DeviceView() {
       setToggling(false);
     }
   }
+
+  // 网络功能开关变化时同步节点列表：关闭即清空（不展示已下线的本机/缓存节点）。
+  useEffect(() => {
+    if (!identity.network_enabled) {
+      setNodes([]);
+    }
+  }, [identity.network_enabled]);
 
   return (
     <div className="device-view">
@@ -175,7 +187,13 @@ export default function DeviceView() {
           <span className="device-nodes-count">{nodes.length} 台在线</span>
         </div>
 
-        {loading ? (
+        {!identity.network_enabled ? (
+          <div className="device-empty">
+            网络功能未开启。
+            <br />
+            请打开上方开关以发现局域网中的其他电脑。
+          </div>
+        ) : loading ? (
           <div className="device-empty">正在扫描局域网…</div>
         ) : error ? (
           <div className="device-error">{error}</div>
