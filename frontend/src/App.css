@@ -1570,6 +1570,14 @@ button:disabled {
   gap: 8px;
   min-width: 0;
 }
+.device-meta-item-wide {
+  grid-column: 1 / -1;
+}
+.device-meta-wrap {
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.5;
+}
 .device-meta-label {
   font-size: 11px;
   color: var(--text-muted);
@@ -1723,4 +1731,94 @@ button:disabled {
 }
 [data-theme="dark"] .device-node-icon {
   color: var(--text-secondary);
+}
+
+/* ---------------- 手动添加网络节点对话框 ---------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-dialog {
+  background: #ffffff;
+  border-radius: var(--radius-md);
+  padding: 20px 22px;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.2);
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-bottom: 4px;
+}
+.modal-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.modal-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.modal-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.modal-field input {
+  font-size: 12.5px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  color: var(--text-main);
+}
+.modal-field input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.btn-primary {
+  background: var(--primary);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 7px 16px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+[data-theme="dark"] .modal-dialog {
+  background: var(--bg-card);
+}
+[data-theme="dark"] .modal-field input {
+  background: var(--bg-canvas);
+  color: var(--text-main);
+  border-color: var(--border-card);
 }

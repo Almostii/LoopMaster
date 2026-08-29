@@ -34,4 +34,6 @@ loopmaster-app-service = { path = "../../app-service" }
 # 事件和 DTO 暴露，Tauri 适配层需直接引用这些类型做投影（不参与实时音频逻辑）。
 loopmaster-audio-core = { path = "../../audio-core" }
 loopmaster-audio-windows = { path = "../../audio-windows" }
+# 枚举本机网络接口的 IPv4 地址（用于设备页展示"本机 IP"，便于跨机连接）。
+if-addrs = "0.13"
 

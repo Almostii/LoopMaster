@@ -70,6 +70,9 @@ struct NodeIdentityBrief {
     device_name: String,
     network_enabled: bool,
     web_port: u16,
+    /// 本机 IPv4 地址列表（多网卡时多个），便于用户跨机连接时查看。
+    #[serde(default)]
+    addresses: Vec<String>,
 }
 
 /// 局域网发现的 VBAN 节点概要。
@@ -367,6 +370,7 @@ impl AppState {
                 device_name: String::new(),
                 network_enabled: false,
                 web_port: 0,
+                addresses: Vec::new(),
             }),
             discovery: Mutex::new(None),
             bridge: Mutex::new(None),
@@ -393,12 +397,39 @@ fn resolve_config_path(app: &tauri::AppHandle) -> PathBuf {
     dir.join("config.json")
 }
 
+/// 枚举本机网络接口的 IPv4 地址（排除 loopback 与链路本地地址）。
+///
+/// 用于设备页展示"本机 IP"，便于用户在其他电脑上手动输入连接地址。
+/// 多网卡（以太网/Wi-Fi/NAT 等）会返回多个地址，由 UI 全部展示。
+fn local_ipv4_addresses() -> Vec<String> {
+    let addrs = match if_addrs::get_if_addrs() {
+        Ok(list) => list,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for iface in addrs {
+        if let std::net::IpAddr::V4(v4) = iface.ip() {
+            // 排除回环、链路本地（169.254/16）、未指定地址。
+            if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+                continue;
+            }
+            let text = v4.to_string();
+            if !out.contains(&text) {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
 /// 确保本机网络身份存在：读取配置中的 `network`，缺失 node_id 时生成并持久化。
 ///
-/// 返回当前身份快照（含 network_enabled）。
+/// 返回当前身份快照（含 network_enabled 与本机 IP 列表）。
 fn ensure_node_identity(state: &AppState) -> NodeIdentityBrief {
     let mut cached = state.node_identity.lock().expect("身份锁未中毒");
     if !cached.node_id.is_empty() {
+        // 网卡可能变化（切换 Wi-Fi/拔插网线），每次查询刷新本机 IP。
+        cached.addresses = local_ipv4_addresses();
         return cached.clone();
     }
     let mut config = match AppConfig::load_from(&state.config_path) {
@@ -423,6 +454,7 @@ fn ensure_node_identity(state: &AppState) -> NodeIdentityBrief {
             .unwrap_or_else(loopmaster_app_service::default_device_name),
         network_enabled: config.network.network_enabled,
         web_port: config.network.web_port,
+        addresses: local_ipv4_addresses(),
     };
     *cached = brief.clone();
     brief
@@ -577,6 +609,74 @@ fn get_network_nodes(state: tauri::State<'_, Arc<AppState>>) -> Vec<NetworkNodeB
     }
 }
 
+/// 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退路径，见专项文档 6.4）。
+///
+/// 手动节点不经过 mDNS 发现，直接由用户指定 IP/端口/流名；返回的节点概要
+/// 与自动发现节点类型一致，前端将其加入可选列表供路由选择使用。
+#[tauri::command]
+fn add_manual_vban_node(
+    name: String,
+    address: String,
+    port: u16,
+    stream_name: String,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+) -> Result<NetworkNodeBrief, ServiceErrorBrief> {
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "IP 地址不能为空".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请输入目标电脑的 IP 地址".into()),
+        });
+    }
+    // 校验地址（支持 IPv4 字面量；主机名解析交给后续连接阶段）。
+    if trimmed.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: format!("IP 地址格式无效：{trimmed}"),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请输入形如 192.168.1.50 的 IPv4 地址".into()),
+        });
+    }
+    if port == 0 {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "端口不能为 0".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some(format!("默认 VBAN 端口为 {VBAN_SERVICE_PORT}").into()),
+        });
+    }
+    let stream = if stream_name.trim().is_empty() {
+        name.trim().to_owned()
+    } else {
+        stream_name.trim().to_owned()
+    };
+    if stream.is_empty() || stream.len() > 16 {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "流名须为 1..16 个字符".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("可留空以使用显示名作为流名".into()),
+        });
+    }
+    Ok(NetworkNodeBrief {
+        // 手动节点用"地址:端口/流名"合成稳定 ID，避免与 mDNS node_id 冲突。
+        node_id: format!("manual:{trimmed}:{port}:{stream}"),
+        name: name.trim().to_owned(),
+        addresses: vec![trimmed.to_owned()],
+        port,
+        sample_rate: sample_rate.unwrap_or(loopmaster_audio_core::INTERNAL_SAMPLE_RATE),
+        channels: channels.unwrap_or(loopmaster_audio_core::INTERNAL_CHANNELS as u8),
+        caps: CAPS_VBAN_AUDIO.to_owned(),
+    })
+}
+
 /// 开启/关闭网络功能，并持久化到配置。
 ///
 /// 开启：发布本机 VBAN 服务（Advertiser）+ 确保 Browser 监听。
@@ -614,6 +714,7 @@ fn set_network_enabled(
         device_name: cached.device_name.clone(),
         network_enabled: enabled,
         web_port: cached.web_port,
+        addresses: local_ipv4_addresses(),
     };
     *cached = brief.clone();
     Ok(brief)
@@ -1932,6 +2033,7 @@ pub fn run() {
             get_app_version,
             get_node_identity,
             get_network_nodes,
+            add_manual_vban_node,
             set_network_enabled,
             list_devices,
             list_audio_processes,

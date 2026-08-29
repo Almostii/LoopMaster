@@ -81,6 +81,28 @@ export function getNetworkNodes(): Promise<NetworkNodeBrief[]> {
   return invoke<NetworkNodeBrief[]>("get_network_nodes");
 }
 
+/** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
+export function addManualVbanNode(params: {
+  name: string;
+  address: string;
+  port: number;
+  stream_name: string;
+  sample_rate?: number;
+  channels?: number;
+}): Promise<NetworkNodeBrief> {
+  if (!isTauriRuntime) {
+    return Promise.reject(unavailableInBrowser());
+  }
+  return invoke<NetworkNodeBrief>("add_manual_vban_node", {
+    name: params.name,
+    address: params.address,
+    port: params.port,
+    streamName: params.stream_name,
+    sampleRate: params.sample_rate,
+    channels: params.channels,
+  });
+}
+
 /** 返回进程可执行文件图标的 PNG data URI；无图标或平台不支持时返回 null。 */
 export function processIconDataUri(executablePath: string): Promise<string | null> {
   if (!isTauriRuntime) return Promise.resolve(null);
