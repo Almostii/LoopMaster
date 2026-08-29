@@ -1624,39 +1624,80 @@ button:disabled {
   text-align: center;
   padding: 24px 16px;
 }
+/* 局域网电脑：紧凑卡片网格（每台一个显示器图标 + 下方信息） */
 .device-node-list {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
 }
-.device-node-item {
-  padding: 12px 4px;
-}
-.device-node-item + .device-node-item {
-  border-top: 1px solid #f1f5f9;
-}
-.device-node-head {
+.device-node-card {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 3px;
+  padding: 12px 10px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-subtle);
+  cursor: default;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  min-width: 0;
 }
-.device-node-name {
-  font-size: 14px;
+.device-node-card:hover {
+  border-color: var(--primary);
+  background: #f8fafc;
+  transform: translateY(-1px);
+}
+.device-node-icon {
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+  line-height: 0;
+}
+.device-node-card-name {
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-main);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.device-node-online {
-  font-size: 11px;
-  color: #15803d;
-  background: #dcfce7;
-  padding: 1px 8px;
-  border-radius: 10px;
+.device-node-card-id {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.device-node-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 6px 24px;
+.device-node-card-addr {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-node-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+}
+.device-node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #16a34a;
+  flex-shrink: 0;
+}
+.device-node-card-audio {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* 深色主题下的设备页卡片 */
@@ -1668,11 +1709,18 @@ button:disabled {
 [data-theme="dark"] .device-local-status.offline {
   background: var(--bg-card-subtle);
 }
-[data-theme="dark"] .device-local-status.online,
-[data-theme="dark"] .device-node-online {
+[data-theme="dark"] .device-local-status.online {
   color: #4ade80;
   background: rgba(34, 197, 94, 0.15);
 }
-[data-theme="dark"] .device-node-item + .device-node-item {
-  border-top-color: var(--border-card);
+[data-theme="dark"] .device-node-card {
+  background: var(--bg-card-subtle);
+  border-color: var(--border-card);
+}
+[data-theme="dark"] .device-node-card:hover {
+  background: var(--bg-canvas);
+  border-color: var(--primary);
+}
+[data-theme="dark"] .device-node-icon {
+  color: var(--text-secondary);
 }
