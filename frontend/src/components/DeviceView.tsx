@@ -138,6 +138,10 @@ export default function DeviceView() {
     }
   }, [identity.network_enabled]);
 
+  // 排除本机自身：本机 Advertiser 的 mDNS 广播也会被本机 Browser 收到，
+  // 会把本机误报为"其他电脑"。
+  const displayNodes = nodes.filter((n) => n.node_id !== identity.node_id);
+
   return (
     <div className="device-view">
       {/* 本机身份卡 */}
@@ -180,11 +184,11 @@ export default function DeviceView() {
         </div>
       </section>
 
-      {/* 局域网节点列表 */}
+      {/* 局域网节点列表（排除本机自身） */}
       <section className="device-nodes-section">
         <div className="device-nodes-head">
           <h3 className="device-nodes-title">局域网电脑</h3>
-          <span className="device-nodes-count">{nodes.length} 台在线</span>
+          <span className="device-nodes-count">{displayNodes.length} 台在线</span>
         </div>
 
         {!identity.network_enabled ? (
@@ -197,7 +201,7 @@ export default function DeviceView() {
           <div className="device-empty">正在扫描局域网…</div>
         ) : error ? (
           <div className="device-error">{error}</div>
-        ) : nodes.length === 0 ? (
+        ) : displayNodes.length === 0 ? (
           <div className="device-empty">
             未发现其他 LoopMaster 设备。
             <br />
@@ -205,7 +209,7 @@ export default function DeviceView() {
           </div>
         ) : (
           <ul className="device-node-list">
-            {nodes.map((node) => (
+            {displayNodes.map((node) => (
               <li
                 key={node.node_id}
                 className="device-node-card"

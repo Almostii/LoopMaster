@@ -3,6 +3,7 @@ import {
   applyRouteEdit,
   getEngineState,
   getNetworkNodes,
+  getNodeIdentity,
   getRouteSnapshot,
   getSettings,
   listAudioProcesses,
@@ -67,6 +68,9 @@ export function useLoopMaster() {
   const busyRef = useRef(false);
   const engineStateRef = useRef(engineState);
   engineStateRef.current = engineState;
+  // 本机节点 ID：用于从发现的局域网节点中排除本机自身（本机 Advertiser 的
+  // mDNS 广播也会被本机 Browser 收到，会把自己误报为"其他电脑"）。
+  const localNodeIdRef = useRef("");
 
   const showNotice = useCallback((text: string, kind: Notice["kind"] = "ok") => {
     setNotice({ text, kind });
@@ -665,8 +669,9 @@ function cleanProcessName(name: string): string {
         void doStartEngine();
       }
     });
-    // 局域网 VBAN 节点上线/下线，维护 networkNodes。
+    // 局域网 VBAN 节点上线/下线，维护 networkNodes（排除本机自身）。
     const unNodeResolved = onNodeResolved((node) => {
+      if (node.node_id === localNodeIdRef.current) return; // 本机，忽略
       setNetworkNodes((prev) => {
         const exists = prev.some((n) => n.node_id === node.node_id);
         if (exists) return prev.map((n) => (n.node_id === node.node_id ? node : n));
@@ -677,8 +682,23 @@ function cleanProcessName(name: string): string {
       setNetworkNodes((prev) => prev.filter((n) => n.node_id !== nodeId));
     });
 
-    // 初始拉取一次当前节点快照。
-    void getNetworkNodes().then(setNetworkNodes).catch(() => {});
+    // 初始拉取：先取本机身份（用于排除自身），再拉节点快照。
+    void (async () => {
+      try {
+        const id = await getNodeIdentity();
+        localNodeIdRef.current = id.node_id;
+        // 清理身份拉取期间可能混入的本机节点。
+        setNetworkNodes((prev) => prev.filter((n) => n.node_id !== id.node_id));
+      } catch {
+        /* 身份获取失败时不过滤 */
+      }
+      try {
+        const list = await getNetworkNodes();
+        setNetworkNodes(list.filter((n) => n.node_id !== localNodeIdRef.current));
+      } catch {
+        /* 节点拉取失败保持空 */
+      }
+    })();
 
     return () => {
       void unState.then((fn) => fn());
