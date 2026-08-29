@@ -350,10 +350,14 @@ impl AudioEngine {
     /// 取最近一次启动 session 的网络桥接句柄（若有）。
     ///
     /// 供网络桥接层在引擎启动后获取 VBAN 源/目标的 FIFO 句柄。
+    ///
+    /// 阻塞直到 supervisor 完成首次 session 并把 `NetworkIoHandles` 发送到通道
+    /// （supervisor 在每个成功 session 后都会重发；首次 session 建好后即可拿到）。
+    /// 引擎未运行（无 receiver）时返回 `None`。
     pub fn recv_network_handles(&self) -> Option<NetworkIoHandles> {
         let mut slot = self.network_handles_rx.lock().expect("网络句柄锁未中毒");
         match slot.as_mut() {
-            Some(rx) => rx.try_recv().ok(),
+            Some(rx) => rx.recv().ok(),
             None => None,
         }
     }
