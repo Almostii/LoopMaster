@@ -909,6 +909,7 @@ fn start_engine(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), ServiceErrorBrief> {
+    log_line("start_engine: 收到启动引擎命令");
     let _operation = state
         .route_operation
         .lock()
@@ -1338,49 +1339,160 @@ fn stop_network_bridge(state: &AppState) {
 
 /// 异步建立 VBAN 网络桥接：引擎 Start 后 supervisor 后台创建 session 并发送
 /// 网络句柄，需轮询 `take_network_handles()` 直至就绪。
+/// 日志文件路径（`%LOCALAPPDATA%\com.loopmaster.app\loopmaster.log`）。
+fn log_file_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| {
+        std::path::PathBuf::from(dir)
+            .join("com.loopmaster.app")
+            .join("loopmaster.log")
+    })
+}
+
+/// 追加一行诊断日志到日志文件（release build 的 stderr 在 Windows GUI 下会被丢弃，
+/// 因此用文件日志排查网络桥接等后台问题）。失败时静默（不影响主流程）。
+fn log_line(message: &str) {
+    let Some(path) = log_file_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = format!(
+        "[{}] {message}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+    // 同时输出到 stderr，便于调试构建查看。
+    eprintln!("[loopmaster] {message}");
+}
+
 fn spawn_network_bridge(app: tauri::AppHandle, state: Arc<AppState>) {
     // 路由图中若无 VBAN 源/目标，无需桥接。
-    let has_vban = {
+    // 先查内存中的编辑器草稿；若草稿未包含 VBAN 节点（例如进程重启后尚未
+    // 把配置载入编辑器），回退到持久化配置里的路由图，避免"配置里有 VBAN
+    // 节点但桥接不启动"导致 6980 永不监听。
+    // 详细记录草稿与配置里的 VBAN 节点，便于诊断"为什么桥接没启动"。
+    let draft_vban: Vec<String> = {
         let editor = state.editor.lock().expect("路由锁未中毒");
         let draft = editor.draft();
-        draft.sources.iter().any(|s| s.kind == SourceKind::Vban)
-            || draft.sinks.iter().any(|s| s.kind == SinkKind::Vban)
+        let mut names = Vec::new();
+        for s in &draft.sources {
+            if s.kind == SourceKind::Vban {
+                names.push(format!("source:{}", s.display_name));
+            }
+        }
+        for s in &draft.sinks {
+            if s.kind == SinkKind::Vban {
+                names.push(format!(
+                    "sink:{} remote={:?} stream={:?}",
+                    s.display_name, s.remote_addr, s.stream_name
+                ));
+            }
+        }
+        names
     };
+    let config_vban: Vec<String> = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => {
+            let mut names = Vec::new();
+            for s in &config.graph.sources {
+                if s.kind == SourceKind::Vban {
+                    names.push(format!("source:{}", s.display_name));
+                }
+            }
+            for s in &config.graph.sinks {
+                if s.kind == SinkKind::Vban {
+                    names.push(format!(
+                        "sink:{} remote={:?} stream={:?}",
+                        s.display_name, s.remote_addr, s.stream_name
+                    ));
+                }
+            }
+            names
+        }
+        Err(e) => vec![format!("配置读取失败: {e}")],
+    };
+    log_line(&format!(
+        "spawn_network_bridge: 草稿 VBAN 节点={:?} 配置 VBAN 节点={:?}",
+        draft_vban, config_vban
+    ));
+
+    let has_vban = !draft_vban.is_empty()
+        || config_vban
+            .iter()
+            .any(|n| n.starts_with("source:") || n.starts_with("sink:"));
     if !has_vban {
+        log_line("spawn_network_bridge: 无 VBAN 节点，不启动桥接");
         return;
     }
+    log_line("spawn_network_bridge: 检测到 VBAN 节点，启动桥接等待线程");
     let handle = app.clone();
     std::thread::Builder::new()
         .name("loopmaster-bridge-wait".into())
         .spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                let engine = state.engine.lock().expect("引擎锁未中毒");
-                let handles = engine.as_ref().and_then(|e| e.take_network_handles());
-                drop(engine);
-                if let Some(handles) = handles {
-                    let graph = {
-                        let editor = state.editor.lock().expect("路由锁未中毒");
-                        editor.draft().clone()
-                    };
-                    let receiver_bind = format!("0.0.0.0:{}", VBAN_SERVICE_PORT)
-                        .parse()
-                        .expect("VBAN 端口常量合法");
-                    match NetworkBridge::from_handles(receiver_bind, &graph, handles) {
-                        Ok(bridge) => {
-                            let mut slot = state.bridge.lock().expect("桥接锁未中毒");
-                            *slot = Some(bridge);
-                            drop(slot);
-                            let _ = handle.emit("network-bridge-ready", serde_json::json!({}));
-                            return;
+            // 阻塞直到 supervisor 完成首次 session 并把 NetworkIoHandles 发到通道
+            // （audio-windows 的 recv_network_handles 改为阻塞 recv）。
+            log_line("bridge-wait: 等待 supervisor 发送网络句柄（阻塞 recv）...");
+            let engine = state.engine.lock().expect("引擎锁未中毒");
+            let handles = engine.as_ref().and_then(|e| e.take_network_handles());
+            drop(engine);
+            let Some(handles) = handles else {
+                log_line("bridge-wait: 失败 - 引擎未运行或 supervisor 未发送网络句柄");
+                return;
+            };
+            log_line(&format!(
+                "bridge-wait: 拿到网络句柄 sources={} sinks={}",
+                handles.vban_source_producers.len(),
+                handles.vban_sink_consumers.len()
+            ));
+            // 构造桥接用的路由图：优先用编辑器草稿；若草稿不含 VBAN 节点
+            // （进程重启后配置未载入编辑器），改用持久化配置里的路由图。
+            let graph = {
+                let editor = state.editor.lock().expect("路由锁未中毒");
+                let draft = editor.draft().clone();
+                let draft_has_vban = draft.sources.iter().any(|s| s.kind == SourceKind::Vban)
+                    || draft.sinks.iter().any(|s| s.kind == SinkKind::Vban);
+                if draft_has_vban {
+                    log_line("bridge-wait: 使用编辑器草稿作为桥接路由图");
+                    draft
+                } else {
+                    drop(editor);
+                    match AppConfig::load_from(&state.config_path) {
+                        Ok(config) => {
+                            log_line("bridge-wait: 草稿无 VBAN，回退使用配置路由图");
+                            config.graph
                         }
-                        Err(e) => {
-                            eprintln!("启动网络桥接失败: {e}");
-                            return;
+                        Err(_) => {
+                            log_line("bridge-wait: 配置读取失败，仍用草稿");
+                            draft
                         }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+            let receiver_bind = format!("0.0.0.0:{}", VBAN_SERVICE_PORT)
+                .parse()
+                .expect("VBAN 端口常量合法");
+            log_line(&format!("bridge-wait: 准备绑定 {receiver_bind} 并启动桥接"));
+            match NetworkBridge::from_handles(receiver_bind, &graph, handles) {
+                Ok(bridge) => {
+                    let mut slot = state.bridge.lock().expect("桥接锁未中毒");
+                    *slot = Some(bridge);
+                    drop(slot);
+                    log_line("bridge-wait: 成功 - 网络桥接已启动，6980 应处于监听");
+                    let _ = handle.emit("network-bridge-ready", serde_json::json!({}));
+                }
+                Err(e) => {
+                    log_line(&format!("bridge-wait: 失败 - 启动网络桥接失败: {e}"));
+                }
             }
         })
         .expect("创建网络桥接等待线程失败");
