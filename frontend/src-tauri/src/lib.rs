@@ -657,6 +657,51 @@ fn check_network_firewall() -> FirewallCheckResult {
     }
 }
 
+/// 尝试自动放行 UDP 6980 入站防火墙（提权执行 netsh）。
+///
+/// 若规则已存在或已放行，返回 `Ok(true)`（无需操作）。否则通过 UAC 提权
+/// 运行 netsh 添加入站规则；用户拒绝授权时返回错误（前端再给出手动引导）。
+/// 放行一次后规则永久生效，后续不再弹 UAC。
+#[tauri::command]
+fn enable_network_firewall() -> Result<FirewallCheckResult, String> {
+    // 若规则已存在，直接返回成功（无需再提权）。
+    if let Ok(output) = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", "name=LoopMaster VBAN"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.contains("LoopMaster VBAN") {
+            return Ok(FirewallCheckResult {
+                port_available: std::net::UdpSocket::bind("0.0.0.0:6980").is_ok(),
+                rule_exists: true,
+                checked: true,
+                message: "防火墙已放行 UDP 6980。".to_owned(),
+            });
+        }
+    }
+
+    // 规则缺失：通过 UAC 提权执行 netsh 添加规则。
+    // 使用 PowerShell Start-Process -Verb RunAs 触发 UAC；用户确认后生效。
+    let script = format!(
+        "Start-Process -FilePath 'netsh' -ArgumentList 'advfirewall','firewall','add','rule','name=LoopMaster VBAN','dir=in','action=allow','protocol=UDP','localport={VBAN_SERVICE_PORT}','profile=private','remoteip=localsubnet' -Verb RunAs -Wait"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .map_err(|e| format!("触发放行失败: {e}"))?;
+
+    if status.success() {
+        Ok(FirewallCheckResult {
+            port_available: std::net::UdpSocket::bind("0.0.0.0:6980").is_ok(),
+            rule_exists: true,
+            checked: true,
+            message: "已放行 UDP 6980 入站防火墙。".to_owned(),
+        })
+    } else {
+        Err("未获得管理员授权，防火墙未放行。".to_owned())
+    }
+}
+
 /// 返回当前局域网发现的 VBAN 节点列表快照。
 #[tauri::command]
 fn get_network_nodes(state: tauri::State<'_, Arc<AppState>>) -> Vec<NetworkNodeBrief> {
@@ -2096,6 +2141,7 @@ pub fn run() {
             get_node_identity,
             get_network_nodes,
             check_network_firewall,
+            enable_network_firewall,
             add_manual_vban_node,
             set_network_enabled,
             list_devices,

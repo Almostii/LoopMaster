@@ -101,6 +101,19 @@ export function checkNetworkFirewall(): Promise<FirewallCheckResult> {
   return invoke<FirewallCheckResult>("check_network_firewall");
 }
 
+/** 自动放行 UDP 6980 入站防火墙（提权，用户确认一次 UAC）。 */
+export function enableNetworkFirewall(): Promise<FirewallCheckResult> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      port_available: true,
+      rule_exists: true,
+      checked: false,
+      message: "",
+    });
+  }
+  return invoke<FirewallCheckResult>("enable_network_firewall");
+}
+
 /** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
 export function addManualVbanNode(params: {
   name: string;
