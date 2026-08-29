@@ -81,6 +81,26 @@ export function getNetworkNodes(): Promise<NetworkNodeBrief[]> {
   return invoke<NetworkNodeBrief[]>("get_network_nodes");
 }
 
+export interface FirewallCheckResult {
+  port_available: boolean;
+  rule_exists: boolean;
+  checked: boolean;
+  message: string;
+}
+
+/** 检测 VBAN 网络功能所需的防火墙放行情况。 */
+export function checkNetworkFirewall(): Promise<FirewallCheckResult> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      port_available: true,
+      rule_exists: true,
+      checked: false,
+      message: "",
+    });
+  }
+  return invoke<FirewallCheckResult>("check_network_firewall");
+}
+
 /** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
 export function addManualVbanNode(params: {
   name: string;

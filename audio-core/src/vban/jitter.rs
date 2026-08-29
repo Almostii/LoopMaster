@@ -53,7 +53,10 @@ pub struct VBanJitterStats {
 ///
 /// 以 `nu_frame` 为键维护有序帧缓存，支持乱序插入与按序抽取。缓冲深度
 /// 受窗口约束，过旧的帧会被丢弃。
-#[derive(Debug)]
+///
+/// 帧长度**可变**：发送端分包时不同包（帧）的样本数可能不同（如 256、44），
+/// 因此 `push` 接受任意非空帧长，`pop_next` 返回该帧的实际样本数。
+#[derive(Debug, Default)]
 pub struct VBanJitterBuffer {
     /// 乱序/待抽取帧缓存：`nu_frame -> PCM 样本`。
     frames: BTreeMap<u32, Vec<f32>>,
@@ -65,29 +68,19 @@ pub struct VBanJitterBuffer {
     first_frame: Option<u32>,
     /// 统计。
     stats: VBanJitterStats,
-    /// 每帧固定样本数（跨声道交织后长度）。
+    /// 参考帧样本数（首个 push 的帧样本数）；0 表示尚无帧。
     frame_samples: usize,
 }
 
 impl VBanJitterBuffer {
-    /// 创建 Jitter Buffer；`frame_samples` 为每帧（跨声道交织后）样本总数。
+    /// 创建自适应 Jitter Buffer。
     ///
-    /// 每帧样本数应等于 `samples_per_channel * channels`。
-    pub fn new(frame_samples: usize) -> Result<Self, VBanJitterError> {
-        if frame_samples == 0 {
-            return Err(VBanJitterError::ZeroFrameSamples);
-        }
-        Ok(Self {
-            frames: BTreeMap::new(),
-            last_emitted: None,
-            last_pushed: None,
-            first_frame: None,
-            stats: VBanJitterStats::default(),
-            frame_samples,
-        })
+    /// 帧样本数不预先固定，由首个 `push` 的帧长度确定（可变帧支持）。
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// 每帧（跨声道交织后）样本总数。
+    /// 当前流的参考帧样本数（首个 push 的帧长度）；尚未收到帧时为 0。
     pub const fn frame_samples(&self) -> usize {
         self.frame_samples
     }
@@ -106,15 +99,18 @@ impl VBanJitterBuffer {
 
     /// 插入一个帧。处理乱序、缺包与回绕。
     ///
+    /// 帧长度可变（支持发送端分包）；首个 `push` 的帧长度作为参考样本数。
+    ///
+    /// - 若样本数为 0，返回 `EmptySamples` 错误；
     /// - 若帧号已存在（重复包），丢弃并保持统计不变；
     /// - 若帧号过旧（落后已输出帧号超过窗口），丢弃并记 `dropped_old`；
     /// - 否则插入缓存，并按帧号推进缺包检测。
     pub fn push(&mut self, nu_frame: u32, samples: &[f32]) -> Result<(), VBanJitterError> {
-        if samples.len() != self.frame_samples {
-            return Err(VBanJitterError::FrameLengthMismatch {
-                expected: self.frame_samples,
-                actual: samples.len(),
-            });
+        if samples.is_empty() {
+            return Err(VBanJitterError::EmptySamples);
+        }
+        if self.frame_samples == 0 {
+            self.frame_samples = samples.len();
         }
         // 重复帧号直接忽略。
         if self.frames.contains_key(&nu_frame) {
@@ -221,6 +217,7 @@ impl VBanJitterBuffer {
         self.last_emitted = None;
         self.last_pushed = None;
         self.first_frame = None;
+        self.frame_samples = 0;
         self.stats = VBanJitterStats::default();
     }
 }
@@ -228,10 +225,8 @@ impl VBanJitterBuffer {
 /// Jitter Buffer 错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VBanJitterError {
-    #[error("每帧样本数必须大于 0")]
-    ZeroFrameSamples,
-    #[error("帧样本数不匹配：期望 {expected}，实际 {actual}")]
-    FrameLengthMismatch { expected: usize, actual: usize },
+    #[error("帧样本数为空")]
+    EmptySamples,
 }
 
 #[cfg(test)]
@@ -239,96 +234,96 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn frame(buf: &VBanJitterBuffer, value: f32) -> Vec<f32> {
-        vec![value; buf.frame_samples()]
+    fn frame(samples: usize, value: f32) -> Vec<f32> {
+        vec![value; samples]
     }
 
     #[test]
-    fn rejects_zero_frame_samples() {
-        assert_eq!(
-            VBanJitterBuffer::new(0).unwrap_err(),
-            VBanJitterError::ZeroFrameSamples
-        );
-    }
-
-    #[test]
-    fn rejects_frame_length_mismatch() {
-        let mut buf = VBanJitterBuffer::new(4).unwrap();
-        assert_eq!(
-            buf.push(1, &[0.0, 0.0, 0.0]).unwrap_err(),
-            VBanJitterError::FrameLengthMismatch {
-                expected: 4,
-                actual: 3,
-            }
-        );
+    fn rejects_empty_samples() {
+        let mut buf = VBanJitterBuffer::new();
+        assert_eq!(buf.push(1, &[]).unwrap_err(), VBanJitterError::EmptySamples);
     }
 
     #[test]
     fn pops_frames_in_ascending_order() {
-        let mut buf = VBanJitterBuffer::new(4).unwrap();
-        buf.push(1, &frame(&buf, 1.0)).unwrap();
-        buf.push(3, &frame(&buf, 3.0)).unwrap();
-        buf.push(2, &frame(&buf, 2.0)).unwrap();
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(1, &frame(4, 1.0)).unwrap();
+        buf.push(3, &frame(4, 3.0)).unwrap();
+        buf.push(2, &frame(4, 2.0)).unwrap();
         assert_eq!(buf.fill_level(), 3);
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 1.0));
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 2.0));
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 3.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(4, 1.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(4, 2.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(4, 3.0));
+        assert_eq!(buf.pop_next(), None);
+    }
+
+    #[test]
+    fn supports_variable_length_frames() {
+        // 分包场景：不同帧样本数不同，都应正确入队/出队。
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(1, &frame(256, 1.0)).unwrap();
+        buf.push(2, &frame(44, 2.0)).unwrap();
+        buf.push(3, &frame(44, 3.0)).unwrap();
+        assert_eq!(buf.frame_samples(), 256); // 首个帧样本数作为参考
+        assert_eq!(buf.pop_next().unwrap(), frame(256, 1.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(44, 2.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(44, 3.0));
         assert_eq!(buf.pop_next(), None);
     }
 
     #[test]
     fn duplicate_frame_is_ignored() {
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
-        buf.push(5, &frame(&buf, 1.0)).unwrap();
-        buf.push(5, &frame(&buf, 9.0)).unwrap(); // 重复帧号，保留首次
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(5, &frame(2, 1.0)).unwrap();
+        buf.push(5, &frame(2, 9.0)).unwrap(); // 重复帧号，保留首次
         assert_eq!(buf.fill_level(), 1);
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 1.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 1.0));
         assert_eq!(buf.stats().received, 1);
     }
 
     #[test]
     fn counts_lost_frames_on_gap() {
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
-        buf.push(10, &frame(&buf, 1.0)).unwrap();
-        buf.push(14, &frame(&buf, 2.0)).unwrap();
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(10, &frame(2, 1.0)).unwrap();
+        buf.push(14, &frame(2, 2.0)).unwrap();
         // 跳到 14，缺失 11/12/13 三帧。
         assert_eq!(buf.stats().lost, 3);
         assert_eq!(buf.stats().discontinuities, 1);
         // pop 时再补计缺失（从 10 到 14）。
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 1.0));
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 2.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 1.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 2.0));
     }
 
     #[test]
     fn counts_reordered_frames() {
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
-        buf.push(3, &frame(&buf, 1.0)).unwrap();
-        buf.push(1, &frame(&buf, 2.0)).unwrap(); // 乱序（落后于已接收最大 3）
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(3, &frame(2, 1.0)).unwrap();
+        buf.push(1, &frame(2, 2.0)).unwrap(); // 乱序（落后于已接收最大 3）
         assert!(buf.stats().reordered >= 1);
     }
 
     #[test]
     fn handles_u32_frame_wraparound() {
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
+        let mut buf = VBanJitterBuffer::new();
         let near_max = u32::MAX - 1;
-        buf.push(near_max, &frame(&buf, 1.0)).unwrap();
-        buf.push(u32::MAX, &frame(&buf, 2.0)).unwrap();
+        buf.push(near_max, &frame(2, 1.0)).unwrap();
+        buf.push(u32::MAX, &frame(2, 2.0)).unwrap();
         // 回绕后帧号从 0 继续。
-        buf.push(0, &frame(&buf, 3.0)).unwrap();
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 1.0));
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 2.0));
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 3.0));
+        buf.push(0, &frame(2, 3.0)).unwrap();
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 1.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 2.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 3.0));
         assert_eq!(buf.pop_next(), None);
     }
 
     #[test]
     fn drops_frames_far_behind_emitted_pointer() {
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
-        buf.push(100, &frame(&buf, 1.0)).unwrap();
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(100, &frame(2, 1.0)).unwrap();
         buf.pop_next().unwrap();
         // 远旧帧（落后已输出 100 超过窗口一半，即 >512 帧）被丢弃。
         let far_old = 100u32.wrapping_sub(600);
-        buf.push(far_old, &frame(&buf, 9.0)).unwrap();
+        buf.push(far_old, &frame(2, 9.0)).unwrap();
         assert_eq!(buf.fill_level(), 0);
         assert_eq!(buf.stats().dropped_old, 1);
     }
@@ -336,22 +331,23 @@ mod tests {
     #[test]
     fn keeps_new_frames_after_emission_pointer_advances() {
         // 回归：push 的过旧判定不得把正常递增的新帧误判为过旧。
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
-        buf.push(100, &frame(&buf, 1.0)).unwrap();
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 1.0)); // last_emitted=100
-        buf.push(200, &frame(&buf, 2.0)).unwrap(); // 新帧，应保留
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(100, &frame(2, 1.0)).unwrap();
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 1.0)); // last_emitted=100
+        buf.push(200, &frame(2, 2.0)).unwrap(); // 新帧，应保留
         assert_eq!(buf.fill_level(), 1);
         assert_eq!(buf.stats().dropped_old, 0);
-        assert_eq!(buf.pop_next().unwrap(), frame(&buf, 2.0));
+        assert_eq!(buf.pop_next().unwrap(), frame(2, 2.0));
     }
 
     #[test]
     fn reset_clears_state_and_stats() {
-        let mut buf = VBanJitterBuffer::new(2).unwrap();
-        buf.push(1, &frame(&buf, 1.0)).unwrap();
-        buf.push(5, &frame(&buf, 2.0)).unwrap();
+        let mut buf = VBanJitterBuffer::new();
+        buf.push(1, &frame(2, 1.0)).unwrap();
+        buf.push(5, &frame(2, 2.0)).unwrap();
         buf.reset();
         assert_eq!(buf.fill_level(), 0);
+        assert_eq!(buf.frame_samples(), 0);
         assert_eq!(buf.stats().lost, 0);
         assert_eq!(buf.pop_next(), None);
     }
@@ -363,7 +359,7 @@ mod tests {
             frames in proptest::collection::vec(0u32..500u32, 1..200),
             sample_len in 1usize..=16usize,
         )| {
-            let mut buf = VBanJitterBuffer::new(sample_len).unwrap();
+            let mut buf = VBanJitterBuffer::new();
             let mut prev_emitted: Option<u32> = None;
             for f in &frames {
                 let _ = buf.push(*f, &vec![0.5; sample_len]);

@@ -8,19 +8,23 @@
 //!
 //! 纯网络服务层，不在音频实时路径阻塞。参考专项文档 4/5 节。
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use loopmaster_audio_core::vban::packet::VBanBitFormat;
+use loopmaster_audio_core::vban::clock_drift::ClockDriftCompensator;
+use loopmaster_audio_core::vban::jitter::VBanJitterBuffer;
+use loopmaster_audio_core::vban::packet::{
+    VBanBitFormat, VBanHeader, VBAN_HEADER_SIZE, VBAN_MAX_PACKET_SIZE,
+};
 use loopmaster_audio_core::{
-    AudioFifoConsumer, RouteGraph, SinkId, SinkKind, SourceId, SourceKind, DEFAULT_BLOCK_FRAMES,
-    INTERNAL_CHANNELS, INTERNAL_SAMPLE_RATE,
+    AudioFifoConsumer, AudioFifoProducer, RouteGraph, SinkId, SinkKind, SourceId, SourceKind,
+    DEFAULT_BLOCK_FRAMES, INTERNAL_CHANNELS, INTERNAL_SAMPLE_RATE,
 };
 use loopmaster_audio_windows::NetworkIoHandles;
 
-use crate::network::receiver::VBanReceiver;
 use crate::network::sender::VBanSender;
 
 /// 桥接错误。
@@ -28,6 +32,8 @@ use crate::network::sender::VBanSender;
 pub enum NetworkBridgeError {
     #[error("接收端绑定失败: {0}")]
     Bind(#[from] crate::network::receiver::VBanReceiveError),
+    #[error("接收 UDP 失败: {0}")]
+    Udp(#[from] std::io::Error),
     #[error("发送器初始化失败: {0}")]
     SenderInit(#[from] crate::network::sender::VBanSendError),
     #[error("无网络源/目标句柄")]
@@ -40,8 +46,6 @@ pub struct VbanSourceBridge {
     pub producer: loopmaster_audio_core::AudioFifoProducer,
     /// 接收流名（用于从混音图匹配）。
     pub stream_name: String,
-    /// 每帧样本数（samples_per_channel × channels）。
-    pub frame_samples: usize,
 }
 
 /// 一个 VBAN 发送目标（混音输出 → 网络发送）。
@@ -80,7 +84,6 @@ impl NetworkBridge {
         graph: &RouteGraph,
         handles: NetworkIoHandles,
     ) -> Result<Self, NetworkBridgeError> {
-        let frame_samples = DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS;
         let sources: Vec<VbanSourceBridge> = handles
             .vban_source_producers
             .into_iter()
@@ -92,7 +95,6 @@ impl NetworkBridge {
                 Some(VbanSourceBridge {
                     producer,
                     stream_name: spec.stream_name.clone().unwrap_or_default(),
-                    frame_samples,
                 })
             })
             .collect();
@@ -136,29 +138,20 @@ impl NetworkBridge {
         let stop = Arc::new(AtomicBool::new(false));
         let mut threads = Vec::new();
 
-        // 接收线程：每个源一个独立接收器（按源绑定）。
-        for source in sources {
-            let mut receiver = VBanReceiver::bind(receiver_bind, source.frame_samples)?;
-            let mut producer = source.producer;
+        // 接收：单个共享 UDP socket（绑定 6980），按流名分发到各流的 jitter buffer。
+        if !sources.is_empty() {
+            let socket = std::net::UdpSocket::bind(receiver_bind)?;
+            socket.set_nonblocking(true)?;
             let stop_clone = Arc::clone(&stop);
+            let streams: Vec<(String, AudioFifoProducer)> = sources
+                .into_iter()
+                .map(|s| (s.stream_name, s.producer))
+                .collect();
             threads.push(
                 thread::Builder::new()
-                    .name(format!("loopmaster-vban-recv-{}", source.stream_name))
+                    .name("loopmaster-vban-recv".into())
                     .spawn(move || {
-                        let mut out = vec![0.0f32; source.frame_samples];
-                        while !stop_clone.load(Ordering::Acquire) {
-                            let _ = receiver.recv_and_push();
-                            while let Some(frame) = receiver.pop_next() {
-                                // 写入混音 source FIFO；不满帧补静音。
-                                out.fill(0.0);
-                                let write_len = frame.len().min(out.len());
-                                out[..write_len].copy_from_slice(&frame[..write_len]);
-                                let _ = producer.push_interleaved(&out);
-                            }
-                            if receiver.fill_level() == 0 {
-                                thread::sleep(std::time::Duration::from_millis(1));
-                            }
-                        }
+                        recv_loop(socket, streams, stop_clone);
                     })
                     .expect("创建 VBAN 接收线程失败"),
             );
@@ -223,6 +216,149 @@ impl Drop for NetworkBridge {
     }
 }
 
+/// 共享 UDP socket 的多流接收循环。
+///
+/// 每个流（按 `stream_name` 匹配）持有一个独立 jitter buffer 与其混音 FIFO
+/// producer。循环 `recv_from` → 解析 VBAN 头 → 按流名分发 → 入 jitter →
+/// 抽帧写入对应 producer。
+fn recv_loop(socket: UdpSocket, streams: Vec<(String, AudioFifoProducer)>, stop: Arc<AtomicBool>) {
+    // 流名 -> (jitter, producer, 时钟漂移补偿器)。
+    let mut streams: HashMap<String, (VBanJitterBuffer, AudioFifoProducer, ClockDriftCompensator)> =
+        streams
+            .into_iter()
+            .map(|(name, producer)| {
+                // 目标水位：2 个包（初始候选值，真机联调时冻结）。
+                let comp = ClockDriftCompensator::new(2.0);
+                (name, (VBanJitterBuffer::new(), producer, comp))
+            })
+            .collect();
+    let mut recv_buf = vec![0u8; VBAN_MAX_PACKET_SIZE];
+    let mut block = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
+
+    while !stop.load(Ordering::Acquire) {
+        let (len, _peer) = match socket.recv_from(&mut recv_buf) {
+            Ok(v) => v,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // 无数据：顺带把各流已就绪的帧写走。
+                drain_all(&mut streams, &mut block);
+                thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(_) => {
+                thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+        };
+        if len < VBAN_HEADER_SIZE {
+            continue;
+        }
+        let Ok(header) = VBanHeader::decode(&recv_buf[..len]) else {
+            continue;
+        };
+        let Ok(stream_name) = header.stream_name_str() else {
+            continue;
+        };
+        // 只分发到已配置的接收流；未知流名丢弃。
+        if let Some((jitter, _, _)) = streams.get_mut(stream_name) {
+            // 按位深解码 payload 为 f32。
+            let Ok(bit_format) = header.bit_format() else {
+                continue;
+            };
+            let samples_per_channel = header.samples_per_channel();
+            let channels = header.channels();
+            let sample_count = samples_per_channel * channels;
+            let expected_payload = sample_count * bit_format.bytes_per_sample();
+            let payload = &recv_buf[VBAN_HEADER_SIZE..len];
+            // 校验 payload 长度：恶意/损坏包头不得触发超大分配。
+            if payload.len() < expected_payload {
+                continue;
+            }
+            let mut samples = vec![0.0f32; sample_count];
+            decode_vban_payload(payload, bit_format, &mut samples);
+            let _ = jitter.push(header.nu_frame, &samples);
+        }
+        drain_all(&mut streams, &mut block);
+    }
+}
+
+/// 把各流 jitter 已就绪的帧写入对应 producer（不满帧补静音到 block 长度）。
+///
+/// 时钟漂移：基于 jitter 当前水位（fill_level）驱动 `ClockDriftCompensator`
+/// 计算采样率比例因子，输出到 stderr 便于诊断；真实的重采样对齐
+/// （`FixedOutputResampler::set_sample_rates` 微调）在真机联调阶段接入，
+/// 因为漂移比例需按设备实测冻结。
+fn drain_all(
+    streams: &mut HashMap<String, (VBanJitterBuffer, AudioFifoProducer, ClockDriftCompensator)>,
+    block: &mut [f32],
+) {
+    for (name, (jitter, producer, comp)) in streams.iter_mut() {
+        // 时钟漂移：仅当流有数据（水位 > 0）时更新补偿器并诊断，
+        // 避免空闲流在每个 drain 周期刷屏；比例因子仅供诊断，不改变输出。
+        if jitter.fill_level() > 0 {
+            let ratio = comp.update(jitter.fill_level(), 0.1);
+            if (ratio - 1.0).abs() > 1e-3 {
+                eprintln!(
+                    "[vban:{name}] 时钟漂移比例 {:.6} (水位 {})",
+                    ratio,
+                    jitter.fill_level()
+                );
+            }
+        }
+        while let Some(frame) = jitter.pop_next() {
+            block.fill(0.0);
+            let write_len = frame.len().min(block.len());
+            block[..write_len].copy_from_slice(&frame[..write_len]);
+            let _ = producer.push_interleaved(block);
+        }
+    }
+}
+
+/// 把 VBAN payload 按位深解码为 interleaved `f32`（-1..=1）。
+fn decode_vban_payload(payload: &[u8], bit_format: VBanBitFormat, output: &mut [f32]) {
+    match bit_format {
+        VBanBitFormat::Float32 => {
+            for (i, sample) in output.iter_mut().enumerate() {
+                let bytes = payload
+                    .get(i * 4..i * 4 + 4)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or(&[0u8; 4]);
+                *sample = f32::from_le_bytes(*bytes);
+            }
+        }
+        VBanBitFormat::Int32 => {
+            for (i, sample) in output.iter_mut().enumerate() {
+                let bytes = payload
+                    .get(i * 4..i * 4 + 4)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or(&[0u8; 4]);
+                *sample = i32::from_le_bytes(*bytes) as f32 / 2_147_483_647.0;
+            }
+        }
+        VBanBitFormat::Int24 => {
+            for (i, sample) in output.iter_mut().enumerate() {
+                let b0 = payload.get(i * 3).copied().unwrap_or(0) as i32;
+                let b1 = payload.get(i * 3 + 1).copied().unwrap_or(0) as i32;
+                let b2 = payload.get(i * 3 + 2).copied().unwrap_or(0) as i32;
+                let raw = b0 | (b1 << 8) | (b2 << 16);
+                let signed = if b2 & 0x80 != 0 { raw - (1 << 24) } else { raw };
+                *sample = signed as f32 / 8_388_607.0;
+            }
+        }
+        VBanBitFormat::Int16 => {
+            for (i, sample) in output.iter_mut().enumerate() {
+                let bytes = payload
+                    .get(i * 2..i * 2 + 2)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or(&[0u8; 2]);
+                *sample = i16::from_le_bytes(*bytes) as f32 / 32_767.0;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +396,6 @@ mod tests {
             vec![VbanSourceBridge {
                 producer: source_producer,
                 stream_name: "In".to_owned(),
-                frame_samples: BLOCK_SAMPLES,
             }],
             vec![VbanSinkBridge {
                 consumer: sink_consumer,
@@ -321,7 +456,7 @@ mod tests {
         sink_producer.push_interleaved(&outbound).unwrap();
 
         // 用一个接收器收 bridge 回发的音频。
-        let mut back_receiver = VBanReceiver::bind(send_addr, BLOCK_SAMPLES).unwrap();
+        let mut back_receiver = VBanReceiver::bind(send_addr).unwrap();
         let mut echoed: Vec<f32> = Vec::new();
         let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while echoed.len() < BLOCK_SAMPLES && std::time::Instant::now() < deadline2 {
