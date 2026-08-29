@@ -15,6 +15,36 @@ const emptyIdentity: NodeIdentityBrief = {
   web_port: 0,
 };
 
+/** 电脑显示器图标（紧凑卡片顶部使用）。 */
+function MonitorDeviceIcon() {
+  return (
+    <svg
+      width="46"
+      height="38"
+      viewBox="0 0 46 38"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="3" width="40" height="26" rx="2.5" />
+      <line x1="15" y1="33" x2="31" y2="33" />
+      <line x1="23" y1="29" x2="23" y2="33" />
+    </svg>
+  );
+}
+
+/** 节点 ID 短串（前 8 位），用于紧凑展示。 */
+function shortId(nodeId: string): string {
+  return nodeId.length > 8 ? `${nodeId.slice(0, 8)}…` : nodeId || "—";
+}
+
+/** 节点主地址：`IP:port` 短格式。 */
+function primaryAddress(node: NetworkNodeBrief): string {
+  return node.addresses[0] ? `${node.addresses[0]}:${node.port}` : "无地址";
+}
+
 /** 网络设备查看页：展示本机身份与局域网发现的 VBAN 节点。 */
 export default function DeviceView() {
   const [identity, setIdentity] = useState<NodeIdentityBrief>(emptyIdentity);
@@ -158,32 +188,24 @@ export default function DeviceView() {
         ) : (
           <ul className="device-node-list">
             {nodes.map((node) => (
-              <li key={node.node_id} className="device-node-item">
-                <div className="device-node-head">
-                  <span className="device-node-name">{node.name || node.node_id}</span>
-                  <span className="device-node-online">在线</span>
+              <li
+                key={node.node_id}
+                className="device-node-card"
+                title={`节点 ID：${node.node_id}\n地址：${node.addresses.join(", ") || "—"}\n音频：${node.sample_rate} Hz · ${node.channels} 声道\n能力：${node.caps || "—"}`}
+              >
+                <div className="device-node-icon">
+                  <MonitorDeviceIcon />
                 </div>
-                <div className="device-node-meta">
-                  <div className="device-meta-item">
-                    <span className="device-meta-label">节点 ID</span>
-                    <span className="device-meta-value device-mono">{node.node_id}</span>
-                  </div>
-                  <div className="device-meta-item">
-                    <span className="device-meta-label">地址</span>
-                    <span className="device-meta-value device-mono">
-                      {node.addresses.join(", ") || "—"}
-                    </span>
-                  </div>
-                  <div className="device-meta-item">
-                    <span className="device-meta-label">音频</span>
-                    <span className="device-meta-value">
-                      {node.sample_rate} Hz · {node.channels} 声道
-                    </span>
-                  </div>
-                  <div className="device-meta-item">
-                    <span className="device-meta-label">能力</span>
-                    <span className="device-meta-value">{node.caps || "—"}</span>
-                  </div>
+                <div className="device-node-card-name">
+                  {node.name || shortId(node.node_id)}
+                </div>
+                <div className="device-node-card-id device-mono">{shortId(node.node_id)}</div>
+                <div className="device-node-card-addr device-mono">{primaryAddress(node)}</div>
+                <div className="device-node-card-foot">
+                  <span className="device-node-dot" aria-hidden />
+                  <span className="device-node-card-audio">
+                    {node.sample_rate / 1000} kHz · {node.channels}ch
+                  </span>
                 </div>
               </li>
             ))}
