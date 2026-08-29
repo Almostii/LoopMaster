@@ -261,8 +261,23 @@ fn recv_loop(socket: UdpSocket, streams: Vec<(String, AudioFifoProducer)>, stop:
         let Ok(stream_name) = header.stream_name_str() else {
             continue;
         };
-        // 只分发到已配置的接收流；未知流名丢弃。
-        if let Some((jitter, _, _)) = streams.get_mut(stream_name) {
+        // 分发到已配置的接收流：
+        // - 优先按流名精确匹配；
+        // - 若没有精确匹配，且本机只配置了一个接收流，则降级投递给它
+        //   （发送端的流名默认是"目标设备名"，而接收端期待"源设备名"，
+        //    两者天然不一致；单流场景下不应因此丢弃全部音频包）；
+        // - 多流且无精确匹配时才丢弃（避免串流）。
+        let stream_key: Option<String> = if streams.contains_key(stream_name) {
+            Some(stream_name.to_owned())
+        } else if streams.len() == 1 {
+            streams.keys().next().cloned()
+        } else {
+            None
+        };
+        let Some(stream_key) = stream_key else {
+            continue;
+        };
+        if let Some((jitter, _, _)) = streams.get_mut(&stream_key) {
             // 按位深解码 payload 为 f32。
             let Ok(bit_format) = header.bit_format() else {
                 continue;
