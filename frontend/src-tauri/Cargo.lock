@@ -2119,6 +2119,7 @@ dependencies = [
 name = "loopmaster-frontend"
 version = "1.0.0"
 dependencies = [
+ "if-addrs",
  "loopmaster-app-service",
  "loopmaster-audio-core",
  "loopmaster-audio-windows",

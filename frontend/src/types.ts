@@ -120,6 +120,8 @@ export interface NodeIdentityBrief {
   device_name: string;
   network_enabled: boolean;
   web_port: number;
+  /** 本机 IPv4 地址列表（多网卡时多个），供跨机连接时查看。 */
+  addresses?: string[];
 }
 
 /** 局域网发现的 VBAN 节点概要。 */

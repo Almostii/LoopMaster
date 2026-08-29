@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  addManualVbanNode,
   applyRouteEdit,
   getEngineState,
   getNetworkNodes,
@@ -335,6 +336,33 @@ function cleanProcessName(name: string): string {
       });
     },
     [addSourceWithAutoConnect],
+  );
+
+  /** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退），加入可选列表。 */
+  const addManualNode = useCallback(
+    async (params: {
+      name: string;
+      address: string;
+      port: number;
+      stream_name: string;
+      sample_rate?: number;
+      channels?: number;
+    }) => {
+      try {
+        const node = await addManualVbanNode(params);
+        setNetworkNodes((prev) => {
+          const exists = prev.some((n) => n.node_id === node.node_id);
+          if (exists) return prev.map((n) => (n.node_id === node.node_id ? node : n));
+          return [...prev, node];
+        });
+        showNotice(`已添加网络节点 ${node.name}`);
+        return node;
+      } catch (e) {
+        showNotice(formatError(e), "error");
+        return null;
+      }
+    },
+    [showNotice],
   );
 
   const addOutputChannel = useCallback(async () => {
@@ -825,6 +853,7 @@ function cleanProcessName(name: string): string {
     addOutputChannel,
     addExternalOutput,
     addVbanExternalOutput,
+    addManualNode,
     removeSource,
     removeOutputChannel,
     removeExternalOutput,

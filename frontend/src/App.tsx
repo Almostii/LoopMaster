@@ -9,6 +9,7 @@ import TitleBar from "./components/TitleBar";
 import Sidebar, { type SidebarItem } from "./components/Sidebar";
 import SettingsView from "./components/SettingsView";
 import DeviceView from "./components/DeviceView";
+import AddManualVbanNodeDialog from "./components/AddManualVbanNodeDialog";
 import WireLayer from "./components/WireLayer";
 import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
@@ -135,6 +136,7 @@ function App() {
     addOutputChannel,
     addExternalOutput,
     addVbanExternalOutput,
+    addManualNode,
     removeSource,
     removeOutputChannel,
     removeExternalOutput,
@@ -160,6 +162,8 @@ function App() {
   // 侧边栏状态 (默认收起, 向窗口内弹出, 不遮挡 sources)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [activeView, setActiveView] = useState<string>("router");
+  // 手动添加网络节点对话框显隐。
+  const [manualDialogOpen, setManualDialogOpen] = useState(false);
 
   // 检测「进程回环可能更适合改用设备捕获」的音源。
   // 场景：某些软件（如 WO Mic）的控制进程本身不产生音频，真正的声音在
@@ -262,6 +266,33 @@ function App() {
     [],
   );
 
+  // "网络节点 (VBAN)" 分组：自动发现节点 + 底部"手动添加"入口。
+  const networkNodePickerGroup: PickerGroup = {
+    title: "网络节点 (VBAN)",
+    options: [
+      ...(networkNodes.length === 0
+        ? [
+            {
+              value: "__vban_empty__",
+              label: "未发现网络设备，请先在设备页开启网络功能",
+              disabled: true,
+            },
+          ]
+        : networkNodes.map((node) => ({
+            value: `vban:${node.node_id}`,
+            label: node.name || node.node_id.slice(0, 8),
+            hint: node.addresses[0] ? `${node.addresses[0]}:${node.port}` : "无 IPv4 地址",
+            disabled: node.addresses.length === 0,
+            icon: <NetworkIcon />,
+          }))),
+      {
+        value: "__vban_manual__",
+        label: "手动添加网络节点…",
+        icon: <NetworkIcon />,
+      },
+    ],
+  };
+
   // category 只用于展示分组，真正的 source 类型由 endpoint 的 flow 决定：
   // capture endpoint 走 DeviceCapture，render endpoint 才能走 DeviceLoopback。
   const sourceGroups = [
@@ -321,25 +352,7 @@ function App() {
         icon: <LoopbackIcon />,
       })),
     },
-    {
-      title: "网络节点 (VBAN)",
-      options:
-        networkNodes.length === 0
-          ? [
-              {
-                value: "__vban_empty__",
-                label: "未发现网络设备，请先在设备页开启网络功能",
-                disabled: true,
-              },
-            ]
-          : networkNodes.map((node) => ({
-              value: `vban:${node.node_id}`,
-              label: node.name || node.node_id.slice(0, 8),
-              hint: node.addresses[0] ? `${node.addresses[0]}:${node.port}` : "无 IPv4 地址",
-              disabled: node.addresses.length === 0,
-              icon: <NetworkIcon />,
-            })),
-    },
+    networkNodePickerGroup,
   ];
 
   const externalGroups: PickerGroup[] = [
@@ -352,25 +365,7 @@ function App() {
         disabled: !isDeviceSelectable(d),
       })),
     },
-    {
-      title: "网络节点 (VBAN)",
-      options:
-        networkNodes.length === 0
-          ? [
-              {
-                value: "__vban_empty__",
-                label: "未发现网络设备，请先在设备页开启网络功能",
-                disabled: true,
-              },
-            ]
-          : networkNodes.map((node) => ({
-              value: `vban:${node.node_id}`,
-              label: node.name || node.node_id.slice(0, 8),
-              hint: node.addresses[0] ? `${node.addresses[0]}:${node.port}` : "无 IPv4 地址",
-              disabled: node.addresses.length === 0,
-              icon: <NetworkIcon />,
-            })),
-    },
+    networkNodePickerGroup,
   ];
 
   const deviceById = useMemo(() => {
@@ -486,6 +481,10 @@ function App() {
   }
 
   function handleSelectSource(value: string) {
+    if (value === "__vban_manual__") {
+      setManualDialogOpen(true);
+      return;
+    }
     const [kind, id] = value.split(":", 2);
     if (kind === "proc") {
       const pid = Number(id);
@@ -506,6 +505,10 @@ function App() {
   }
 
   function handleSelectExternal(value: string) {
+    if (value === "__vban_manual__") {
+      setManualDialogOpen(true);
+      return;
+    }
     if (value.startsWith("vban:")) {
       const nodeId = value.slice("vban:".length);
       const node = networkNodes.find((n) => n.node_id === nodeId);
@@ -761,6 +764,13 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* 手动添加网络节点对话框（mDNS 不可用时的回退） */}
+      <AddManualVbanNodeDialog
+        open={manualDialogOpen}
+        onClose={() => setManualDialogOpen(false)}
+        onSubmit={(params) => void addManualNode(params)}
+      />
     </div>
   );
 }

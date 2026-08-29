@@ -181,6 +181,15 @@ export default function DeviceView() {
               {identity.web_port > 0 ? identity.web_port : "未开启"}
             </span>
           </div>
+          {/* 本机 IP：用户可在其他电脑上手动输入该地址进行连接 */}
+          <div className="device-meta-item device-meta-item-wide">
+            <span className="device-meta-label">本机 IP</span>
+            <span className="device-meta-value device-mono device-meta-wrap">
+              {identity.addresses && identity.addresses.length > 0
+                ? identity.addresses.join("、")
+                : "（未获取到局域网地址）"}
+            </span>
+          </div>
         </div>
       </section>
 
