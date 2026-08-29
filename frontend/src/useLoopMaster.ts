@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyRouteEdit,
   getEngineState,
+  getNetworkNodes,
   getRouteSnapshot,
   getSettings,
   listAudioProcesses,
@@ -11,6 +12,8 @@ import {
   onDeviceRestored,
   onEngineStateChanged,
   onEngineStatsChanged,
+  onNodeRemoved,
+  onNodeResolved,
   onProcessRestored,
   requestReconnect,
   saveConfig,
@@ -25,6 +28,7 @@ import type {
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
+  NetworkNodeBrief,
   ProcessBrief,
   RouteProfileSnapshot,
 } from "./types";
@@ -38,6 +42,7 @@ export function useLoopMaster() {
   const [captureDevices, setCaptureDevices] = useState<DeviceBrief[]>([]);
   const [renderDevices, setRenderDevices] = useState<DeviceBrief[]>([]);
   const [processes, setProcesses] = useState<ProcessBrief[]>([]);
+  const [networkNodes, setNetworkNodes] = useState<NetworkNodeBrief[]>([]);
   const [route, setRoute] = useState<RouteProfileSnapshot>({
     sources: [],
     output_channels: [],
@@ -660,6 +665,20 @@ function cleanProcessName(name: string): string {
         void doStartEngine();
       }
     });
+    // 局域网 VBAN 节点上线/下线，维护 networkNodes。
+    const unNodeResolved = onNodeResolved((node) => {
+      setNetworkNodes((prev) => {
+        const exists = prev.some((n) => n.node_id === node.node_id);
+        if (exists) return prev.map((n) => (n.node_id === node.node_id ? node : n));
+        return [...prev, node];
+      });
+    });
+    const unNodeRemoved = onNodeRemoved((nodeId) => {
+      setNetworkNodes((prev) => prev.filter((n) => n.node_id !== nodeId));
+    });
+
+    // 初始拉取一次当前节点快照。
+    void getNetworkNodes().then(setNetworkNodes).catch(() => {});
 
     return () => {
       void unState.then((fn) => fn());
@@ -667,6 +686,8 @@ function cleanProcessName(name: string): string {
       void unLost.then((fn) => fn());
       void unRestored.then((fn) => fn());
       void unProcess.then((fn) => fn());
+      void unNodeResolved.then((fn) => fn());
+      void unNodeRemoved.then((fn) => fn());
     };
   }, [refreshAll, refreshEngineState, doStartEngine]);
 
@@ -755,6 +776,7 @@ function cleanProcessName(name: string): string {
     captureDevices,
     renderDevices,
     processes,
+    networkNodes,
     route,
     engineState,
     stats,

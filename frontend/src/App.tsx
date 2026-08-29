@@ -3,7 +3,7 @@ import "./App.css";
 import ChannelCard from "./components/ChannelCard";
 import Column from "./components/Column";
 import MonitorCard from "./components/MonitorCard";
-import PickerMenu, { type PickerOption } from "./components/PickerMenu";
+import PickerMenu, { type PickerGroup } from "./components/PickerMenu";
 import SourceCard from "./components/SourceCard";
 import TitleBar from "./components/TitleBar";
 import Sidebar, { type SidebarItem } from "./components/Sidebar";
@@ -46,6 +46,18 @@ function VirtualIcon() {
       <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
       <line x1="8" y1="21" x2="16" y2="21" />
       <line x1="12" y1="17" x2="12" y2="21" />
+    </svg>
+  );
+}
+function NetworkIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="5" r="2.5" />
+      <circle cx="5" cy="19" r="2.5" />
+      <circle cx="19" cy="19" r="2.5" />
+      <line x1="10.5" y1="6.5" x2="6.5" y2="16.5" />
+      <line x1="13.5" y1="6.5" x2="17.5" y2="16.5" />
+      <line x1="7" y1="19" x2="17" y2="19" />
     </svg>
   );
 }
@@ -100,6 +112,7 @@ function App() {
     captureDevices,
     renderDevices,
     processes,
+    networkNodes,
     route,
     engineState,
     notice,
@@ -117,9 +130,11 @@ function App() {
     doStopEngine,
     addSourceFromProcess,
     addSourceFromDevice,
+    addVbanSource,
     switchProcessSourceToDevice,
     addOutputChannel,
     addExternalOutput,
+    addVbanExternalOutput,
     removeSource,
     removeOutputChannel,
     removeExternalOutput,
@@ -306,14 +321,57 @@ function App() {
         icon: <LoopbackIcon />,
       })),
     },
+    {
+      title: "网络节点 (VBAN)",
+      options:
+        networkNodes.length === 0
+          ? [
+              {
+                value: "__vban_empty__",
+                label: "未发现网络设备，请先在设备页开启网络功能",
+                disabled: true,
+              },
+            ]
+          : networkNodes.map((node) => ({
+              value: `vban:${node.node_id}`,
+              label: node.name || node.node_id.slice(0, 8),
+              hint: node.addresses[0] ? `${node.addresses[0]}:${node.port}` : "无 IPv4 地址",
+              disabled: node.addresses.length === 0,
+              icon: <NetworkIcon />,
+            })),
+    },
   ];
 
-  const externalOptions: PickerOption[] = renderDevices.map((d) => ({
-    value: d.id,
-    label: d.name,
-    hint: deviceAvailabilityLabel(d),
-    disabled: !isDeviceSelectable(d),
-  }));
+  const externalGroups: PickerGroup[] = [
+    {
+      title: "物理输出 (External Outputs)",
+      options: renderDevices.map((d) => ({
+        value: d.id,
+        label: d.name,
+        hint: deviceAvailabilityLabel(d),
+        disabled: !isDeviceSelectable(d),
+      })),
+    },
+    {
+      title: "网络节点 (VBAN)",
+      options:
+        networkNodes.length === 0
+          ? [
+              {
+                value: "__vban_empty__",
+                label: "未发现网络设备，请先在设备页开启网络功能",
+                disabled: true,
+              },
+            ]
+          : networkNodes.map((node) => ({
+              value: `vban:${node.node_id}`,
+              label: node.name || node.node_id.slice(0, 8),
+              hint: node.addresses[0] ? `${node.addresses[0]}:${node.port}` : "无 IPv4 地址",
+              disabled: node.addresses.length === 0,
+              icon: <NetworkIcon />,
+            })),
+    },
+  ];
 
   const deviceById = useMemo(() => {
     const m = new Map<string, (typeof renderDevices)[number]>();
@@ -438,10 +496,29 @@ function App() {
       if (device && isDeviceSelectable(device)) {
         void addSourceFromDevice(device, sourceKindForDevice(device));
       }
+    } else if (kind === "vban") {
+      const node = networkNodes.find((n) => n.node_id === id);
+      if (node) {
+        // 最小可行：接收流名默认用节点名；后续可提供手动输入流名。
+        void addVbanSource(node.name || node.node_id.slice(0, 8), node.name || "Stream1");
+      }
     }
   }
 
   function handleSelectExternal(value: string) {
+    if (value.startsWith("vban:")) {
+      const nodeId = value.slice("vban:".length);
+      const node = networkNodes.find((n) => n.node_id === nodeId);
+      if (node && node.addresses[0]) {
+        // 发送流名默认用节点名；remote_addr 用节点首个 IPv4 地址 + VBAN 端口。
+        void addVbanExternalOutput(
+          node.name || node.node_id.slice(0, 8),
+          node.name || "Stream1",
+          `${node.addresses[0]}:${node.port}`,
+        );
+      }
+      return;
+    }
     const device = renderDevices.find((d) => d.id === value);
     if (device) void addExternalOutput(device);
   }
@@ -606,7 +683,7 @@ function App() {
                       +
                     </button>
                   }
-                  options={externalOptions}
+                  groups={externalGroups}
                   onSelect={handleSelectExternal}
                   onOpen={() => void refreshDevices()}
                 />
