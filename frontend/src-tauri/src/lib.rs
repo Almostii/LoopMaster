@@ -75,6 +75,19 @@ struct NodeIdentityBrief {
     addresses: Vec<String>,
 }
 
+/// 网络防火墙检测结果。
+#[derive(Clone, Serialize)]
+struct FirewallCheckResult {
+    /// UDP 6980 端口当前是否可绑定（未被占用）。
+    port_available: bool,
+    /// 是否存在 LoopMaster VBAN 防火墙放行规则。
+    rule_exists: bool,
+    /// 防火墙检测是否成功（平台支持）。
+    checked: bool,
+    /// 面向用户的引导信息。
+    message: String,
+}
+
 /// 局域网发现的 VBAN 节点概要。
 #[derive(Clone, Serialize)]
 struct NetworkNodeBrief {
@@ -593,6 +606,55 @@ fn get_app_version() -> String {
 #[tauri::command]
 fn get_node_identity(state: tauri::State<'_, Arc<AppState>>) -> NodeIdentityBrief {
     ensure_node_identity(&state)
+}
+
+/// 检测 VBAN 网络功能所需的 Windows 防火墙放行情况。
+///
+/// 返回：UDP 6980 端口是否可绑定、是否存在 LoopMaster 放行规则、引导文案。
+#[tauri::command]
+fn check_network_firewall() -> FirewallCheckResult {
+    // 1) 端口可绑定检测：尝试绑定 0.0.0.0:6980，成功表示空闲可用。
+    let port_available = std::net::UdpSocket::bind("0.0.0.0:6980").is_ok();
+
+    // 2) 防火墙规则检测：用 netsh 查询 LoopMaster 相关规则。
+    //    仅 Windows 支持；非 Windows 或执行失败时标记未检查。
+    let mut rule_exists = false;
+    let mut checked = false;
+    if cfg!(windows) {
+        if let Ok(output) = std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "show",
+                "rule",
+                "name=LoopMaster",
+            ])
+            .output()
+        {
+            checked = true;
+            let text = String::from_utf8_lossy(&output.stdout);
+            rule_exists = text.contains("LoopMaster");
+        }
+    }
+
+    let message = if !checked {
+        "当前平台未检查防火墙规则。".to_owned()
+    } else if rule_exists && port_available {
+        "防火墙已放行，端口可用。".to_owned()
+    } else if rule_exists {
+        "防火墙规则已存在，但 UDP 6980 端口当前被占用。".to_owned()
+    } else {
+        format!(
+            "未检测到 LoopMaster 防火墙放行规则。请在管理员终端运行：netsh advfirewall firewall add rule name=\"LoopMaster VBAN\" dir=in action=allow protocol=UDP localport={VBAN_SERVICE_PORT} profile=private remoteip=localsubnet"
+        )
+    };
+
+    FirewallCheckResult {
+        port_available,
+        rule_exists,
+        checked,
+        message,
+    }
 }
 
 /// 返回当前局域网发现的 VBAN 节点列表快照。
@@ -2033,6 +2095,7 @@ pub fn run() {
             get_app_version,
             get_node_identity,
             get_network_nodes,
+            check_network_firewall,
             add_manual_vban_node,
             set_network_enabled,
             list_devices,

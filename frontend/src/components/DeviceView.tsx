@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { NetworkNodeBrief, NodeIdentityBrief } from "../types";
 import {
+  checkNetworkFirewall,
   getNetworkNodes,
   getNodeIdentity,
   onNodeRemoved,
   onNodeResolved,
   setNetworkEnabled,
+  type FirewallCheckResult,
 } from "../api";
 
 const emptyIdentity: NodeIdentityBrief = {
@@ -63,6 +65,10 @@ export default function DeviceView() {
         setIdentity(id);
         setNodes(list);
         setError(null);
+        // 应用启动时网络功能已开启：补一次防火墙检测，规则缺失则提示引导。
+        if (id.network_enabled) {
+          void checkNetworkFirewall().then(setFirewall).catch(() => {});
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -112,6 +118,8 @@ export default function DeviceView() {
 
   // 切换网络功能开关
   const [toggling, setToggling] = useState(false);
+  // 防火墙检测结果（仅开启时检测并展示）。
+  const [firewall, setFirewall] = useState<FirewallCheckResult | null>(null);
   async function handleToggleNetwork(enabled: boolean) {
     if (toggling) return;
     setToggling(true);
@@ -122,6 +130,14 @@ export default function DeviceView() {
       // 保证"局域网电脑"区与网络功能状态一致。
       if (!updated.network_enabled) {
         setNodes([]);
+        setFirewall(null);
+      } else {
+        // 开启后检测防火墙放行情况，未放行则给出引导。
+        try {
+          setFirewall(await checkNetworkFirewall());
+        } catch {
+          setFirewall(null);
+        }
       }
       setError(null);
     } catch (e) {
@@ -192,6 +208,14 @@ export default function DeviceView() {
           </div>
         </div>
       </section>
+
+      {/* 防火墙放行引导（开启网络功能且规则缺失时提示） */}
+      {identity.network_enabled && firewall && !firewall.rule_exists && (
+        <section className="device-firewall-card">
+          <div className="device-firewall-title">防火墙放行提示</div>
+          <div className="device-firewall-desc">{firewall.message}</div>
+        </section>
+      )}
 
       {/* 局域网节点列表（排除本机自身） */}
       <section className="device-nodes-section">

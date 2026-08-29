@@ -26,8 +26,6 @@ pub enum VBanReceiveError {
     InvalidLength { expected: usize, actual: usize },
     #[error("Jitter Buffer 错误: {0}")]
     Jitter(#[from] VBanJitterError),
-    #[error("接收缓冲建立失败: {0}")]
-    JitterInit(String),
 }
 
 /// 接收统计。
@@ -62,9 +60,8 @@ pub struct VBanReceiver {
 impl VBanReceiver {
     /// 创建接收器并绑定端口。
     ///
-    /// `frame_samples` 为期望的每帧样本数（`samples_per_channel × channels`），
-    /// 用于构造 Jitter Buffer。Jitter Buffer 拒绝样本数不匹配的包。
-    pub fn bind(bind_addr: SocketAddr, frame_samples: usize) -> Result<Self, VBanReceiveError> {
+    /// Jitter Buffer 采用自适应帧长（由首帧样本数确定），支持分包场景。
+    pub fn bind(bind_addr: SocketAddr) -> Result<Self, VBanReceiveError> {
         let socket = UdpSocket::bind(bind_addr).map_err(VBanReceiveError::Udp)?;
         socket
             .set_nonblocking(true)
@@ -72,11 +69,9 @@ impl VBanReceiver {
         socket
             .set_read_timeout(Some(Duration::from_millis(50)))
             .map_err(VBanReceiveError::Udp)?;
-        let jitter = VBanJitterBuffer::new(frame_samples)
-            .map_err(|e| VBanReceiveError::JitterInit(e.to_string()))?;
         Ok(Self {
             socket,
-            jitter,
+            jitter: VBanJitterBuffer::new(),
             recv_buf: vec![0u8; VBAN_MAX_PACKET_SIZE],
             stats: VBanReceiveStats::default(),
         })
@@ -220,7 +215,7 @@ mod tests {
         let port = random_port();
         let bind_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let frame_samples = frames * channels;
-        let mut receiver = VBanReceiver::bind(bind_addr, frame_samples).unwrap();
+        let mut receiver = VBanReceiver::bind(bind_addr).unwrap();
 
         let samples: Vec<f32> = (0..frame_samples)
             .map(|i| (i as f32 / frame_samples as f32) * 0.8 - 0.4)
@@ -296,7 +291,7 @@ mod tests {
     fn rejects_invalid_magic_counts_stat() {
         let port = random_port();
         let bind_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let mut receiver = VBanReceiver::bind(bind_addr, 4).unwrap();
+        let mut receiver = VBanReceiver::bind(bind_addr).unwrap();
         // 发送非法魔数的包。
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         let garbage = [0x58u8; 64]; // 魔数非 VBAN
@@ -319,7 +314,7 @@ mod tests {
         proptest::proptest!(|(channels in 1usize..=4usize, frames in 1usize..=64usize)| {
             // 绑定端口 0，由系统分配，避免随机端口冲突。
             let frame_samples = frames * channels;
-            let mut receiver = VBanReceiver::bind("127.0.0.1:0".parse().unwrap(), frame_samples).unwrap();
+            let mut receiver = VBanReceiver::bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let bind_addr = receiver.local_addr().unwrap();
             let samples: Vec<f32> = (0..frame_samples)
                 .map(|i| ((i % 97) as f32 / 97.0) - 0.5)
