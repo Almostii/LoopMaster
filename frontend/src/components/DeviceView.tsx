@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { NetworkNodeBrief, NodeIdentityBrief } from "../types";
 import {
   checkNetworkFirewall,
+  enableNetworkFirewall,
   getNetworkNodes,
   getNodeIdentity,
   onNodeRemoved,
@@ -65,9 +66,9 @@ export default function DeviceView() {
         setIdentity(id);
         setNodes(list);
         setError(null);
-        // 应用启动时网络功能已开启：补一次防火墙检测，规则缺失则提示引导。
+        // 应用启动时网络功能已开启：自动放行防火墙（规则缺失时提权 UAC）。
         if (id.network_enabled) {
-          void checkNetworkFirewall().then(setFirewall).catch(() => {});
+          void ensureFirewall().catch(() => {});
         }
       })
       .catch((e) => {
@@ -118,8 +119,37 @@ export default function DeviceView() {
 
   // 切换网络功能开关
   const [toggling, setToggling] = useState(false);
-  // 防火墙检测结果（仅开启时检测并展示）。
+  // 防火墙放行状态（开启时自动放行，失败才展示引导）。
   const [firewall, setFirewall] = useState<FirewallCheckResult | null>(null);
+
+  // 确保防火墙放行 UDP 6980：规则缺失时自动提权放行，用户只需确认一次 UAC。
+  async function ensureFirewall(): Promise<FirewallCheckResult> {
+    try {
+      const current = await checkNetworkFirewall();
+      if (current.rule_exists) {
+        return current; // 已放行，无需操作
+      }
+      // 规则缺失：自动提权放行（弹一次 UAC）。
+      const result = await enableNetworkFirewall();
+      setFirewall(result.rule_exists ? null : result);
+      return result;
+    } catch (e) {
+      // 自动放行被拒（用户拒绝 UAC），保留引导提示。
+      setFirewall({
+        port_available: true,
+        rule_exists: false,
+        checked: true,
+        message: e instanceof Error ? e.message : "防火墙未放行，请手动放行 UDP 6980 入站。",
+      });
+      return {
+        port_available: true,
+        rule_exists: false,
+        checked: true,
+        message: e instanceof Error ? e.message : "防火墙未放行。",
+      };
+    }
+  }
+
   async function handleToggleNetwork(enabled: boolean) {
     if (toggling) return;
     setToggling(true);
@@ -132,12 +162,8 @@ export default function DeviceView() {
         setNodes([]);
         setFirewall(null);
       } else {
-        // 开启后检测防火墙放行情况，未放行则给出引导。
-        try {
-          setFirewall(await checkNetworkFirewall());
-        } catch {
-          setFirewall(null);
-        }
+        // 开启后自动放行防火墙（规则缺失时提权 UAC），无需手动。
+        setFirewall(await ensureFirewall());
       }
       setError(null);
     } catch (e) {
