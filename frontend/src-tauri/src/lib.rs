@@ -795,26 +795,44 @@ fn set_network_enabled(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<NodeIdentityBrief, ServiceErrorBrief> {
-    if enabled {
-        start_advertising(app, &state)?;
+    log_line(&format!("set_network_enabled: 进入 enabled={enabled}"));
+    // 关闭网络功能：下架本机 mDNS 服务 + 停止 VBAN 桥接（不再收发网络音频）。
+    // 两者都做了异步化/不 join 处理，不会卡死 UI。
+    if !enabled {
+        log_line("set_network_enabled: 步骤1 停止 mDNS 服务（后台线程）");
+        stop_advertising(&state);
+        log_line("set_network_enabled: 步骤2 停止 VBAN 桥接");
+        stop_network_bridge(&state);
+        log_line("set_network_enabled: 步骤3 桥接已停止");
+    } else {
+        log_line("set_network_enabled: 步骤1 发布 mDNS 服务");
+        start_advertising(app.clone(), &state)?;
+        log_line("set_network_enabled: 步骤2 mDNS 服务已发布");
     }
     // 持久化 network_enabled 到配置；失败时若刚开启则回滚下架。
+    log_line("set_network_enabled: 步骤4 读取配置准备持久化");
     let mut config = match AppConfig::load_from(&state.config_path) {
         Ok(config) => config,
         Err(ConfigError::NotFound(_)) => {
             AppConfig::new(loopmaster_audio_core::RouteGraph::default())
         }
-        Err(e) => return Err(config_error_brief(e)),
+        Err(e) => {
+            log_line(&format!("set_network_enabled: 配置读取失败 {e}"));
+            return Err(config_error_brief(e));
+        }
     };
     config.network.network_enabled = enabled;
     if let Err(e) = config.save_to(&state.config_path) {
+        log_line(&format!("set_network_enabled: 配置保存失败 {e}"));
         if enabled {
             stop_advertising(&state); // 回滚已发布的 Advertiser
         }
         return Err(config_error_brief(e));
     }
+    log_line("set_network_enabled: 步骤5 配置已持久化");
     // 用缓存的身份 + 新的开关状态构造返回值，避免依赖 ensure_node_identity
     // 的缓存短路导致返回旧 network_enabled。
+    log_line("set_network_enabled: 步骤6 获取身份缓存锁");
     let mut cached = state.node_identity.lock().expect("身份锁未中毒");
     let brief = NodeIdentityBrief {
         node_id: cached.node_id.clone(),
@@ -824,6 +842,52 @@ fn set_network_enabled(
         addresses: local_ipv4_addresses(),
     };
     *cached = brief.clone();
+    drop(cached);
+    // 开启网络功能：VBAN 桥接的 FIFO 是引擎 session 的一部分，关闭开关时桥接
+    // 已把旧 FIFO 释放；重新开启必须让 supervisor 重建 session 并生成新 FIFO。
+    // 因此：若引擎正在运行，则重启引擎（stop → start），start_engine 命令里会
+    // 重新 spawn_network_bridge 并拿到新句柄。绝不能在这里直接 spawn 等句柄
+    // （supervisor 只在 start 时 send 一次，重复 recv 会永久阻塞导致卡死/崩溃）。
+    if enabled {
+        log_line("set_network_enabled: 步骤7 检查引擎是否需重启以重建桥接");
+        let running = {
+            let engine = state.engine.lock().expect("引擎锁未中毒");
+            engine
+                .as_ref()
+                .map(|e| e.status().state == loopmaster_audio_windows::AudioEngineState::Running)
+                .unwrap_or(false)
+        };
+        if running {
+            log_line("set_network_enabled: 步骤8 引擎运行中，重启以重建 VBAN 桥接");
+            let bridge_state = state.inner().clone();
+            // 在后台线程重启引擎，避免阻塞 UI 命令线程。
+            std::thread::Builder::new()
+                .name("loopmaster-restart-for-bridge".into())
+                .spawn(move || {
+                    log_line("set_network_enabled: 后台重启引擎（stop）");
+                    {
+                        let engine = bridge_state.engine.lock().expect("引擎锁未中毒");
+                        if let Some(e) = engine.as_ref() {
+                            let _ = e.command(loopmaster_app_service::EngineCommand::Stop);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    log_line("set_network_enabled: 后台重启引擎（start）");
+                    {
+                        let engine = bridge_state.engine.lock().expect("引擎锁未中毒");
+                        if let Some(e) = engine.as_ref() {
+                            let _ = e.command(loopmaster_app_service::EngineCommand::Start);
+                        }
+                    }
+                    // Start 后 supervisor 会重建 session 并 send 新句柄，
+                    // 此时才 spawn bridge 等待句柄。
+                    log_line("set_network_enabled: 后台重启完成，spawn bridge");
+                    spawn_network_bridge(app, bridge_state);
+                })
+                .expect("创建引擎重启线程失败");
+        }
+    }
+    log_line("set_network_enabled: 完成（命令返回）");
     Ok(brief)
 }
 
@@ -1322,18 +1386,45 @@ fn start_advertising(app: tauri::AppHandle, state: &AppState) -> Result<(), Serv
 }
 
 /// 下架本机 VBAN 服务（关闭网络功能）。
+///
+/// mDNS daemon 的关闭（unregister + shutdown）可能耗时数秒，直接在 UI/命令线程
+/// drop 会**卡死界面**（实测关闭网络开关时卡死的主因）。因此只把 advertiser 取出，
+/// 真正的关闭放到后台线程执行，本函数立即返回。
 fn stop_advertising(state: &AppState) {
-    let mut slot = state.discovery.lock().expect("监听锁未中毒");
-    if let Some(discovery) = slot.as_mut() {
-        discovery.stop_advertiser();
+    let advertiser = {
+        let mut slot = state.discovery.lock().expect("监听锁未中毒");
+        match slot.as_mut() {
+            Some(discovery) => discovery.take_advertiser(),
+            None => None,
+        }
+    };
+    if let Some(advertiser) = advertiser {
+        log_line("stop_advertising: 后台线程关闭 mDNS 服务");
+        std::thread::Builder::new()
+            .name("loopmaster-mdns-shutdown".into())
+            .spawn(move || {
+                drop(advertiser); // 后台线程执行 unregister + daemon.shutdown
+                log_line("stop_advertising: mDNS 服务已关闭");
+            })
+            .expect("创建 mDNS 关闭线程失败");
     }
 }
 
 /// 停止 VBAN 网络桥接（幂等）。
+///
+/// 桥接线程收到 stop 后自行退出（NetworkBridge::shutdown 不 join），此处只是
+/// 取出并释放句柄，UI 立即返回，不会卡死。
 fn stop_network_bridge(state: &AppState) {
-    let mut slot = state.bridge.lock().expect("桥接锁未中毒");
+    // 锁中毒时不 panic（此前 expect 会在异常路径直接崩溃进程），记录后跳过。
+    let mut slot = match state.bridge.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => {
+            log_line("stop_network_bridge: 桥接锁中毒，跳过（取中毒内部数据）");
+            poisoned.into_inner()
+        }
+    };
     if let Some(bridge) = slot.take() {
-        drop(bridge); // Drop 触发 shutdown + join
+        drop(bridge); // Drop → shutdown：置 stop + detach，不 join
     }
 }
 
@@ -1377,6 +1468,24 @@ fn log_line(message: &str) {
 }
 
 fn spawn_network_bridge(app: tauri::AppHandle, state: Arc<AppState>) {
+    // 网络功能总开关：关闭时完全不参与网络通信（不收发 VBAN 音频），
+    // 避免"用户关了开关但 Vban 节点仍在收发"的行为不一致。
+    let network_enabled = {
+        let cached = state.node_identity.lock().expect("身份锁未中毒");
+        if !cached.node_id.is_empty() {
+            cached.network_enabled
+        } else {
+            drop(cached);
+            match AppConfig::load_from(&state.config_path) {
+                Ok(config) => config.network.network_enabled,
+                Err(_) => false,
+            }
+        }
+    };
+    if !network_enabled {
+        log_line("spawn_network_bridge: 网络功能已关闭，不启动桥接（不收发 VBAN）");
+        return;
+    }
     // 路由图中若无 VBAN 源/目标，无需桥接。
     // 先查内存中的编辑器草稿；若草稿未包含 VBAN 节点（例如进程重启后尚未
     // 把配置载入编辑器），回退到持久化配置里的路由图，避免"配置里有 VBAN

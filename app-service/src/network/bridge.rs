@@ -140,8 +140,22 @@ impl NetworkBridge {
 
         // 接收：单个共享 UDP socket（绑定 6980），按流名分发到各流的 jitter buffer。
         if !sources.is_empty() {
-            let socket = std::net::UdpSocket::bind(receiver_bind)?;
-            socket.set_nonblocking(true)?;
+            let socket = {
+                // 允许地址复用：关闭后再开启时旧 socket 可能仍在释放中，
+                // 不复用会导致 bind 失败（表现为"重新打开网络开关就崩溃"）。
+                let sock = socket2::Socket::new(
+                    match receiver_bind {
+                        std::net::SocketAddr::V4(_) => socket2::Domain::IPV4,
+                        std::net::SocketAddr::V6(_) => socket2::Domain::IPV6,
+                    },
+                    socket2::Type::DGRAM,
+                    Some(socket2::Protocol::UDP),
+                )?;
+                sock.set_reuse_address(true)?;
+                sock.set_nonblocking(true)?;
+                sock.bind(&receiver_bind.into())?;
+                std::net::UdpSocket::from(sock)
+            };
             let stop_clone = Arc::clone(&stop);
             let streams: Vec<(String, AudioFifoProducer)> = sources
                 .into_iter()
@@ -202,11 +216,13 @@ impl NetworkBridge {
     }
 
     /// 停止所有收发线程。
+    ///
+    /// **不 join**：调用方通常在 UI/命令线程，而收发线程可能正阻塞在 socket 或
+    /// FIFO 等待上；join 会让调用方（进而整个界面）卡死。置位 stop 后直接 detach，
+    /// 线程在各自循环的下一次检查点自行退出。
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
+        self.threads.clear();
     }
 }
 
