@@ -75,6 +75,15 @@ impl NetworkDiscovery {
         }
     }
 
+    /// 取出已注册的 advertiser（**不**关闭它），交由调用方在后台线程释放。
+    ///
+    /// mDNS daemon 的关闭（unregister + shutdown）可能耗时数秒，直接在 UI/命令
+    /// 线程 drop 会卡死界面；用本方法取出后可在后台线程 `drop`，让调用方立即返回。
+    pub fn take_advertiser(&mut self) -> Option<MdnsAdvertiser> {
+        let mut slot = self.advertiser.lock().expect("广告锁未中毒");
+        slot.take()
+    }
+
     /// 是否已发布本机服务（网络功能是否开启）。
     pub fn is_advertising(&self) -> bool {
         self.advertiser.lock().expect("广告锁未中毒").is_some()
