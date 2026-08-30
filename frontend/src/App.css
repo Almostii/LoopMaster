@@ -1507,3 +1507,347 @@ button:disabled {
 [data-theme="dark"] .slider-round:before {
   background: #ffffff;
 }
+
+/* ---------------- 设备页（网络设备查看） ---------------- */
+.device-view {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-canvas);
+  padding: 28px 32px 48px 32px;
+}
+.device-local-card {
+  background: #ffffff;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+.device-local-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.device-local-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--primary);
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+.device-local-switch {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.device-local-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+.device-local-status {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 10px;
+}
+.device-local-status.online {
+  color: #15803d;
+  background: #dcfce7;
+}
+.device-local-status.offline {
+  color: #64748b;
+  background: #f1f5f9;
+}
+.device-local-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 24px;
+}
+.device-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.device-meta-item-wide {
+  grid-column: 1 / -1;
+}
+.device-meta-wrap {
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.device-meta-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.device-meta-value {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-mono {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+.device-nodes-section {
+  background: #ffffff;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+}
+.device-firewall-card {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.device-firewall-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #92400e;
+  margin-bottom: 6px;
+}
+.device-firewall-desc {
+  font-size: 12px;
+  color: #78350f;
+  line-height: 1.7;
+  word-break: break-all;
+}
+[data-theme="dark"] .device-firewall-card {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: #b45309;
+}
+[data-theme="dark"] .device-firewall-title {
+  color: #fbbf24;
+}
+[data-theme="dark"] .device-firewall-desc {
+  color: #fcd34d;
+}
+.device-nodes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: 12px;
+}
+.device-nodes-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin: 0;
+}
+.device-nodes-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.device-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 28px 16px;
+  line-height: 1.7;
+}
+.device-error {
+  font-size: 13px;
+  color: #b91c1c;
+  text-align: center;
+  padding: 24px 16px;
+}
+/* 局域网电脑：紧凑卡片网格（每台一个显示器图标 + 下方信息） */
+.device-node-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 12px;
+}
+.device-node-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 12px 10px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card-subtle);
+  cursor: default;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  min-width: 0;
+}
+.device-node-card:hover {
+  border-color: var(--primary);
+  background: #f8fafc;
+  transform: translateY(-1px);
+}
+.device-node-icon {
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+  line-height: 0;
+}
+.device-node-card-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-node-card-id {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-node-card-addr {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-node-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+}
+.device-node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #16a34a;
+  flex-shrink: 0;
+}
+.device-node-card-audio {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* 深色主题下的设备页卡片 */
+[data-theme="dark"] .device-local-card,
+[data-theme="dark"] .device-nodes-section {
+  background: var(--bg-card);
+  border-color: var(--border-card);
+}
+[data-theme="dark"] .device-local-status.offline {
+  background: var(--bg-card-subtle);
+}
+[data-theme="dark"] .device-local-status.online {
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.15);
+}
+[data-theme="dark"] .device-node-card {
+  background: var(--bg-card-subtle);
+  border-color: var(--border-card);
+}
+[data-theme="dark"] .device-node-card:hover {
+  background: var(--bg-canvas);
+  border-color: var(--primary);
+}
+[data-theme="dark"] .device-node-icon {
+  color: var(--text-secondary);
+}
+
+/* ---------------- 手动添加网络节点对话框 ---------------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-dialog {
+  background: #ffffff;
+  border-radius: var(--radius-md);
+  padding: 20px 22px;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.2);
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-main);
+  margin-bottom: 4px;
+}
+.modal-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.modal-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.modal-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.modal-field input {
+  font-size: 12.5px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  color: var(--text-main);
+}
+.modal-field input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.btn-primary {
+  background: var(--primary);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 7px 16px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+[data-theme="dark"] .modal-dialog {
+  background: var(--bg-card);
+}
+[data-theme="dark"] .modal-field input {
+  background: var(--bg-canvas);
+  color: var(--text-main);
+  border-color: var(--border-card);
+}

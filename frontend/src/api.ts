@@ -5,6 +5,10 @@ import type {
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
+  NetworkNodeBrief,
+  NodeIdentityBrief,
+  NodeRemovedEvent,
+  NodeResolvedEvent,
   ProcessBrief,
   RouteProfileSnapshot,
 } from "./types";
@@ -50,6 +54,86 @@ export function listDevices(): Promise<DeviceBrief[]> {
 export function listAudioProcesses(): Promise<ProcessBrief[]> {
   if (!isTauriRuntime) return Promise.resolve([]);
   return invoke<ProcessBrief[]>("list_audio_processes");
+}
+
+const emptyIdentity: NodeIdentityBrief = {
+  node_id: "",
+  device_name: "",
+  network_enabled: false,
+  web_port: 0,
+};
+
+/** 返回本机网络身份（node_id/device_name/network_enabled/web_port）。 */
+export function getNodeIdentity(): Promise<NodeIdentityBrief> {
+  if (!isTauriRuntime) return Promise.resolve(emptyIdentity);
+  return invoke<NodeIdentityBrief>("get_node_identity");
+}
+
+/** 开启/关闭网络功能，返回更新后的本机身份。 */
+export function setNetworkEnabled(enabled: boolean): Promise<NodeIdentityBrief> {
+  if (!isTauriRuntime) return Promise.resolve(emptyIdentity);
+  return invoke<NodeIdentityBrief>("set_network_enabled", { enabled });
+}
+
+/** 返回当前局域网发现的 VBAN 节点列表快照。 */
+export function getNetworkNodes(): Promise<NetworkNodeBrief[]> {
+  if (!isTauriRuntime) return Promise.resolve([]);
+  return invoke<NetworkNodeBrief[]>("get_network_nodes");
+}
+
+export interface FirewallCheckResult {
+  port_available: boolean;
+  rule_exists: boolean;
+  checked: boolean;
+  message: string;
+}
+
+/** 检测 VBAN 网络功能所需的防火墙放行情况。 */
+export function checkNetworkFirewall(): Promise<FirewallCheckResult> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      port_available: true,
+      rule_exists: true,
+      checked: false,
+      message: "",
+    });
+  }
+  return invoke<FirewallCheckResult>("check_network_firewall");
+}
+
+/** 自动放行 UDP 6980 入站防火墙（提权，用户确认一次 UAC）。 */
+export function enableNetworkFirewall(): Promise<FirewallCheckResult> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      port_available: true,
+      rule_exists: true,
+      checked: false,
+      message: "",
+    });
+  }
+  return invoke<FirewallCheckResult>("enable_network_firewall");
+}
+
+/** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
+export function addManualVbanNode(params: {
+  name: string;
+  address: string;
+  port: number;
+  stream_name: string;
+  sample_rate?: number;
+  channels?: number;
+}): Promise<NetworkNodeBrief> {
+  if (!isTauriRuntime) {
+    return Promise.reject(unavailableInBrowser());
+  }
+  return invoke<NetworkNodeBrief>("add_manual_vban_node", {
+    name: params.name,
+    address: params.address,
+    port: params.port,
+    streamName: params.stream_name,
+    sampleRate: params.sample_rate,
+    channels: params.channels,
+  });
 }
 
 /** 返回进程可执行文件图标的 PNG data URI；无图标或平台不支持时返回 null。 */
@@ -110,6 +194,10 @@ export interface RouteEditRequest {
   endpoint_id?: string | null;
   process_id?: number | null;
   executable_path?: string | null;
+  /** VBAN 源/目标的流名（kind === "vban" 时使用）。 */
+  stream_name?: string | null;
+  /** VBAN 目标的远端地址（ip:port）。 */
+  remote_addr?: string | null;
   source_id?: string;
   output_channel_id?: string;
   external_output_id?: string;
@@ -203,6 +291,22 @@ export function onDeviceRestored(
   if (!isTauriRuntime) return Promise.resolve(() => {});
   return listen<{ endpoint_id: string }>("device-restored", (e) =>
     handler(e.payload.endpoint_id),
+  );
+}
+
+export function onNodeResolved(
+  handler: (node: NetworkNodeBrief) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime) return Promise.resolve(() => {});
+  return listen<NodeResolvedEvent>("node-resolved", (e) => handler(e.payload.node));
+}
+
+export function onNodeRemoved(
+  handler: (nodeId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime) return Promise.resolve(() => {});
+  return listen<NodeRemovedEvent>("node-removed", (e) =>
+    handler(e.payload.node_id),
   );
 }
 

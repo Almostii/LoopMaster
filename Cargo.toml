@@ -16,3 +16,5 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+# 属性/模糊测试基础设施：用于音频算法与网络包（如 VBAN）的随机化验证。
+proptest = "1"

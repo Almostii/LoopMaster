@@ -468,7 +468,8 @@ fn db_to_linear(gain_db: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::{
-        BusId, BusSpec, EndpointId, SendId, SinkId, SinkSpec, SourceId, SourceKind, SourceSpec,
+        BusId, BusSpec, EndpointId, SendId, SinkId, SinkKind, SinkSpec, SourceId, SourceKind,
+        SourceSpec,
     };
 
     fn source(id: &str) -> SourceSpec {
@@ -478,6 +479,7 @@ mod tests {
             endpoint_id: None,
             process_id: None,
             executable_path: None,
+            stream_name: None,
             display_name: id.into(),
         }
     }
@@ -492,6 +494,9 @@ mod tests {
             id: SinkId(id.into()),
             endpoint_id: EndpointId(id.into()),
             display_name: id.into(),
+            kind: SinkKind::Device,
+            stream_name: None,
+            remote_addr: None,
         }
     }
     fn source_send(id: &str, source_id: &str, bus_id: &str) -> SendSpec {
