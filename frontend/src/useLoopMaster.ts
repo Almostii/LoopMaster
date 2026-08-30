@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  addManualVbanNode,
   applyRouteEdit,
   getEngineState,
+  getNetworkNodes,
+  getNodeIdentity,
   getRouteSnapshot,
   getSettings,
   listAudioProcesses,
@@ -11,6 +14,8 @@ import {
   onDeviceRestored,
   onEngineStateChanged,
   onEngineStatsChanged,
+  onNodeRemoved,
+  onNodeResolved,
   onProcessRestored,
   requestReconnect,
   saveConfig,
@@ -25,6 +30,7 @@ import type {
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
+  NetworkNodeBrief,
   ProcessBrief,
   RouteProfileSnapshot,
 } from "./types";
@@ -38,6 +44,7 @@ export function useLoopMaster() {
   const [captureDevices, setCaptureDevices] = useState<DeviceBrief[]>([]);
   const [renderDevices, setRenderDevices] = useState<DeviceBrief[]>([]);
   const [processes, setProcesses] = useState<ProcessBrief[]>([]);
+  const [networkNodes, setNetworkNodes] = useState<NetworkNodeBrief[]>([]);
   const [route, setRoute] = useState<RouteProfileSnapshot>({
     sources: [],
     output_channels: [],
@@ -62,6 +69,9 @@ export function useLoopMaster() {
   const busyRef = useRef(false);
   const engineStateRef = useRef(engineState);
   engineStateRef.current = engineState;
+  // 本机节点 ID：用于从发现的局域网节点中排除本机自身（本机 Advertiser 的
+  // mDNS 广播也会被本机 Browser 收到，会把自己误报为"其他电脑"）。
+  const localNodeIdRef = useRef("");
 
   const showNotice = useCallback((text: string, kind: Notice["kind"] = "ok") => {
     setNotice({ text, kind });
@@ -222,7 +232,7 @@ export function useLoopMaster() {
   /** 新增音源并自动连到第一个输出通道（若该音源尚无连线）。 */
   const addSourceWithAutoConnect = useCallback(
     async (
-      req: { kind: "process_loopback" | "device_capture" | "device_loopback"; display_name: string; endpoint_id: string | null; process_id: number | null; executable_path?: string | null },
+      req: { kind: "process_loopback" | "device_capture" | "device_loopback" | "vban"; display_name: string; endpoint_id: string | null; process_id: number | null; executable_path?: string | null; stream_name?: string | null },
     ) => {
       const srcId = freshId("src");
       const added = await runEdit(
@@ -234,6 +244,7 @@ export function useLoopMaster() {
           endpoint_id: req.endpoint_id,
           process_id: req.process_id,
           executable_path: req.executable_path ?? null,
+          stream_name: req.stream_name ?? null,
         },
         "已添加音源（拓扑变更需重启引擎生效）",
       );
@@ -310,6 +321,48 @@ function cleanProcessName(name: string): string {
       return srcId;
     },
     [runEdit],
+  );
+
+  /** 从 VBAN 网络节点添加音源（接收远端音频）。 */
+  const addVbanSource = useCallback(
+    async (displayName: string, streamName: string) => {
+      await addSourceWithAutoConnect({
+        kind: "vban",
+        display_name: displayName,
+        endpoint_id: null,
+        process_id: null,
+        executable_path: null,
+        stream_name: streamName,
+      });
+    },
+    [addSourceWithAutoConnect],
+  );
+
+  /** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退），加入可选列表。 */
+  const addManualNode = useCallback(
+    async (params: {
+      name: string;
+      address: string;
+      port: number;
+      stream_name: string;
+      sample_rate?: number;
+      channels?: number;
+    }) => {
+      try {
+        const node = await addManualVbanNode(params);
+        setNetworkNodes((prev) => {
+          const exists = prev.some((n) => n.node_id === node.node_id);
+          if (exists) return prev.map((n) => (n.node_id === node.node_id ? node : n));
+          return [...prev, node];
+        });
+        showNotice(`已添加网络节点 ${node.name}`);
+        return node;
+      } catch (e) {
+        showNotice(formatError(e), "error");
+        return null;
+      }
+    },
+    [showNotice],
   );
 
   const addOutputChannel = useCallback(async () => {
@@ -399,6 +452,40 @@ function cleanProcessName(name: string): string {
         const existing = latest.sends.find(
           (s) =>
             s.output_channel === channel.id && s.external_output === external.id,
+        );
+        if (!existing) {
+          await addSendToOutput(channel.id, external.id);
+        }
+      }
+    },
+    [runEdit, addSendToOutput],
+  );
+
+  /** 添加 VBAN 网络发送目标（把混音发送到远端节点）。 */
+  const addVbanExternalOutput = useCallback(
+    async (displayName: string, streamName: string, remoteAddr: string) => {
+      const externalId = freshId("out");
+      const added = await runEdit(
+        {
+          op: "add_external_output",
+          id: externalId,
+          endpoint_id: "vban",
+          display_name: displayName,
+          kind: "vban",
+          stream_name: streamName,
+          remote_addr: remoteAddr,
+        },
+        "已添加网络输出（拓扑变更需重启引擎生效）",
+      );
+      if (!added) return;
+
+      // 自动连到第一个输出通道（若存在且尚未连线）。
+      const latest = await getRouteSnapshot();
+      const channel = latest.output_channels[0];
+      const external = latest.external_outputs.find((output) => output.id === externalId);
+      if (channel && external) {
+        const existing = latest.sends.find(
+          (s) => s.output_channel === channel.id && s.external_output === external.id,
         );
         if (!existing) {
           await addSendToOutput(channel.id, external.id);
@@ -610,6 +697,36 @@ function cleanProcessName(name: string): string {
         void doStartEngine();
       }
     });
+    // 局域网 VBAN 节点上线/下线，维护 networkNodes（排除本机自身）。
+    const unNodeResolved = onNodeResolved((node) => {
+      if (node.node_id === localNodeIdRef.current) return; // 本机，忽略
+      setNetworkNodes((prev) => {
+        const exists = prev.some((n) => n.node_id === node.node_id);
+        if (exists) return prev.map((n) => (n.node_id === node.node_id ? node : n));
+        return [...prev, node];
+      });
+    });
+    const unNodeRemoved = onNodeRemoved((nodeId) => {
+      setNetworkNodes((prev) => prev.filter((n) => n.node_id !== nodeId));
+    });
+
+    // 初始拉取：先取本机身份（用于排除自身），再拉节点快照。
+    void (async () => {
+      try {
+        const id = await getNodeIdentity();
+        localNodeIdRef.current = id.node_id;
+        // 清理身份拉取期间可能混入的本机节点。
+        setNetworkNodes((prev) => prev.filter((n) => n.node_id !== id.node_id));
+      } catch {
+        /* 身份获取失败时不过滤 */
+      }
+      try {
+        const list = await getNetworkNodes();
+        setNetworkNodes(list.filter((n) => n.node_id !== localNodeIdRef.current));
+      } catch {
+        /* 节点拉取失败保持空 */
+      }
+    })();
 
     return () => {
       void unState.then((fn) => fn());
@@ -617,6 +734,8 @@ function cleanProcessName(name: string): string {
       void unLost.then((fn) => fn());
       void unRestored.then((fn) => fn());
       void unProcess.then((fn) => fn());
+      void unNodeResolved.then((fn) => fn());
+      void unNodeRemoved.then((fn) => fn());
     };
   }, [refreshAll, refreshEngineState, doStartEngine]);
 
@@ -705,6 +824,7 @@ function cleanProcessName(name: string): string {
     captureDevices,
     renderDevices,
     processes,
+    networkNodes,
     route,
     engineState,
     stats,
@@ -728,9 +848,12 @@ function cleanProcessName(name: string): string {
     doReconnect,
     addSourceFromProcess,
     addSourceFromDevice,
+    addVbanSource,
     switchProcessSourceToDevice,
     addOutputChannel,
     addExternalOutput,
+    addVbanExternalOutput,
+    addManualNode,
     removeSource,
     removeOutputChannel,
     removeExternalOutput,

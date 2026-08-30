@@ -23,12 +23,14 @@ use tauri::Manager;
 
 use loopmaster_app_service::{AppConfig, ConfigError, DeviceCompatibility, DeviceStatus};
 use loopmaster_app_service::{
-    DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, ProcessModel,
-    ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent,
+    DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService, NetworkBridge,
+    NetworkDiscovery, NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, ProcessModel,
+    ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent, VBAN_SERVICE_PORT,
+    CAPS_VBAN_AUDIO,
 };
 use loopmaster_audio_core::{
-    BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkSpec,
-    SourceId, SourceKind, SourceSpec,
+    BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkKind,
+    SinkSpec, SourceId, SourceKind, SourceSpec,
 };
 use loopmaster_audio_windows::{AudioEngineState, AudioEngineStats, AudioEngineStatus};
 use tauri::menu::{Menu, MenuItem};
@@ -59,6 +61,57 @@ struct ProcessBrief {
     pid: u32,
     name: String,
     executable_path: Option<String>,
+}
+
+/// 本机网络身份概要。
+#[derive(Clone, Serialize)]
+struct NodeIdentityBrief {
+    node_id: String,
+    device_name: String,
+    network_enabled: bool,
+    web_port: u16,
+    /// 本机 IPv4 地址列表（多网卡时多个），便于用户跨机连接时查看。
+    #[serde(default)]
+    addresses: Vec<String>,
+}
+
+/// 网络防火墙检测结果。
+#[derive(Clone, Serialize)]
+struct FirewallCheckResult {
+    /// UDP 6980 端口当前是否可绑定（未被占用）。
+    port_available: bool,
+    /// 是否存在 LoopMaster VBAN 防火墙放行规则。
+    rule_exists: bool,
+    /// 防火墙检测是否成功（平台支持）。
+    checked: bool,
+    /// 面向用户的引导信息。
+    message: String,
+}
+
+/// 局域网发现的 VBAN 节点概要。
+#[derive(Clone, Serialize)]
+struct NetworkNodeBrief {
+    node_id: String,
+    name: String,
+    addresses: Vec<String>,
+    port: u16,
+    sample_rate: u32,
+    channels: u8,
+    caps: String,
+}
+
+impl NetworkNodeBrief {
+    fn from_node(node: &NodeInfo) -> Self {
+        Self {
+            node_id: node.node_id.clone(),
+            name: node.name.clone(),
+            addresses: node.addresses.iter().map(|ip| ip.to_string()).collect(),
+            port: node.port,
+            sample_rate: node.sample_rate,
+            channels: node.channels,
+            caps: node.caps.clone(),
+        }
+    }
 }
 
 /// send（连接）视图模型，覆盖启用/静音/增益/通道映射。
@@ -106,6 +159,15 @@ struct ExternalOutputBrief {
     id: String,
     endpoint_id: String,
     display_name: String,
+    #[serde(default = "default_device_kind")]
+    kind: String,
+    #[serde(default)]
+    stream_name: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_device_kind() -> String {
+    "device".to_owned()
 }
 
 /// 引擎状态视图。
@@ -155,6 +217,9 @@ enum RouteEditRequest {
         process_id: Option<u32>,
         #[serde(default)]
         executable_path: Option<String>,
+        /// VBAN 网络源（kind == "vban"）的接收流名。
+        #[serde(default)]
+        stream_name: Option<String>,
     },
     RemoveSource {
         id: String,
@@ -170,6 +235,15 @@ enum RouteEditRequest {
         id: String,
         endpoint_id: String,
         display_name: String,
+        /// 输出目标类型："device" | "vban"。
+        #[serde(default)]
+        kind: Option<String>,
+        /// VBAN 网络目标（kind == "vban"）的发送流名。
+        #[serde(default)]
+        stream_name: Option<String>,
+        /// VBAN 网络目标（kind == "vban"）的远端地址（ip:port）。
+        #[serde(default)]
+        remote_addr: Option<String>,
     },
     RemoveExternalOutput {
         id: String,
@@ -288,6 +362,12 @@ struct AppState {
     engine: Mutex<Option<EngineService>>,
     config_path: PathBuf,
     settings: Mutex<AppSettings>,
+    /// 本机网络身份缓存（首次启动时生成 node_id 并持久化）。
+    node_identity: Mutex<NodeIdentityBrief>,
+    /// 后台局域网节点监听服务。
+    discovery: Mutex<Option<NetworkDiscovery>>,
+    /// VBAN 网络桥接（网络 FIFO 与 UDP 收发对接）。
+    bridge: Mutex<Option<NetworkBridge>>,
 }
 
 impl AppState {
@@ -298,6 +378,15 @@ impl AppState {
             engine: Mutex::new(None),
             config_path,
             settings: Mutex::new(AppSettings::default()),
+            node_identity: Mutex::new(NodeIdentityBrief {
+                node_id: String::new(),
+                device_name: String::new(),
+                network_enabled: false,
+                web_port: 0,
+                addresses: Vec::new(),
+            }),
+            discovery: Mutex::new(None),
+            bridge: Mutex::new(None),
         }
     }
 }
@@ -319,6 +408,69 @@ fn resolve_config_path(app: &tauri::AppHandle) -> PathBuf {
         return std::path::PathBuf::from("config.json");
     }
     dir.join("config.json")
+}
+
+/// 枚举本机网络接口的 IPv4 地址（排除 loopback 与链路本地地址）。
+///
+/// 用于设备页展示"本机 IP"，便于用户在其他电脑上手动输入连接地址。
+/// 多网卡（以太网/Wi-Fi/NAT 等）会返回多个地址，由 UI 全部展示。
+fn local_ipv4_addresses() -> Vec<String> {
+    let addrs = match if_addrs::get_if_addrs() {
+        Ok(list) => list,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for iface in addrs {
+        if let std::net::IpAddr::V4(v4) = iface.ip() {
+            // 排除回环、链路本地（169.254/16）、未指定地址。
+            if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+                continue;
+            }
+            let text = v4.to_string();
+            if !out.contains(&text) {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+/// 确保本机网络身份存在：读取配置中的 `network`，缺失 node_id 时生成并持久化。
+///
+/// 返回当前身份快照（含 network_enabled 与本机 IP 列表）。
+fn ensure_node_identity(state: &AppState) -> NodeIdentityBrief {
+    let mut cached = state.node_identity.lock().expect("身份锁未中毒");
+    if !cached.node_id.is_empty() {
+        // 网卡可能变化（切换 Wi-Fi/拔插网线），每次查询刷新本机 IP。
+        cached.addresses = local_ipv4_addresses();
+        return cached.clone();
+    }
+    let mut config = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => config,
+        Err(ConfigError::NotFound(_)) => {
+            AppConfig::new(loopmaster_audio_core::RouteGraph::default())
+        }
+        Err(_) => return cached.clone(),
+    };
+    if config.network.node_id.is_none() {
+        let identity = NodeIdentity::generate();
+        config.network.node_id = Some(identity.node_id.clone());
+        config.network.device_name = Some(identity.device_name);
+        let _ = config.save_to(&state.config_path);
+    }
+    let brief = NodeIdentityBrief {
+        node_id: config.network.node_id.clone().unwrap_or_default(),
+        device_name: config
+            .network
+            .device_name
+            .clone()
+            .unwrap_or_else(loopmaster_app_service::default_device_name),
+        network_enabled: config.network.network_enabled,
+        web_port: config.network.web_port,
+        addresses: local_ipv4_addresses(),
+    };
+    *cached = brief.clone();
+    brief
 }
 
 /// 首次启动引擎时创建服务，并派生事件转发线程；重复调用返回 `false`。
@@ -354,6 +506,8 @@ fn validate_graph_endpoints(graph: &RouteGraph) -> Result<(), ServiceErrorBrief>
             SourceKind::DeviceCapture => Some(DeviceFlow::Capture),
             SourceKind::DeviceLoopback => Some(DeviceFlow::Render),
             SourceKind::ProcessLoopback => None,
+            // VBAN 网络源不依赖真实设备。
+            SourceKind::Vban => None,
         };
         if let Some(expected) = expected {
             let endpoint = source.endpoint_id.as_ref().ok_or_else(|| {
@@ -366,6 +520,10 @@ fn validate_graph_endpoints(graph: &RouteGraph) -> Result<(), ServiceErrorBrief>
         }
     }
     for sink in &graph.sinks {
+        // VBAN 网络目标不依赖真实渲染设备，跳过 endpoint 校验。
+        if sink.kind == SinkKind::Vban {
+            continue;
+        }
         validate_endpoint(
             &devices,
             &sink.endpoint_id,
@@ -442,6 +600,295 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// 返回本机网络身份（node_id/device_name/network_enabled/web_port）。
+#[tauri::command]
+fn get_node_identity(state: tauri::State<'_, Arc<AppState>>) -> NodeIdentityBrief {
+    ensure_node_identity(&state)
+}
+
+/// 检测 VBAN 网络功能所需的 Windows 防火墙放行情况。
+///
+/// 返回：UDP 6980 端口是否可绑定、是否存在 LoopMaster 放行规则、引导文案。
+#[tauri::command]
+fn check_network_firewall() -> FirewallCheckResult {
+    // 1) 端口可绑定检测：尝试绑定 0.0.0.0:6980，成功表示空闲可用。
+    let port_available = std::net::UdpSocket::bind("0.0.0.0:6980").is_ok();
+
+    // 2) 防火墙规则检测：用 netsh 查询 LoopMaster 相关规则。
+    //    仅 Windows 支持；非 Windows 或执行失败时标记未检查。
+    let mut rule_exists = false;
+    let mut checked = false;
+    if cfg!(windows) {
+        if let Ok(output) = std::process::Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "show",
+                "rule",
+                "name=LoopMaster",
+            ])
+            .output()
+        {
+            checked = true;
+            let text = String::from_utf8_lossy(&output.stdout);
+            rule_exists = text.contains("LoopMaster");
+        }
+    }
+
+    let message = if !checked {
+        "当前平台未检查防火墙规则。".to_owned()
+    } else if rule_exists && port_available {
+        "防火墙已放行，端口可用。".to_owned()
+    } else if rule_exists {
+        "防火墙规则已存在，但 UDP 6980 端口当前被占用。".to_owned()
+    } else {
+        format!(
+            "未检测到 LoopMaster 防火墙放行规则。请在管理员终端运行：netsh advfirewall firewall add rule name=\"LoopMaster VBAN\" dir=in action=allow protocol=UDP localport={VBAN_SERVICE_PORT} profile=private remoteip=localsubnet"
+        )
+    };
+
+    FirewallCheckResult {
+        port_available,
+        rule_exists,
+        checked,
+        message,
+    }
+}
+
+/// 尝试自动放行 UDP 6980 入站防火墙（提权执行 netsh）。
+///
+/// 若规则已存在或已放行，返回 `Ok(true)`（无需操作）。否则通过 UAC 提权
+/// 运行 netsh 添加入站规则；用户拒绝授权时返回错误（前端再给出手动引导）。
+/// 放行一次后规则永久生效，后续不再弹 UAC。
+#[tauri::command]
+fn enable_network_firewall() -> Result<FirewallCheckResult, String> {
+    // 若规则已存在，直接返回成功（无需再提权）。
+    if let Ok(output) = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", "name=LoopMaster VBAN"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        if text.contains("LoopMaster VBAN") {
+            return Ok(FirewallCheckResult {
+                port_available: std::net::UdpSocket::bind("0.0.0.0:6980").is_ok(),
+                rule_exists: true,
+                checked: true,
+                message: "防火墙已放行 UDP 6980。".to_owned(),
+            });
+        }
+    }
+
+    // 规则缺失：通过 UAC 提权执行 netsh 添加规则。
+    // 使用 PowerShell Start-Process -Verb RunAs 触发 UAC；用户确认后生效。
+    let script = format!(
+        "Start-Process -FilePath 'netsh' -ArgumentList 'advfirewall','firewall','add','rule','name=LoopMaster VBAN','dir=in','action=allow','protocol=UDP','localport={VBAN_SERVICE_PORT}','profile=private','remoteip=localsubnet' -Verb RunAs -Wait"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .map_err(|e| format!("触发放行失败: {e}"))?;
+
+    if status.success() {
+        Ok(FirewallCheckResult {
+            port_available: std::net::UdpSocket::bind("0.0.0.0:6980").is_ok(),
+            rule_exists: true,
+            checked: true,
+            message: "已放行 UDP 6980 入站防火墙。".to_owned(),
+        })
+    } else {
+        Err("未获得管理员授权，防火墙未放行。".to_owned())
+    }
+}
+
+/// 返回当前局域网发现的 VBAN 节点列表快照。
+#[tauri::command]
+fn get_network_nodes(state: tauri::State<'_, Arc<AppState>>) -> Vec<NetworkNodeBrief> {
+    let slot = state.discovery.lock().expect("监听锁未中毒");
+    match slot.as_ref() {
+        Some(discovery) => discovery
+            .snapshot()
+            .iter()
+            .map(NetworkNodeBrief::from_node)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退路径，见专项文档 6.4）。
+///
+/// 手动节点不经过 mDNS 发现，直接由用户指定 IP/端口/流名；返回的节点概要
+/// 与自动发现节点类型一致，前端将其加入可选列表供路由选择使用。
+#[tauri::command]
+fn add_manual_vban_node(
+    name: String,
+    address: String,
+    port: u16,
+    stream_name: String,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+) -> Result<NetworkNodeBrief, ServiceErrorBrief> {
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "IP 地址不能为空".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请输入目标电脑的 IP 地址".into()),
+        });
+    }
+    // 校验地址（支持 IPv4 字面量；主机名解析交给后续连接阶段）。
+    if trimmed.parse::<std::net::Ipv4Addr>().is_err() {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: format!("IP 地址格式无效：{trimmed}"),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请输入形如 192.168.1.50 的 IPv4 地址".into()),
+        });
+    }
+    if port == 0 {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "端口不能为 0".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some(format!("默认 VBAN 端口为 {VBAN_SERVICE_PORT}").into()),
+        });
+    }
+    let stream = if stream_name.trim().is_empty() {
+        name.trim().to_owned()
+    } else {
+        stream_name.trim().to_owned()
+    };
+    if stream.is_empty() || stream.len() > 16 {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "流名须为 1..16 个字符".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("可留空以使用显示名作为流名".into()),
+        });
+    }
+    Ok(NetworkNodeBrief {
+        // 手动节点用"地址:端口/流名"合成稳定 ID，避免与 mDNS node_id 冲突。
+        node_id: format!("manual:{trimmed}:{port}:{stream}"),
+        name: name.trim().to_owned(),
+        addresses: vec![trimmed.to_owned()],
+        port,
+        sample_rate: sample_rate.unwrap_or(loopmaster_audio_core::INTERNAL_SAMPLE_RATE),
+        channels: channels.unwrap_or(loopmaster_audio_core::INTERNAL_CHANNELS as u8),
+        caps: CAPS_VBAN_AUDIO.to_owned(),
+    })
+}
+
+/// 开启/关闭网络功能，并持久化到配置。
+///
+/// 开启：发布本机 VBAN 服务（Advertiser）+ 确保 Browser 监听。
+/// 关闭：下架本机服务（Browser 仍持续监听，便于发现其他电脑）。
+/// 返回更新后的本机身份（含新 `network_enabled`）。
+#[tauri::command]
+fn set_network_enabled(
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<NodeIdentityBrief, ServiceErrorBrief> {
+    log_line(&format!("set_network_enabled: 进入 enabled={enabled}"));
+    // 关闭网络功能：下架本机 mDNS 服务 + 停止 VBAN 桥接（不再收发网络音频）。
+    // 两者都做了异步化/不 join 处理，不会卡死 UI。
+    if !enabled {
+        log_line("set_network_enabled: 步骤1 停止 mDNS 服务（后台线程）");
+        stop_advertising(&state);
+        log_line("set_network_enabled: 步骤2 停止 VBAN 桥接");
+        stop_network_bridge(&state);
+        log_line("set_network_enabled: 步骤3 桥接已停止");
+    } else {
+        log_line("set_network_enabled: 步骤1 发布 mDNS 服务");
+        start_advertising(app.clone(), &state)?;
+        log_line("set_network_enabled: 步骤2 mDNS 服务已发布");
+    }
+    // 持久化 network_enabled 到配置；失败时若刚开启则回滚下架。
+    log_line("set_network_enabled: 步骤4 读取配置准备持久化");
+    let mut config = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => config,
+        Err(ConfigError::NotFound(_)) => {
+            AppConfig::new(loopmaster_audio_core::RouteGraph::default())
+        }
+        Err(e) => {
+            log_line(&format!("set_network_enabled: 配置读取失败 {e}"));
+            return Err(config_error_brief(e));
+        }
+    };
+    config.network.network_enabled = enabled;
+    if let Err(e) = config.save_to(&state.config_path) {
+        log_line(&format!("set_network_enabled: 配置保存失败 {e}"));
+        if enabled {
+            stop_advertising(&state); // 回滚已发布的 Advertiser
+        }
+        return Err(config_error_brief(e));
+    }
+    log_line("set_network_enabled: 步骤5 配置已持久化");
+    // 用缓存的身份 + 新的开关状态构造返回值，避免依赖 ensure_node_identity
+    // 的缓存短路导致返回旧 network_enabled。
+    log_line("set_network_enabled: 步骤6 获取身份缓存锁");
+    let mut cached = state.node_identity.lock().expect("身份锁未中毒");
+    let brief = NodeIdentityBrief {
+        node_id: cached.node_id.clone(),
+        device_name: cached.device_name.clone(),
+        network_enabled: enabled,
+        web_port: cached.web_port,
+        addresses: local_ipv4_addresses(),
+    };
+    *cached = brief.clone();
+    drop(cached);
+    // 开启网络功能：VBAN 桥接的 FIFO 是引擎 session 的一部分，关闭开关时桥接
+    // 已把旧 FIFO 释放；重新开启必须让 supervisor 重建 session 并生成新 FIFO。
+    // 因此：若引擎正在运行，则重启引擎（stop → start），start_engine 命令里会
+    // 重新 spawn_network_bridge 并拿到新句柄。绝不能在这里直接 spawn 等句柄
+    // （supervisor 只在 start 时 send 一次，重复 recv 会永久阻塞导致卡死/崩溃）。
+    if enabled {
+        log_line("set_network_enabled: 步骤7 检查引擎是否需重启以重建桥接");
+        let running = {
+            let engine = state.engine.lock().expect("引擎锁未中毒");
+            engine
+                .as_ref()
+                .map(|e| e.status().state == loopmaster_audio_windows::AudioEngineState::Running)
+                .unwrap_or(false)
+        };
+        if running {
+            log_line("set_network_enabled: 步骤8 引擎运行中，重启以重建 VBAN 桥接");
+            let bridge_state = state.inner().clone();
+            // 在后台线程重启引擎，避免阻塞 UI 命令线程。
+            std::thread::Builder::new()
+                .name("loopmaster-restart-for-bridge".into())
+                .spawn(move || {
+                    log_line("set_network_enabled: 后台重启引擎（stop）");
+                    {
+                        let engine = bridge_state.engine.lock().expect("引擎锁未中毒");
+                        if let Some(e) = engine.as_ref() {
+                            let _ = e.command(loopmaster_app_service::EngineCommand::Stop);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    log_line("set_network_enabled: 后台重启引擎（start）");
+                    {
+                        let engine = bridge_state.engine.lock().expect("引擎锁未中毒");
+                        if let Some(e) = engine.as_ref() {
+                            let _ = e.command(loopmaster_app_service::EngineCommand::Start);
+                        }
+                    }
+                    // Start 后 supervisor 会重建 session 并 send 新句柄，
+                    // 此时才 spawn bridge 等待句柄。
+                    log_line("set_network_enabled: 后台重启完成，spawn bridge");
+                    spawn_network_bridge(app, bridge_state);
+                })
+                .expect("创建引擎重启线程失败");
+        }
+    }
+    log_line("set_network_enabled: 完成（命令返回）");
+    Ok(brief)
 }
 
 /// 枚举设备（后台执行，不阻塞 UI）。
@@ -526,6 +973,7 @@ fn start_engine(
     app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), ServiceErrorBrief> {
+    log_line("start_engine: 收到启动引擎命令");
     let _operation = state
         .route_operation
         .lock()
@@ -537,7 +985,8 @@ fn start_engine(
             .map_err(|_| ServiceErrorBrief::lock_poisoned())?;
         validate_graph_endpoints(editor.draft())?;
     }
-    // 1) 若已有引擎实例，先停止并丢弃，确保用最新图重建。
+    // 1) 若已有引擎实例，先停止并丢弃（含其网络桥接），确保用最新图重建。
+    stop_network_bridge(&state);
     {
         let mut engine_slot = state.engine.lock().expect("引擎锁未中毒");
         if let Some(old) = engine_slot.take() {
@@ -551,12 +1000,18 @@ fn start_engine(
     let engine = engine.as_ref().expect("引擎已创建");
     engine
         .command(EngineCommand::Start)
-        .map_err(service_error_brief)
+        .map_err(service_error_brief)?;
+    // 3) 启动后异步轮询网络句柄，就绪后建立 VBAN 桥接。
+    let bridge_state = state.inner().clone();
+    spawn_network_bridge(app, bridge_state);
+    Ok(())
 }
 
 /// 停止引擎。引擎尚未创建时返回错误。
 #[tauri::command]
 fn stop_engine(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErrorBrief> {
+    // 停止网络桥接（其句柄依赖当前引擎 session）。
+    stop_network_bridge(&state);
     let engine = state.engine.lock().expect("引擎锁未中毒");
     match engine.as_ref() {
         Some(engine) => engine
@@ -574,18 +1029,30 @@ fn stop_engine(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErro
 
 /// 从 Degraded/Reconnecting/Failed 手动触发重连。引擎尚未创建时返回错误。
 #[tauri::command]
-fn request_reconnect(state: tauri::State<'_, Arc<AppState>>) -> Result<(), ServiceErrorBrief> {
-    let engine = state.engine.lock().expect("引擎锁未中毒");
-    match engine.as_ref() {
-        Some(engine) => engine.request_reconnect().map_err(service_error_brief),
-        None => Err(ServiceErrorBrief {
-            category: "not_ready",
-            message: "引擎尚未启动".into(),
-            endpoint_id: None,
-            hresult: None,
-            hint: Some("请先启动引擎".into()),
-        }),
+fn request_reconnect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), ServiceErrorBrief> {
+    {
+        let engine = state.engine.lock().expect("引擎锁未中毒");
+        match engine.as_ref() {
+            Some(engine) => engine.request_reconnect().map_err(service_error_brief)?,
+            None => {
+                return Err(ServiceErrorBrief {
+                    category: "not_ready",
+                    message: "引擎尚未启动".into(),
+                    endpoint_id: None,
+                    hresult: None,
+                    hint: Some("请先启动引擎".into()),
+                });
+            }
+        }
     }
+    // 重连重建了引擎 session（新网络 FIFO），需重新建立网络桥接。
+    stop_network_bridge(&state);
+    let bridge_state = state.inner().clone();
+    spawn_network_bridge(app, bridge_state);
+    Ok(())
 }
 
 /// 应用一次路由编辑（写入暂存图并校验）。拓扑变化需重启会在
@@ -814,6 +1281,330 @@ fn persist_config(state: &AppState) -> Result<(), ServiceErrorBrief> {
     config
         .save_to(&state.config_path)
         .map_err(config_error_brief)
+}
+
+/// 启动局域网节点监听（Browser），并把节点上线/下线事件转发为 Tauri event。
+///
+/// 已在运行则无操作；线程退出（daemon 停止）时清空槽位以便再次启动。
+/// Browser 独立于本机服务发布（Advertiser）持续运行，便于随时发现其他电脑。
+fn start_browser(app: tauri::AppHandle, state: &AppState) {
+    let mut slot = state.discovery.lock().expect("监听锁未中毒");
+    if slot.is_some() {
+        return;
+    }
+    let mut discovery = match NetworkDiscovery::new() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("启动局域网监听失败: {e}");
+            return;
+        }
+    };
+    let events = discovery.subscribe();
+    if let Err(e) = discovery.start() {
+        eprintln!("启动局域网监听失败: {e}");
+        return;
+    }
+    // 事件转发线程：把上线/下线事件 emit 给前端。
+    let handle = app.clone();
+    thread::Builder::new()
+        .name("loopmaster-mdns-events".into())
+        .spawn(move || {
+            for event in events {
+                match event {
+                    NetworkEvent::NodeResolved(node) => {
+                        let _ = handle.emit(
+                            "node-resolved",
+                            serde_json::json!({
+                                "node": NetworkNodeBrief::from_node(&node),
+                            }),
+                        );
+                    }
+                    NetworkEvent::NodeRemoved(node_id) => {
+                        let _ = handle.emit(
+                            "node-removed",
+                            serde_json::json!({ "node_id": node_id }),
+                        );
+                    }
+                }
+            }
+        })
+        .expect("创建 mDNS 事件转发线程失败");
+    *slot = Some(discovery);
+}
+
+/// 发布本机 VBAN 服务（开启网络功能）。Browser 未启动时先启动它。
+fn start_advertising(app: tauri::AppHandle, state: &AppState) -> Result<(), ServiceErrorBrief> {
+    // 确保 Browser 在监听。
+    if state.discovery.lock().expect("监听锁未中毒").is_none() {
+        start_browser(app, state);
+    }
+    let identity = ensure_node_identity(state);
+    if identity.node_id.is_empty() {
+        return Err(ServiceErrorBrief {
+            category: "network",
+            message: "本机节点 ID 无效，无法发布服务".into(),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请检查配置文件后重试".into()),
+        });
+    }
+    let meta = NodeMeta {
+        node_id: identity.node_id.clone(),
+        name: identity.device_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        web_port: identity.web_port,
+        sample_rate: loopmaster_audio_core::INTERNAL_SAMPLE_RATE,
+        channels: loopmaster_audio_core::INTERNAL_CHANNELS as u8,
+        caps: format!("{CAPS_VBAN_AUDIO}"),
+    };
+    let node_identity = NodeIdentity {
+        node_id: identity.node_id,
+        device_name: identity.device_name,
+    };
+    let mut slot = state.discovery.lock().expect("监听锁未中毒");
+    let discovery = match slot.as_mut() {
+        Some(d) => d,
+        None => {
+            return Err(ServiceErrorBrief {
+                category: "network",
+                message: "局域网监听未启动".into(),
+                endpoint_id: None,
+                hresult: None,
+                hint: Some("请先开启网络功能".into()),
+            });
+        }
+    };
+    discovery
+        .start_advertiser(&node_identity, &meta)
+        .map_err(|e| ServiceErrorBrief {
+            category: "network",
+            message: format!("发布本机服务失败: {e}"),
+            endpoint_id: None,
+            hresult: None,
+            hint: Some("请检查网络连接与端口占用后重试".into()),
+        })
+}
+
+/// 下架本机 VBAN 服务（关闭网络功能）。
+///
+/// mDNS daemon 的关闭（unregister + shutdown）可能耗时数秒，直接在 UI/命令线程
+/// drop 会**卡死界面**（实测关闭网络开关时卡死的主因）。因此只把 advertiser 取出，
+/// 真正的关闭放到后台线程执行，本函数立即返回。
+fn stop_advertising(state: &AppState) {
+    let advertiser = {
+        let mut slot = state.discovery.lock().expect("监听锁未中毒");
+        match slot.as_mut() {
+            Some(discovery) => discovery.take_advertiser(),
+            None => None,
+        }
+    };
+    if let Some(advertiser) = advertiser {
+        log_line("stop_advertising: 后台线程关闭 mDNS 服务");
+        std::thread::Builder::new()
+            .name("loopmaster-mdns-shutdown".into())
+            .spawn(move || {
+                drop(advertiser); // 后台线程执行 unregister + daemon.shutdown
+                log_line("stop_advertising: mDNS 服务已关闭");
+            })
+            .expect("创建 mDNS 关闭线程失败");
+    }
+}
+
+/// 停止 VBAN 网络桥接（幂等）。
+///
+/// 桥接线程收到 stop 后自行退出（NetworkBridge::shutdown 不 join），此处只是
+/// 取出并释放句柄，UI 立即返回，不会卡死。
+fn stop_network_bridge(state: &AppState) {
+    // 锁中毒时不 panic（此前 expect 会在异常路径直接崩溃进程），记录后跳过。
+    let mut slot = match state.bridge.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => {
+            log_line("stop_network_bridge: 桥接锁中毒，跳过（取中毒内部数据）");
+            poisoned.into_inner()
+        }
+    };
+    if let Some(bridge) = slot.take() {
+        drop(bridge); // Drop → shutdown：置 stop + detach，不 join
+    }
+}
+
+/// 异步建立 VBAN 网络桥接：引擎 Start 后 supervisor 后台创建 session 并发送
+/// 网络句柄，需轮询 `take_network_handles()` 直至就绪。
+/// 日志文件路径（`%LOCALAPPDATA%\com.loopmaster.app\loopmaster.log`）。
+fn log_file_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|dir| {
+        std::path::PathBuf::from(dir)
+            .join("com.loopmaster.app")
+            .join("loopmaster.log")
+    })
+}
+
+/// 追加一行诊断日志到日志文件（release build 的 stderr 在 Windows GUI 下会被丢弃，
+/// 因此用文件日志排查网络桥接等后台问题）。失败时静默（不影响主流程）。
+fn log_line(message: &str) {
+    let Some(path) = log_file_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = format!(
+        "[{}] {message}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(line.as_bytes());
+    }
+    // 同时输出到 stderr，便于调试构建查看。
+    eprintln!("[loopmaster] {message}");
+}
+
+fn spawn_network_bridge(app: tauri::AppHandle, state: Arc<AppState>) {
+    // 网络功能总开关：关闭时完全不参与网络通信（不收发 VBAN 音频），
+    // 避免"用户关了开关但 Vban 节点仍在收发"的行为不一致。
+    let network_enabled = {
+        let cached = state.node_identity.lock().expect("身份锁未中毒");
+        if !cached.node_id.is_empty() {
+            cached.network_enabled
+        } else {
+            drop(cached);
+            match AppConfig::load_from(&state.config_path) {
+                Ok(config) => config.network.network_enabled,
+                Err(_) => false,
+            }
+        }
+    };
+    if !network_enabled {
+        log_line("spawn_network_bridge: 网络功能已关闭，不启动桥接（不收发 VBAN）");
+        return;
+    }
+    // 路由图中若无 VBAN 源/目标，无需桥接。
+    // 先查内存中的编辑器草稿；若草稿未包含 VBAN 节点（例如进程重启后尚未
+    // 把配置载入编辑器），回退到持久化配置里的路由图，避免"配置里有 VBAN
+    // 节点但桥接不启动"导致 6980 永不监听。
+    // 详细记录草稿与配置里的 VBAN 节点，便于诊断"为什么桥接没启动"。
+    let draft_vban: Vec<String> = {
+        let editor = state.editor.lock().expect("路由锁未中毒");
+        let draft = editor.draft();
+        let mut names = Vec::new();
+        for s in &draft.sources {
+            if s.kind == SourceKind::Vban {
+                names.push(format!("source:{}", s.display_name));
+            }
+        }
+        for s in &draft.sinks {
+            if s.kind == SinkKind::Vban {
+                names.push(format!(
+                    "sink:{} remote={:?} stream={:?}",
+                    s.display_name, s.remote_addr, s.stream_name
+                ));
+            }
+        }
+        names
+    };
+    let config_vban: Vec<String> = match AppConfig::load_from(&state.config_path) {
+        Ok(config) => {
+            let mut names = Vec::new();
+            for s in &config.graph.sources {
+                if s.kind == SourceKind::Vban {
+                    names.push(format!("source:{}", s.display_name));
+                }
+            }
+            for s in &config.graph.sinks {
+                if s.kind == SinkKind::Vban {
+                    names.push(format!(
+                        "sink:{} remote={:?} stream={:?}",
+                        s.display_name, s.remote_addr, s.stream_name
+                    ));
+                }
+            }
+            names
+        }
+        Err(e) => vec![format!("配置读取失败: {e}")],
+    };
+    log_line(&format!(
+        "spawn_network_bridge: 草稿 VBAN 节点={:?} 配置 VBAN 节点={:?}",
+        draft_vban, config_vban
+    ));
+
+    let has_vban = !draft_vban.is_empty()
+        || config_vban
+            .iter()
+            .any(|n| n.starts_with("source:") || n.starts_with("sink:"));
+    if !has_vban {
+        log_line("spawn_network_bridge: 无 VBAN 节点，不启动桥接");
+        return;
+    }
+    log_line("spawn_network_bridge: 检测到 VBAN 节点，启动桥接等待线程");
+    let handle = app.clone();
+    std::thread::Builder::new()
+        .name("loopmaster-bridge-wait".into())
+        .spawn(move || {
+            // 阻塞直到 supervisor 完成首次 session 并把 NetworkIoHandles 发到通道
+            // （audio-windows 的 recv_network_handles 改为阻塞 recv）。
+            log_line("bridge-wait: 等待 supervisor 发送网络句柄（阻塞 recv）...");
+            let engine = state.engine.lock().expect("引擎锁未中毒");
+            let handles = engine.as_ref().and_then(|e| e.take_network_handles());
+            drop(engine);
+            let Some(handles) = handles else {
+                log_line("bridge-wait: 失败 - 引擎未运行或 supervisor 未发送网络句柄");
+                return;
+            };
+            log_line(&format!(
+                "bridge-wait: 拿到网络句柄 sources={} sinks={}",
+                handles.vban_source_producers.len(),
+                handles.vban_sink_consumers.len()
+            ));
+            // 构造桥接用的路由图：优先用编辑器草稿；若草稿不含 VBAN 节点
+            // （进程重启后配置未载入编辑器），改用持久化配置里的路由图。
+            let graph = {
+                let editor = state.editor.lock().expect("路由锁未中毒");
+                let draft = editor.draft().clone();
+                let draft_has_vban = draft.sources.iter().any(|s| s.kind == SourceKind::Vban)
+                    || draft.sinks.iter().any(|s| s.kind == SinkKind::Vban);
+                if draft_has_vban {
+                    log_line("bridge-wait: 使用编辑器草稿作为桥接路由图");
+                    draft
+                } else {
+                    drop(editor);
+                    match AppConfig::load_from(&state.config_path) {
+                        Ok(config) => {
+                            log_line("bridge-wait: 草稿无 VBAN，回退使用配置路由图");
+                            config.graph
+                        }
+                        Err(_) => {
+                            log_line("bridge-wait: 配置读取失败，仍用草稿");
+                            draft
+                        }
+                    }
+                }
+            };
+            let receiver_bind = format!("0.0.0.0:{}", VBAN_SERVICE_PORT)
+                .parse()
+                .expect("VBAN 端口常量合法");
+            log_line(&format!("bridge-wait: 准备绑定 {receiver_bind} 并启动桥接"));
+            match NetworkBridge::from_handles(receiver_bind, &graph, handles) {
+                Ok(bridge) => {
+                    let mut slot = state.bridge.lock().expect("桥接锁未中毒");
+                    *slot = Some(bridge);
+                    drop(slot);
+                    log_line("bridge-wait: 成功 - 网络桥接已启动，6980 应处于监听");
+                    let _ = handle.emit("network-bridge-ready", serde_json::json!({}));
+                }
+                Err(e) => {
+                    log_line(&format!("bridge-wait: 失败 - 启动网络桥接失败: {e}"));
+                }
+            }
+        })
+        .expect("创建网络桥接等待线程失败");
 }
 
 /// 进程声源自动重连：定期枚举当前音频进程，对失效的 ProcessLoopback
@@ -1182,6 +1973,11 @@ impl RouteProfileSnapshot {
                 id: s.id.0.clone(),
                 endpoint_id: s.endpoint_id.0.clone(),
                 display_name: s.display_name.clone(),
+                kind: match s.kind {
+                    SinkKind::Device => "device".to_owned(),
+                    SinkKind::Vban => "vban".to_owned(),
+                },
+                stream_name: s.stream_name.clone(),
             })
             .collect();
 
@@ -1242,6 +2038,7 @@ fn source_kind_str(kind: SourceKind) -> &'static str {
         SourceKind::DeviceCapture => "device_capture",
         SourceKind::DeviceLoopback => "device_loopback",
         SourceKind::ProcessLoopback => "process_loopback",
+        SourceKind::Vban => "vban",
     }
 }
 
@@ -1323,19 +2120,24 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             endpoint_id,
             process_id,
             executable_path,
+            stream_name,
         } => {
             let kind = match kind.as_str() {
                 "device_capture" => SourceKind::DeviceCapture,
                 "device_loopback" => SourceKind::DeviceLoopback,
                 "process_loopback" => SourceKind::ProcessLoopback,
+                "vban" => SourceKind::Vban,
                 other => return Err(format!("未知 source 类型: {other}")),
             };
+            // 仅 VBAN 源携带 stream_name；设备/进程源恒为 None。
+            let stream_name = (kind == SourceKind::Vban).then_some(stream_name).flatten();
             RouteEdit::AddSource(SourceSpec {
                 id: SourceId(id),
                 kind,
                 endpoint_id: endpoint_id.map(EndpointId),
                 process_id,
                 executable_path,
+                stream_name,
                 display_name,
             })
         }
@@ -1349,11 +2151,24 @@ fn request_to_route_edit(request: RouteEditRequest) -> Result<RouteEdit, String>
             id,
             endpoint_id,
             display_name,
-        } => RouteEdit::AddSink(SinkSpec {
-            id: SinkId(id),
-            endpoint_id: EndpointId(endpoint_id),
-            display_name,
-        }),
+            kind,
+            stream_name,
+            remote_addr,
+        } => {
+            let is_vban = kind.as_deref() == Some("vban");
+            RouteEdit::AddSink(SinkSpec {
+                id: SinkId(id),
+                endpoint_id: EndpointId(endpoint_id),
+                display_name,
+                kind: if is_vban {
+                    SinkKind::Vban
+                } else {
+                    SinkKind::Device
+                },
+                stream_name: if is_vban { stream_name } else { None },
+                remote_addr: if is_vban { remote_addr } else { None },
+            })
+        }
         RouteEditRequest::RemoveExternalOutput { id } => RouteEdit::RemoveSink(SinkId(id)),
         RouteEditRequest::AddSend {
             id,
@@ -1494,6 +2309,20 @@ pub fn run() {
             }
             app.manage(state);
 
+            // 初始化本机网络身份（首次生成 node_id 并持久化），始终启动
+            // Browser 监听局域网节点；Advertiser 由用户在设备页手动开启。
+            let managed = app.state::<Arc<AppState>>().inner().clone();
+            {
+                let identity = ensure_node_identity(&managed);
+                let handle = app.handle().clone();
+                // Browser 持续监听（便于随时发现其他电脑）。
+                start_browser(handle.clone(), &managed);
+                // 若上次配置为已开启，恢复本机服务发布。
+                if identity.network_enabled {
+                    let _ = start_advertising(handle, &managed);
+                }
+            }
+
             // 系统托盘常驻：创建托盘图标与菜单（显示/隐藏/退出）
             let tray_ok = setup_tray(app).is_ok();
             if !tray_ok {
@@ -1530,6 +2359,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             get_app_version,
+            get_node_identity,
+            get_network_nodes,
+            check_network_firewall,
+            enable_network_firewall,
+            add_manual_vban_node,
+            set_network_enabled,
             list_devices,
             list_audio_processes,
             get_route_snapshot,
@@ -1565,6 +2400,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: Some(42),
                 executable_path: Some("C:/app-a.exe".into()),
+                stream_name: None,
                 display_name: "应用 A".into(),
             }],
             buses: vec![BusSpec {
@@ -1575,6 +2411,9 @@ mod tests {
                 id: SinkId("out-1".into()),
                 endpoint_id: EndpointId("endpoint-1".into()),
                 display_name: "扬声器".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1643,6 +2482,7 @@ mod tests {
                     endpoint_id: None,
                     process_id: Some(42),
                     executable_path: Some("C:/app-a.exe".into()),
+                    stream_name: None,
                 })
                 .unwrap(),
             )
@@ -1665,6 +2505,9 @@ mod tests {
                     id: "out-1".into(),
                     endpoint_id: "endpoint-1".into(),
                     display_name: "扬声器".into(),
+                    kind: None,
+                    stream_name: None,
+                    remote_addr: None,
                 })
                 .unwrap(),
             )
@@ -1800,6 +2643,7 @@ mod tests {
             endpoint_id: None,
             process_id: None,
             executable_path: None,
+            stream_name: None,
         });
         assert!(error.is_err());
     }
