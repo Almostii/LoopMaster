@@ -32,6 +32,24 @@ const emptyIdentity: NodeIdentityBrief = {
 /** VBAN 默认端口（与后端 VBAN_SERVICE_PORT 一致），仅用于状态展示。 */
 const vbanPortLabel = "6980";
 
+/** 把 Unix 秒格式化为相对中文时间（用于「最后活跃」展示）。 */
+function formatRelative(unix: number): string {
+  if (!Number.isFinite(unix) || unix <= 0) return "从未活跃";
+  const diffSec = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (diffSec < 60) return "刚刚活跃";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前活跃`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前活跃`;
+  return `${Math.floor(diffSec / 86400)} 天前活跃`;
+}
+
+/** 把配对剩余秒数格式化为 `M:SS` 显示。 */
+function formatCountdown(secs: number): string {
+  const safe = Math.max(0, Math.floor(secs));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 /** 电脑显示器图标（紧凑卡片顶部使用）。 */
 function MonitorDeviceIcon() {
   return (
@@ -141,9 +159,23 @@ export default function DeviceView() {
   // 配对开关与可信设备（默认开放访问；开启"要求配对"后展示二维码配对）。
   const [requirePairing, setRequirePairing] = useState(false);
   const [pairing, setPairing] = useState<PairingInfo | null>(null);
+  const [pairingRemaining, setPairingRemaining] = useState(0);
   const [devices, setDevices] = useState<TrustedDevice[]>([]);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [pairingError, setPairingError] = useState<string | null>(null);
+
+  // 配对倒计时：开启后每秒递减，到 0 自动隐藏。
+  useEffect(() => {
+    if (!pairing) {
+      setPairingRemaining(0);
+      return;
+    }
+    setPairingRemaining(pairing.expires_in_secs);
+    const timer = window.setInterval(() => {
+      setPairingRemaining((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing]);
 
   // 刷新配对开关、可信设备与配对窗口状态。
   useEffect(() => {
@@ -375,20 +407,23 @@ export default function DeviceView() {
         <div className="device-local-meta">
           <div className="device-meta-item">
             <span className="device-meta-label">节点 ID</span>
-            <span className="device-meta-value device-mono">
+            <span
+              className="device-meta-value device-mono device-meta-truncate"
+              title={identity.node_id || undefined}
+            >
               {identity.node_id || "（尚未生成）"}
             </span>
           </div>
           <div className="device-meta-item">
-            <span className="device-meta-label">Web 控制台端口</span>
-            <span className="device-meta-value">
+            <span className="device-meta-label">访问地址</span>
+            <span className="device-meta-value device-mono">
               {identity.network_enabled && identity.web_port > 0
-                ? `http://<本机IP>:${identity.web_port}`
+                ? `http://${lanHost}:${identity.web_port}`
                 : "未开启"}
             </span>
           </div>
           {/* 本机 IP：用户可在其他电脑上手动输入该地址进行连接 */}
-          <div className="device-meta-item device-meta-item-wide">
+          <div className="device-meta-item">
             <span className="device-meta-label">本机 IP</span>
             <span className="device-meta-value device-mono device-meta-wrap">
               {identity.addresses && identity.addresses.length > 0
@@ -409,90 +444,90 @@ export default function DeviceView() {
               </label>
               <span className="device-pair-toggle-hint">
                 {requirePairing
-                  ? "开启：设备需扫码/PIN 配对后才能控制"
-                  : "关闭（默认）：局域网内设备直接访问"}
+                  ? "开启后，设备需扫码或输入 PIN 配对后才能控制。"
+                  : "关闭（默认）：局域网内设备输入上方地址即可访问，无需配对。"}
               </span>
             </div>
           )}
-          {identity.network_enabled && identity.web_port > 0 && !requirePairing && (
-            <div className="device-open-hint">
-              局域网内设备（电脑/手机/平板）输入{" "}
-              <span className="device-mono">
-                http://&lt;本机IP&gt;:{identity.web_port}
-              </span>{" "}
-              即可访问控制台，无需配对。
+          {/* 防火墙放行状态：正常时一行小徽章，异常时才展示"重新放行"与说明 */}
+          {identity.network_enabled && firewall && (
+            <div className="device-firewall-status">
+              <span
+                className={`device-firewall-badge ${
+                  firewall.vban_rule_exists ? "ok" : "warn"
+                }`}
+              >
+                VBAN UDP {vbanPortLabel}{" "}
+                {firewall.vban_rule_exists ? "已放行" : "未放行"}
+              </span>
+              <span
+                className={`device-firewall-badge ${
+                  firewall.web_rule_exists ? "ok" : "warn"
+                }`}
+              >
+                Web TCP {identity.web_port > 0 ? identity.web_port : "—"}{" "}
+                {firewall.web_rule_exists ? "已放行" : "未放行"}
+              </span>
+              {!firewall.rule_exists && (
+                <button
+                  type="button"
+                  className="device-firewall-retry"
+                  onClick={() => void handleRetryFirewall()}
+                  disabled={firewallToggling}
+                >
+                  {firewallToggling ? "放行中…" : "重新放行"}
+                </button>
+              )}
+            </div>
+          )}
+          {identity.network_enabled && firewall && !firewall.rule_exists && (
+            <div className="device-firewall-desc">
+              {firewallError ?? firewall.message}
             </div>
           )}
         </div>
       </section>
 
-      {/* 防火墙放行状态（开启网络功能时展示；两条规则分别列出） */}
-      {identity.network_enabled && firewall && (
-        <section className="device-firewall-card">
-          <div className="device-firewall-title">
-            防火墙放行
-            <button
-              type="button"
-              className="device-firewall-retry"
-              onClick={() => void handleRetryFirewall()}
-              disabled={firewallToggling}
-            >
-              {firewallToggling ? "放行中…" : "重新放行"}
-            </button>
-          </div>
-          <div className="device-firewall-rules">
-            <span
-              className={`device-firewall-badge ${
-                firewall.vban_rule_exists ? "ok" : "warn"
-              }`}
-            >
-              VBAN UDP {vbanPortLabel}
-              {firewall.vban_rule_exists ? " 已放行" : " 未放行"}
-            </span>
-            <span
-              className={`device-firewall-badge ${
-                firewall.web_rule_exists ? "ok" : "warn"
-              }`}
-            >
-              Web TCP {identity.web_port > 0 ? identity.web_port : "—"}
-              {firewall.web_rule_exists ? " 已放行" : " 未放行"}
-            </span>
-          </div>
-          {(!firewall.rule_exists || firewallError) && (
-            <div className="device-firewall-desc">
-              {firewallError ?? firewall.message}
-            </div>
-          )}
-        </section>
-      )}
-
       {/* 信任的设备与配对（仅"要求配对"模式下展示） */}
       {identity.network_enabled && requirePairing && (
         <section className="device-trust-card">
-          <div className="device-trust-title">
-            信任的设备与配对
+          <div className="device-trust-head">
+            <div className="device-trust-titles">
+              <div className="device-trust-title">信任的设备与配对</div>
+              <div className="device-trust-subtitle">
+                为局域网设备签发访问凭证，未配对的设备将被 `/ws` 拒绝
+              </div>
+            </div>
             <button
               type="button"
-              className="device-trust-action"
+              className="device-trust-add"
               onClick={() => void handleAddDevice()}
               disabled={pairingBusy}
             >
-              {pairing ? "重新生成" : "添加设备"}
+              {pairing && pairingRemaining > 0 ? "重新生成" : "添加设备"}
             </button>
           </div>
           {pairingError && <div className="device-trust-desc">{pairingError}</div>}
-          {pairing && (
+          {pairing && pairingRemaining > 0 && (
             <div className="pairing-box">
               <div className="pairing-qr">
-                <QRCodeSVG value={pairingUrl} size={168} bgColor="#ffffff" fgColor="#000000" />
+                <QRCodeSVG value={pairingUrl} size={176} bgColor="#ffffff" fgColor="#000000" />
               </div>
               <div className="pairing-meta">
-                <div className="pairing-pin">
-                  备用 PIN：<b>{pairing.pin}</b>
+                <div className="pairing-pin-row">
+                  <span className="pairing-pin-label">备用 PIN</span>
+                  <b className="pairing-pin-value">{pairing.pin}</b>
+                  <span
+                    className={`pairing-countdown ${
+                      pairingRemaining <= 30 ? "warn" : ""
+                    }`}
+                  >
+                    {formatCountdown(pairingRemaining)} 后过期
+                  </span>
                 </div>
                 <div className="pairing-url">{pairingUrl}</div>
                 <div className="device-trust-desc">
-                  手机扫描二维码，用浏览器打开并按提示完成首次配对；窗口 5 分钟有效。
+                  手机扫描二维码，用浏览器打开并按提示完成首次配对；如无法扫码，手动打开上面的链接再输入 PIN 也可完成配对。
                 </div>
                 <button
                   type="button"
@@ -504,19 +539,33 @@ export default function DeviceView() {
               </div>
             </div>
           )}
-          <div className="device-trust-rules">
+          <div className="device-trust-list">
+            <div className="device-trust-list-head">
+              <span>已配对设备</span>
+              <span className="device-trust-list-count">{devices.length}</span>
+            </div>
             {devices.length === 0 ? (
-              <div className="device-trust-desc">尚无已配对设备。</div>
+              <div className="device-trust-empty">
+                尚无已配对设备。点击右上方「添加设备」开启配对窗口，让手机/平板扫码。
+              </div>
             ) : (
               devices.map((device) => (
                 <div key={device.id} className="device-row">
-                  <span className="device-row-name">
-                    {device.name} <em>({device.permission})</em>
-                  </span>
+                  <div className="device-row-info">
+                    <div className="device-row-name">{device.name}</div>
+                    <div className="device-row-meta">
+                      <span className="device-row-perm">{device.permission}</span>
+                      <span className="device-row-dot">·</span>
+                      <span className="device-row-time">
+                        {formatRelative(device.last_seen_unix)}
+                      </span>
+                    </div>
+                  </div>
                   <button
                     type="button"
-                    className="device-trust-action"
+                    className="device-row-forget"
                     onClick={() => void handleForgetDevice(device.id)}
+                    title="撤销该设备的访问凭证并立即关闭其连接"
                   >
                     忘记
                   </button>
@@ -525,13 +574,15 @@ export default function DeviceView() {
             )}
           </div>
           {devices.length > 0 && (
-            <button
-              type="button"
-              className="device-trust-action"
-              onClick={() => void handleResetAll()}
-            >
-              重置全部局域网信任
-            </button>
+            <div className="device-trust-footer">
+              <button
+                type="button"
+                className="device-trust-reset"
+                onClick={() => void handleResetAll()}
+              >
+                重置全部局域网信任
+              </button>
+            </div>
           )}
         </section>
       )}
