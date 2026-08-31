@@ -206,10 +206,15 @@ export default function DeviceView() {
   }
 
   // 配对二维码地址：手机用该地址打开后读取 fragment 中的 secret 完成配对。
+  // 优先取 RFC1918 私网地址（真实局域网口），跳过虚拟网卡（如 198.18.x.x）。
+  const lanHost =
+    identity.addresses?.find((addr) =>
+      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(addr),
+    ) ??
+    identity.addresses?.[0] ??
+    "127.0.0.1";
   const pairingUrl = pairing
-    ? `http://${identity.addresses?.[0] ?? "127.0.0.1"}:${
-        identity.web_port > 0 ? identity.web_port : 8920
-      }/pair#secret=${pairing.secret}`
+    ? `http://${lanHost}:${identity.web_port > 0 ? identity.web_port : 8920}/pair#secret=${pairing.secret}`
     : "";
 
   // 确保防火墙放行 VBAN（UDP）与 Web 控制台（TCP）：规则缺失时自动提权放行，

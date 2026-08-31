@@ -106,27 +106,46 @@ impl NodeIdentityBrief {
 
 /// 枚举本机网络接口的 IPv4 地址（排除 loopback 与链路本地地址）。
 ///
-/// 用于设备页展示"本机 IP"与 Web 控制台证书 IP SAN。
-/// 多网卡（以太网/Wi-Fi/NAT 等）会返回多个地址，由 UI 全部展示。
+/// 用于设备页展示"本机 IP"、Web 控制台证书 IP SAN 与配对二维码。
+/// 排序偏好：**RFC1918 私网地址（10/8、172.16/12、192.168/16）优先**，其余可路由
+/// 地址在后；并排除虚拟网卡常用段（198.18/15 的 TUN/代理适配器、100.64/10 的
+/// CGNAT），避免配对二维码取到只有本机可达的虚拟网卡地址（真机实测教训：
+/// 桌面有 198.18.0.1 虚拟网卡时二维码取到了它，手机连不上）。
 pub fn local_ipv4_addresses() -> Vec<String> {
     let addrs = match if_addrs::get_if_addrs() {
         Ok(list) => list,
         Err(_) => return Vec::new(),
     };
-    let mut out: Vec<String> = Vec::new();
+    let mut candidates: Vec<(u8, String)> = Vec::new();
     for iface in addrs {
         if let std::net::IpAddr::V4(v4) = iface.ip() {
             // 排除回环、链路本地（169.254/16）、未指定地址。
             if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
                 continue;
             }
+            let octets = v4.octets();
+            // 排除虚拟网卡/代理常用段：198.18/15（TUN）、100.64/10（CGNAT）。
+            if (octets[0] == 198 && octets[1] & 0xfe == 18) || (octets[0] == 100 && octets[1] & 0xc0 == 0x40)
+            {
+                continue;
+            }
             let text = v4.to_string();
-            if !out.contains(&text) {
-                out.push(text);
+            if !candidates.iter().any(|(_, existing)| *existing == text) {
+                let priority = if is_rfc1918(&v4) { 0 } else { 1 };
+                candidates.push((priority, text));
             }
         }
     }
-    out
+    candidates.sort_by_key(|(priority, _)| *priority);
+    candidates.into_iter().map(|(_, text)| text).collect()
+}
+
+/// 是否为 RFC1918 私有局域网地址。
+fn is_rfc1918(v4: &std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
 }
 
 /// 应用权威状态：路由编辑器、引擎服务、设置、网络身份与运行时资源句柄。
