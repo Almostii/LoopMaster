@@ -18,10 +18,14 @@ use loopmaster_audio_core::RouteGraph;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use loopmaster_audio_windows::AudioEngineState;
+
+use crate::command::EngineCommand;
 use crate::config::{AppConfig, ConfigError};
 use crate::engine::EngineService;
+use crate::error::ServiceError;
 use crate::network::{NetworkBridge, NetworkDiscovery};
-use crate::route::RouteEditor;
+use crate::route::{RouteEdit, RouteEditor};
 use crate::web_server::WebServerHandle;
 
 /// 应用设置 DTO（前端设置页持久化的内容）。
@@ -239,6 +243,57 @@ impl StateHub {
     /// 当前路由草稿快照（权威状态读投影）。
     pub fn route_snapshot(&self) -> RouteGraph {
         self.editor().draft().clone()
+    }
+
+    /// 把一次路由编辑应用到权威状态（含运行中引擎的 send 级热更新转发）。
+    ///
+    /// 语义与壳层 `apply_route_edit` 一致：克隆草稿应用编辑，失败不改状态；
+    /// 运行中的引擎收到 send 级热更新后立即生效；成功后整体替换草稿并 bump。
+    /// `/ws` 上行控制（子任务 2）走此入口，与桌面 Tauri 命令共用同一事实源。
+    pub fn apply_route_edit(&self, edit: RouteEdit) -> Result<(), ServiceError> {
+        let _operation = self.route_operation();
+        let mut next = self.editor().clone();
+        next.apply(edit.clone()).map_err(ServiceError::from)?;
+        self.forward_edit_to_engine(&edit)?;
+        self.replace_editor(next);
+        Ok(())
+    }
+
+    /// 把 send 级编辑热更新转发给运行中的引擎；未运行或无匹配时跳过。
+    ///
+    /// 仅 `SetSendGain` / `SetSendMuted` / `SetSendEnabled` 有热更新命令；
+    /// 其余编辑（拓扑变化）在下次启动引擎时生效。
+    pub fn forward_edit_to_engine(&self, edit: &RouteEdit) -> Result<(), ServiceError> {
+        let command = match edit {
+            RouteEdit::SetSendGain { send_id, gain_db } => Some(EngineCommand::SetGain {
+                send_id: send_id.clone(),
+                gain_db: *gain_db,
+            }),
+            RouteEdit::SetSendMuted { send_id, muted } => Some(EngineCommand::SetMuted {
+                send_id: send_id.clone(),
+                muted: *muted,
+            }),
+            RouteEdit::SetSendEnabled { send_id, enabled } => Some(EngineCommand::SetSendEnabled {
+                send_id: send_id.clone(),
+                enabled: *enabled,
+            }),
+            _ => None,
+        };
+        let Some(command) = command else {
+            return Ok(());
+        };
+        let engine_slot = self.engine();
+        let engine = match engine_slot.as_ref() {
+            Some(engine) => engine,
+            None => return Ok(()), // 引擎尚未创建
+        };
+        if engine.status().state != AudioEngineState::Running {
+            return Ok(()); // 未运行：草稿已更新，下次启动生效
+        }
+        engine.command(command)?;
+        drop(engine_slot);
+        self.bump(); // 引擎内部状态已变（revision 应递增）
+        Ok(())
     }
 
     /// 整体替换路由编辑器（`load_config`、重建编辑图后调用）。

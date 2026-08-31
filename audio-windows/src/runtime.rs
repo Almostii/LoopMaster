@@ -179,6 +179,9 @@ pub struct AudioEngineStats {
     /// 每条 send 的逐通道（L/R）输出峰值幅度（0.0~1.0，静音为 0.0）。
     /// 键为 send id；值 `[left_peak, right_peak]`。用于逐通道电平表。
     pub send_peaks: std::collections::HashMap<String, [f32; 2]>,
+    /// 每条 send 的逐通道（L/R）RMS 幅度（0.0~1.0，静音为 0.0）。
+    /// 键为 send id；值 `[left_rms, right_rms]`。与 `send_peaks` 同批产生。
+    pub send_rms: std::collections::HashMap<String, [f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -212,6 +215,8 @@ struct Counters {
     /// 每条 send 的逐通道（L/R）输出峰值，随时间取最大值并衰减。
     /// 用 Mutex<HashMap> 承载，因为需要按 send id 动态读写并整体快照。
     send_peaks: Mutex<std::collections::HashMap<loopmaster_audio_core::SendId, [f32; 2]>>,
+    /// 每条 send 的逐通道（L/R）RMS，随 block 更新（与峰值同批）。
+    send_rms: Mutex<std::collections::HashMap<loopmaster_audio_core::SendId, [f32; 2]>>,
 }
 
 impl Counters {
@@ -241,6 +246,13 @@ impl Counters {
                 .expect("峰值锁未中毒")
                 .iter()
                 .map(|(id, peaks)| (id.0.clone(), *peaks))
+                .collect(),
+            send_rms: self
+                .send_rms
+                .lock()
+                .expect("RMS 锁未中毒")
+                .iter()
+                .map(|(id, rms)| (id.0.clone(), *rms))
                 .collect(),
         }
     }
@@ -301,6 +313,7 @@ impl AudioEngine {
                 rendered_peak: AtomicU32::new(0),
                 rendered_non_silent_blocks: AtomicU64::new(0),
                 send_peaks: Mutex::new(std::collections::HashMap::new()),
+                send_rms: Mutex::new(std::collections::HashMap::new()),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
@@ -1195,7 +1208,7 @@ fn mixer_worker(
                 INTERNAL_CHANNELS,
             ) {
                 Ok(next_plan) => {
-                    // plan 变更时清理已不存在的 send 峰值，避免旧路由的峰值残留。
+                    // plan 变更时清理已不存在的 send 峰值/RMS，避免旧路由数据残留。
                     {
                         let valid_ids: std::collections::HashSet<_> = next_plan
                             .send_peaks()
@@ -1204,6 +1217,8 @@ fn mixer_worker(
                             .collect();
                         let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
                         peaks.retain(|id, _| valid_ids.contains(id));
+                        let mut rms = counters.send_rms.lock().expect("RMS 锁未中毒");
+                        rms.retain(|id, _| valid_ids.contains(id));
                     }
                     plan = next_plan;
                     counters.graph_updates.fetch_add(1, Ordering::Relaxed);
@@ -1273,13 +1288,18 @@ fn mixer_worker(
             fail(&state, &stop, &error, e.to_string());
             return Err(());
         }
-        // 收集每条 send 的逐通道（L/R）峰值。
-        // 直接采用当前处理块的峰值，由前端负责 peak-hold / decay 的平滑显示。
+        // 收集每条 send 的逐通道（L/R）峰值与 RMS。
+        // 直接采用当前处理块的数值，由前端负责 peak-hold / decay 的平滑显示。
         {
             let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
             for (id, block_peaks) in plan.send_peaks() {
                 let entry = peaks.entry(id.clone()).or_insert([0.0f32; 2]);
                 entry.copy_from_slice(block_peaks);
+            }
+            let mut rms = counters.send_rms.lock().expect("RMS 锁未中毒");
+            for (id, block_rms) in plan.send_rms() {
+                let entry = rms.entry(id.clone()).or_insert([0.0f32; 2]);
+                entry.copy_from_slice(block_rms);
             }
         }
 
