@@ -4,8 +4,15 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import "./App.css";
 
-// 远程控制台入口。子任务 3 将替换为触控调音台（推子/Mute/电平表）；
-// 当前为占位页，用于验证 rust-embed 打包与 HTTPS 分发链路。
+// PWA：注册 Service Worker（secure context 下生效；HTTP 局域网不注册）。
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      // 注册失败不阻断主流程（如 HTTP 局域网模式）。
+    });
+  });
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App />

@@ -72,6 +72,9 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(64);
     let mut seq_cache = SeqCache::default();
     let mut meter_rx = state.meter_tx.subscribe();
+    // 权威状态 revision 订阅：跳变时重推 initial_state（实现"revision 跳变 →
+    // 重新拉全量快照"，保证多客户端一致）。
+    let mut revision_rx = state.hub.subscribe();
 
     let reader = async {
         while let Some(message) = stream.next().await {
@@ -115,6 +118,24 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                     // Lagged：广播被丢弃属预期，客户端按 revision 重拉快照。
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
+                },
+                changed = revision_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    // 权威状态变化：重推全量快照；标记 watch 已消费避免空转。
+                    let snapshot = json!({
+                        "event": "initial_state",
+                        "data": build_initial_state(&state.hub),
+                    });
+                    if sink
+                        .send(Message::Text(snapshot.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let _ = revision_rx.borrow_and_update();
                 },
             }
         }
