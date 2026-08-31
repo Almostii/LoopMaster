@@ -801,4 +801,523 @@ mod tests {
         handle.shutdown();
         let _ = std::fs::remove_dir_all(&config_dir);
     }
+
+    // ---------------------------------------------------------------------------
+    // 6.2 收尾验收（排期 §2.2）
+    // ---------------------------------------------------------------------------
+
+    /// 在 hub 上准备 2 个 send（send_mic / send_music → bus_main），供并发/隔离/延迟测试。
+    fn populate_two_sends(hub: &StateHub) {
+        use crate::route::RouteEdit;
+        use loopmaster_audio_core::{
+            BusId, BusSpec, EndpointId, SendId, SendSpec, SinkId, SinkKind, SinkSpec, SourceId,
+            SourceKind, SourceSpec,
+        };
+        for (source_id, name) in [("src_mic", "麦克风"), ("src_music", "音乐")] {
+            hub.apply_route_edit(RouteEdit::AddSource(SourceSpec {
+                id: SourceId(source_id.into()),
+                kind: SourceKind::DeviceCapture,
+                endpoint_id: Some(EndpointId(format!("ep-in-{source_id}"))),
+                process_id: None,
+                executable_path: None,
+                stream_name: None,
+                display_name: name.into(),
+            }))
+            .unwrap();
+        }
+        hub.apply_route_edit(RouteEdit::AddBus(BusSpec {
+            id: BusId("bus_main".into()),
+            display_name: "主通道".into(),
+        }))
+        .unwrap();
+        hub.apply_route_edit(RouteEdit::AddSink(SinkSpec {
+            id: SinkId("out_main".into()),
+            endpoint_id: EndpointId("ep-out-1".into()),
+            display_name: "扬声器".into(),
+            kind: SinkKind::Device,
+            stream_name: None,
+            remote_addr: None,
+        }))
+        .unwrap();
+        for send_id in ["send_mic", "send_music"] {
+            hub.apply_route_edit(RouteEdit::SetSend(SendSpec::SourceToBus {
+                id: SendId(send_id.into()),
+                source_id: SourceId(format!("src_{}", send_id.trim_start_matches("send_"))),
+                bus_id: BusId("bus_main".into()),
+                gain_db: 0.0,
+                muted: false,
+                enabled: true,
+                channel_map: Vec::new(),
+            }))
+            .unwrap();
+        }
+    }
+
+    /// 读取 WS 流直到某条**文本**消息满足谓词（自动跳过 meter 二进制帧）。
+    async fn ws_read_text<S>(stream: &mut S, pred: impl Fn(&str) -> bool) -> String
+    where
+        S: futures_util::Stream<
+                Item = Result<
+                    tokio_tungstenite::tungstenite::Message,
+                    tokio_tungstenite::tungstenite::Error,
+                >,
+            > + Unpin,
+    {
+        use futures_util::StreamExt as _;
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("读取 WS 消息超时")
+                .expect("WS 流结束")
+                .expect("WS 协议错误");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                if pred(&text) {
+                    return text;
+                }
+            }
+        }
+    }
+
+    /// 等待一次 `initial_state` 重推（增益 -3.0）；`expect_ack` 时同时确认收到过 ack。
+    async fn await_revision_resync<S>(stream: &mut S, expect_ack: bool) -> (String, bool)
+    where
+        S: futures_util::Stream<
+                Item = Result<
+                    tokio_tungstenite::tungstenite::Message,
+                    tokio_tungstenite::tungstenite::Error,
+                >,
+            > + Unpin,
+    {
+        let mut ack_seen = false;
+        let mut resync: Option<String> = None;
+        loop {
+            let text = ws_read_text(stream, |_| true).await;
+            if text.contains(r#""ack""#) {
+                ack_seen = true;
+            }
+            if resync.is_none() && text.contains("initial_state") && text.contains("-3.0") {
+                resync = Some(text);
+            }
+            if resync.is_some() && (!expect_ack || ack_seen) {
+                return (resync.take().unwrap(), ack_seen);
+            }
+        }
+    }
+
+    /// 读取直到收到 Close 帧或流结束，返回 (close_code, reason)。
+    async fn ws_read_close<S>(stream: &mut S) -> (u16, String)
+    where
+        S: futures_util::Stream<
+                Item = Result<
+                    tokio_tungstenite::tungstenite::Message,
+                    tokio_tungstenite::tungstenite::Error,
+                >,
+            > + Unpin,
+    {
+        use futures_util::StreamExt as _;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(Some(frame))))) => {
+                    let code: u16 = frame.code.into();
+                    return (code, frame.reason.to_string());
+                }
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(None)))) => {
+                    return (1000, String::new())
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_))) | Ok(None) => return (0, "stream-ended".into()),
+                Err(_) => panic!("等待吊销 close 超时"),
+            }
+        }
+    }
+
+    /// §2.2 并发连接（待冻结）：8 客户端收 initial_state、变更后一致重推、控制互不串扰。
+    #[tokio::test]
+    async fn concurrent_clients_receive_consistent_revision_resync() {
+        use futures_util::SinkExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-conc-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        populate_two_sends(&hub);
+
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                meter_hz: 30,
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let origin = format!("http://127.0.0.1:{}", handle.addr().port());
+
+        // 8 个客户端同时建立连接，各自收到 initial_state。
+        const CLIENT_COUNT: usize = 8;
+        let mut clients = Vec::with_capacity(CLIENT_COUNT);
+        for index in 0..CLIENT_COUNT {
+            let request = ws_request(&url, None, &origin);
+            let connected = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio_tungstenite::connect_async(request),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("客户端 {index} connect_async 超时（5s）"));
+            let (mut ws, _) = connected.expect("客户端应连接成功");
+            let first = ws_read_text(&mut ws, |text| text.contains("initial_state")).await;
+            assert!(
+                first.contains("send_mic"),
+                "客户端 {index} 应收到初始快照: {first}"
+            );
+            clients.push(ws);
+        }
+
+        // 客户端 0 修改 send_mic 增益。
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            clients[0].send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "seq": 42,
+                    "action": "set_send_gain",
+                    "data": { "send_id": "send_mic", "gain_db": -3.0 }
+                })
+                .to_string(),
+            )),
+        )
+        .await
+        .expect("客户端 0 发送控制超时（5s）")
+        .unwrap();
+
+        // 所有客户端都应收到一致的重推：revision 相同、send_mic=-3.0、send_music=0.0。
+        let mut expected_revision: Option<u64> = None;
+        for (index, client) in clients.iter_mut().enumerate() {
+            let (text, ack_seen) = await_revision_resync(client, index == 0).await;
+            assert!(
+                ack_seen || index != 0,
+                "客户端 0 应收到 set_send_gain 的 ack"
+            );
+            let value: serde_json::Value = serde_json::from_str(&text).expect("重推应为合法 JSON");
+            let revision = value["data"]["state_revision"]
+                .as_u64()
+                .expect("应有 state_revision");
+            match expected_revision {
+                None => expected_revision = Some(revision),
+                Some(prev) => assert_eq!(
+                    prev, revision,
+                    "客户端 {index} 的 revision 应与其余客户端一致"
+                ),
+            }
+            let sends = value["data"]["sends"].as_array().expect("应有 sends 数组");
+            let mic_gain = sends
+                .iter()
+                .find(|send| send["send_id"] == "send_mic")
+                .expect("应找到 send_mic")["gain_db"]
+                .as_f64()
+                .unwrap();
+            let music_gain = sends
+                .iter()
+                .find(|send| send["send_id"] == "send_music")
+                .expect("应找到 send_music")["gain_db"]
+                .as_f64()
+                .unwrap();
+            assert_eq!(mic_gain, -3.0, "客户端 {index}: send_mic 增益应更新");
+            assert_eq!(
+                music_gain, 0.0,
+                "客户端 {index}: send_music 增益应保持不变（互不串扰）"
+            );
+        }
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// §2.2 配对凭证隔离：健康检查/静态页/配对响应/会话/持久化文件均不得泄露明文。
+    #[tokio::test]
+    async fn credential_isolation_no_secret_leak_on_public_surfaces() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-leak-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.json");
+        let mut config =
+            crate::config::AppConfig::new(loopmaster_audio_core::RouteGraph::default());
+        config.network.require_pairing = true;
+        config.save_to(&config_path).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_path));
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                ..Default::default()
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+        let addr = handle.addr();
+
+        // 完成一次真实配对，拿到 secret/pin/credential 三组敏感值。
+        let pairing = hub.auth().start_pairing();
+        let payload = format!(r#"{{"secret":"{}","client_name":"Phone"}}"#, pairing.secret);
+        let (status, pair_body, set_cookie) = http_request(
+            addr,
+            "POST",
+            "/api/auth/pair",
+            &[("Content-Type", "application/json")],
+            &payload,
+        )
+        .await;
+        assert_eq!(status, 200, "{pair_body}");
+        let cookie = set_cookie.split(';').next().unwrap().trim().to_string();
+        let credential = cookie.trim_start_matches("lm_device=").to_string();
+        assert!(!credential.is_empty(), "应取得凭证");
+
+        let secrets = [
+            pairing.secret.clone(),
+            pairing.pin.clone(),
+            credential.clone(),
+        ];
+        let assert_no_leak = |label: &str, text: &str| {
+            for secret in &secrets {
+                assert!(
+                    !text.contains(secret.as_str()),
+                    "{label} 泄露了敏感信息（{} 字符）",
+                    secret.len()
+                );
+            }
+        };
+
+        // 公开表面逐一扫描（凭证经 Set-Cookie 下发是设计机制，这里只查响应体）。
+        let body_only = |full: &str| full.split("\r\n\r\n").nth(1).unwrap_or(full).to_string();
+        let (status, body, _) = http_request(addr, "GET", "/api/health", &[], "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_no_leak("/api/health", &body);
+        assert_no_leak("/api/auth/pair 响应体", &body_only(&pair_body));
+        let (status, body, _) = http_request(addr, "GET", "/", &[], "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_no_leak("index.html", &body);
+        let (status, body, _) = http_request(addr, "GET", "/pair", &[], "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_no_leak("SPA fallback (/pair)", &body);
+        let (status, body, _) =
+            http_request(addr, "GET", "/api/auth/session", &[("Cookie", &cookie)], "").await;
+        assert_eq!(status, 200, "{body}");
+        assert_no_leak("已授权 session", &body);
+        let (status, body, _) = http_request(addr, "GET", "/api/auth/session", &[], "").await;
+        assert_eq!(status, 401, "{body}");
+        assert_no_leak("未授权 session", &body);
+
+        // 持久化文件只存哈希。
+        let disk =
+            std::fs::read_to_string(config_dir.join("trusted-devices.json")).expect("应已持久化");
+        assert_no_leak("trusted-devices.json", &disk);
+        assert!(disk.contains("credential_hash"), "{disk}");
+        assert!(
+            disk.split('"')
+                .any(|part| part.len() == 64 && part.chars().all(|c| c.is_ascii_hexdigit())),
+            "持久化文件应含 64 位十六进制凭证哈希: {disk}"
+        );
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// §2.2 控制响应延迟（待冻结基线）：200 次 set_send_gain→ack 往返，输出 p50/p95。
+    #[tokio::test]
+    async fn control_rpc_round_trip_latency_baseline() {
+        use futures_util::SinkExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-lat-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        populate_two_sends(&hub);
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                meter_hz: 30,
+            },
+            hub,
+        )
+        .expect("启动成功");
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let origin = format!("http://127.0.0.1:{}", handle.addr().port());
+        let request = ws_request(&url, None, &origin);
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("连接 /ws");
+        let _ = ws_read_text(&mut ws, |text| text.contains("initial_state")).await;
+
+        const SAMPLES: u32 = 200;
+        let mut latencies = Vec::with_capacity(SAMPLES as usize);
+        for seq in 1..=SAMPLES {
+            let payload = serde_json::json!({
+                "seq": seq,
+                "action": "set_send_gain",
+                "data": { "send_id": "send_mic", "gain_db": -3.0 }
+            })
+            .to_string();
+            let start = std::time::Instant::now();
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(payload))
+                .await
+                .unwrap();
+            let ack = ws_read_text(&mut ws, |text| {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+                    value.get("seq").and_then(|s| s.as_u64()) == Some(seq as u64)
+                        && value.get("ack").is_some()
+                } else {
+                    false
+                }
+            })
+            .await;
+            assert!(ack.contains(r#""ack":"set_send_gain""#), "{ack}");
+            latencies.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p50 = latencies[((latencies.len() as f64) * 0.50) as usize];
+        let p95 = latencies[((latencies.len() as f64) * 0.95) as usize];
+        println!(
+            "[rpc-latency] {SAMPLES} 次 set_send_gain→ack 往返：p50={p50:.2}ms p95={p95:.2}ms（待冻结基线）"
+        );
+        assert!(p95 < 200.0, "p95 {p95:.2}ms 应低于宽松上限 200ms（防回归）");
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// §2.2 可信设备与重连 + 忘记设备：断线重连免重配、重启后凭据恢复、
+    /// 忘记后原连接 close 4001、旧凭证拒连、其他设备不受影响。
+    #[tokio::test]
+    async fn trusted_device_reconnect_and_revoke_on_forget() {
+        use futures_util::SinkExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-recv-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("config.json");
+        let mut config =
+            crate::config::AppConfig::new(loopmaster_audio_core::RouteGraph::default());
+        config.network.require_pairing = true;
+        config.save_to(&config_path).unwrap();
+
+        let hub = std::sync::Arc::new(StateHub::new(config_path.clone()));
+        populate_two_sends(&hub);
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                ..Default::default()
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let origin = format!("http://127.0.0.1:{}", handle.addr().port());
+
+        // 配对两台设备。
+        let pairing_a = hub.auth().start_pairing();
+        let credential_a = hub
+            .auth()
+            .pair(Some(&pairing_a.secret), None, "PhoneA", "127.0.0.1")
+            .unwrap();
+        let pairing_b = hub.auth().start_pairing();
+        let credential_b = hub
+            .auth()
+            .pair(Some(&pairing_b.secret), None, "PhoneB", "127.0.0.1")
+            .unwrap();
+
+        let connect = |cookie: &str| {
+            let request = ws_request(&url, Some(&format!("lm_device={cookie}")), &origin);
+            tokio_tungstenite::connect_async(request)
+        };
+
+        // A 首次连接 → 正常关闭 → 同凭证重连（无需重新配对）。
+        let (mut ws_a, _) = connect(&credential_a).await.expect("A 首次连接成功");
+        let _ = ws_read_text(&mut ws_a, |text| text.contains("initial_state")).await;
+        ws_a.send(tokio_tungstenite::tungstenite::Message::Close(None))
+            .await
+            .unwrap();
+        drop(ws_a);
+
+        let (mut ws_a2, _) = connect(&credential_a)
+            .await
+            .expect("A 断线后同凭证重连成功");
+        let _ = ws_read_text(&mut ws_a2, |text| text.contains("initial_state")).await;
+        let (status, body, _) = http_request(
+            handle.addr(),
+            "GET",
+            "/api/auth/session",
+            &[("Cookie", &format!("lm_device={credential_a}"))],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "重连后会话应仍有效: {body}");
+        drop(ws_a2);
+
+        // 模拟应用重启：同一 config 目录重建 StateHub/AuthState，凭据应从磁盘恢复。
+        let hub2 = std::sync::Arc::new(StateHub::new(config_path.clone()));
+        assert!(
+            hub2.auth().verify_credential(Some(&credential_a)).is_some(),
+            "重启后 A 的凭证应仍有效"
+        );
+        assert!(
+            hub2.auth().verify_credential(Some(&credential_b)).is_some(),
+            "重启后 B 的凭证应仍有效"
+        );
+
+        // 吊销：A、B 同时在线，忘记 A → A 收到 close 4001，B 不受影响。
+        let (mut ws_a3, _) = connect(&credential_a).await.expect("A 重连成功");
+        let _ = ws_read_text(&mut ws_a3, |text| text.contains("initial_state")).await;
+        let (mut ws_b, _) = connect(&credential_b).await.expect("B 连接成功");
+        let _ = ws_read_text(&mut ws_b, |text| text.contains("initial_state")).await;
+
+        let device_a = hub
+            .auth()
+            .list_devices()
+            .into_iter()
+            .find(|device| device.name == "PhoneA")
+            .expect("应找到 PhoneA");
+        hub.auth().forget(&device_a.id).unwrap();
+
+        let (code, reason) = ws_read_close(&mut ws_a3).await;
+        assert_eq!(code, 4001, "A 的吊销关闭码应为 4001: {reason}");
+        ws_b.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "seq": 7,
+                "action": "set_send_gain",
+                "data": { "send_id": "send_mic", "gain_db": -3.0 }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let ack_b = ws_read_text(&mut ws_b, |text| {
+            text.contains(r#""ack":"set_send_gain""#) && text.contains(r#""seq":7"#)
+        })
+        .await;
+        assert!(ack_b.contains(r#""ack""#), "B 不应受忘记 A 影响: {ack_b}");
+
+        // A 旧凭证再连 → 401 拒绝。
+        assert!(
+            connect(&credential_a).await.is_err(),
+            "忘记后 A 旧凭证应被拒绝"
+        );
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
 }
