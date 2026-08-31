@@ -14,6 +14,38 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+/// 追加一行诊断日志到 `%LOCALAPPDATA%\com.loopmaster.app\loopmaster.log`。
+///
+/// 与 `frontend/src-tauri` 的 `log_line` 写同一文件（同一进程内），release 构建
+/// 在 Windows GUI 下 stderr 会被丢弃，文件日志是排查后台问题的唯一可靠来源。
+/// 失败时静默，不影响主流程。
+fn log_line(message: &str) {
+    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+        let path = std::path::PathBuf::from(path)
+            .join("com.loopmaster.app")
+            .join("loopmaster.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let line = format!(
+            "[{}] {message}\n",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+    eprintln!("[vban-bridge] {message}");
+}
+
 use loopmaster_audio_core::vban::clock_drift::ClockDriftCompensator;
 use loopmaster_audio_core::vban::jitter::VBanJitterBuffer;
 use loopmaster_audio_core::vban::packet::{
@@ -232,24 +264,52 @@ impl Drop for NetworkBridge {
     }
 }
 
+/// 一个接收流的运行时状态。
+struct RecvStreamState {
+    jitter: VBanJitterBuffer,
+    producer: AudioFifoProducer,
+    comp: ClockDriftCompensator,
+    /// 累积缓冲：VBAN 单包帧数通常小于混音 block 帧数（如 Float32 双声道单包
+    /// 最多 179 帧，而 block 为 480 帧）。必须**累积够一个完整 block 再写入
+    /// FIFO**，否则每包都被补静音推满 block，会让声音被大量静音斩断而严重失真
+    /// （2026-08-31 真机实测）。
+    accum: Vec<f32>,
+    /// 已成功写入 FIFO 的 block 数（诊断用）。
+    blocks_written: u64,
+    /// 最近一次收到的单包样本数（诊断用）。
+    last_packet_samples: usize,
+}
+
 /// 共享 UDP socket 的多流接收循环。
 ///
 /// 每个流（按 `stream_name` 匹配）持有一个独立 jitter buffer 与其混音 FIFO
 /// producer。循环 `recv_from` → 解析 VBAN 头 → 按流名分发 → 入 jitter →
 /// 抽帧写入对应 producer。
 fn recv_loop(socket: UdpSocket, streams: Vec<(String, AudioFifoProducer)>, stop: Arc<AtomicBool>) {
-    // 流名 -> (jitter, producer, 时钟漂移补偿器)。
-    let mut streams: HashMap<String, (VBanJitterBuffer, AudioFifoProducer, ClockDriftCompensator)> =
-        streams
-            .into_iter()
-            .map(|(name, producer)| {
-                // 目标水位：2 个包（初始候选值，真机联调时冻结）。
-                let comp = ClockDriftCompensator::new(2.0);
-                (name, (VBanJitterBuffer::new(), producer, comp))
-            })
-            .collect();
+    // 流名 -> 接收流状态。
+    let mut streams: HashMap<String, RecvStreamState> = streams
+        .into_iter()
+        .map(|(name, producer)| {
+            // 目标水位：2 个包（初始候选值，真机联调时冻结）。
+            let comp = ClockDriftCompensator::new(2.0);
+            let state = RecvStreamState {
+                jitter: VBanJitterBuffer::new(),
+                producer,
+                comp,
+                accum: Vec::new(),
+                blocks_written: 0,
+                last_packet_samples: 0,
+            };
+            (name, state)
+        })
+        .collect();
     let mut recv_buf = vec![0u8; VBAN_MAX_PACKET_SIZE];
-    let mut block = vec![0.0f32; DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS];
+    // 每个 block 的样本数（480 帧 × 2 声道）。
+    let block_samples = DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS;
+    log_line(&format!(
+        "recv_loop: 启动，block_samples={block_samples} 流数={}",
+        streams.len()
+    ));
 
     while !stop.load(Ordering::Acquire) {
         let (len, _peer) = match socket.recv_from(&mut recv_buf) {
@@ -259,7 +319,7 @@ fn recv_loop(socket: UdpSocket, streams: Vec<(String, AudioFifoProducer)>, stop:
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 // 无数据：顺带把各流已就绪的帧写走。
-                drain_all(&mut streams, &mut block);
+                drain_all(&mut streams, block_samples);
                 thread::sleep(std::time::Duration::from_millis(1));
                 continue;
             }
@@ -293,7 +353,7 @@ fn recv_loop(socket: UdpSocket, streams: Vec<(String, AudioFifoProducer)>, stop:
         let Some(stream_key) = stream_key else {
             continue;
         };
-        if let Some((jitter, _, _)) = streams.get_mut(&stream_key) {
+        if let Some(state) = streams.get_mut(&stream_key) {
             // 按位深解码 payload 为 f32。
             let Ok(bit_format) = header.bit_format() else {
                 continue;
@@ -309,40 +369,66 @@ fn recv_loop(socket: UdpSocket, streams: Vec<(String, AudioFifoProducer)>, stop:
             }
             let mut samples = vec![0.0f32; sample_count];
             decode_vban_payload(payload, bit_format, &mut samples);
-            let _ = jitter.push(header.nu_frame, &samples);
+            state.last_packet_samples = sample_count;
+            let _ = state.jitter.push(header.nu_frame, &samples);
         }
-        drain_all(&mut streams, &mut block);
+        drain_all(&mut streams, block_samples);
     }
+    log_line("recv_loop: 退出");
 }
 
-/// 把各流 jitter 已就绪的帧写入对应 producer（不满帧补静音到 block 长度）。
+/// 把各流 jitter 已就绪的帧**累积**到完整 block 后写入对应 producer。
+///
+/// 关键：VBAN 单包帧数通常小于混音 block 帧数（Float32 双声道单包最多 179 帧，
+/// block 为 480 帧）。必须凑够一个完整 block 才 push，**不能**把每个包补静音
+/// 后推满 block（2026-08-31 真机实测：早期实现正是如此，导致混音线程读到大量
+/// 静音 → 声音严重失真、完全无法收听）。
 ///
 /// 时钟漂移：基于 jitter 当前水位（fill_level）驱动 `ClockDriftCompensator`
-/// 计算采样率比例因子，输出到 stderr 便于诊断；真实的重采样对齐
-/// （`FixedOutputResampler::set_sample_rates` 微调）在真机联调阶段接入，
-/// 因为漂移比例需按设备实测冻结。
-fn drain_all(
-    streams: &mut HashMap<String, (VBanJitterBuffer, AudioFifoProducer, ClockDriftCompensator)>,
-    block: &mut [f32],
-) {
-    for (name, (jitter, producer, comp)) in streams.iter_mut() {
+/// 计算采样率比例因子，输出到日志便于诊断；真实的重采样对齐
+/// （`FixedOutputResampler::set_sample_rates` 微调）在真机调参后接入。
+fn drain_all(streams: &mut HashMap<String, RecvStreamState>, block_samples: usize) {
+    for (name, state) in streams.iter_mut() {
+        let RecvStreamState {
+            jitter,
+            producer,
+            comp,
+            accum,
+            blocks_written,
+            last_packet_samples,
+        } = state;
         // 时钟漂移：仅当流有数据（水位 > 0）时更新补偿器并诊断，
         // 避免空闲流在每个 drain 周期刷屏；比例因子仅供诊断，不改变输出。
         if jitter.fill_level() > 0 {
             let ratio = comp.update(jitter.fill_level(), 0.1);
             if (ratio - 1.0).abs() > 1e-3 {
-                eprintln!(
-                    "[vban:{name}] 时钟漂移比例 {:.6} (水位 {})",
-                    ratio,
+                log_line(&format!(
+                    "[vban:{name}] 时钟漂移比例 {ratio:.6} (水位 {})",
                     jitter.fill_level()
-                );
+                ));
             }
         }
+        // 把已就绪的帧追加到累积缓冲。
         while let Some(frame) = jitter.pop_next() {
-            block.fill(0.0);
-            let write_len = frame.len().min(block.len());
-            block[..write_len].copy_from_slice(&frame[..write_len]);
-            let _ = producer.push_interleaved(block);
+            accum.extend_from_slice(&frame);
+        }
+        // 累积够一个完整 block 才写入 FIFO；余量留在缓冲里等下一包。
+        let mut wrote = 0usize;
+        while accum.len() >= block_samples {
+            let chunk: Vec<f32> = accum.drain(..block_samples).collect();
+            if producer.push_interleaved(&chunk).is_ok() {
+                wrote += 1;
+            }
+        }
+        if wrote > 0 {
+            *blocks_written += wrote as u64;
+            // 首 block 与每 600 个 block（约每 6 秒）记录一次，避免刷屏。
+            if *blocks_written <= 3 || *blocks_written % 600 == 0 {
+                log_line(&format!(
+                    "[vban:{name}] 累积写入 {wrote} block（累计 {}），单包样本={last_packet_samples}，累积余量样本={}",
+                    blocks_written, accum.len()
+                ));
+            }
         }
     }
 }
@@ -441,8 +527,12 @@ mod tests {
         .unwrap();
 
         // 4) 发送合成音到接收端口，验证 bridge 接收写入 source FIFO。
+        // 接收端会**累积够一个完整混音 block（DEFAULT_BLOCK_FRAMES）** 才写入
+        // FIFO（避免把每个小包补静音推满 block 造成声音失真）。因此这里发送
+        // DEFAULT_BLOCK_FRAMES 帧的合成音，使累积立即凑满一个 block。
+        let block_samples = DEFAULT_BLOCK_FRAMES * CHANNELS;
         let mut sender = VBanSender::new().unwrap();
-        let test_samples: Vec<f32> = (0..BLOCK_SAMPLES)
+        let test_samples: Vec<f32> = (0..block_samples)
             .map(|i| ((i % 17) as f32 / 17.0) - 0.5)
             .collect();
         let _ = sender
@@ -459,8 +549,8 @@ mod tests {
         // 等待 bridge 接收并把帧写入 source FIFO。
         let mut received: Vec<f32> = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while received.len() < BLOCK_SAMPLES && std::time::Instant::now() < deadline {
-            let mut buf = vec![0.0f32; BLOCK_SAMPLES];
+        while received.len() < block_samples && std::time::Instant::now() < deadline {
+            let mut buf = vec![0.0f32; block_samples];
             if source_consumer
                 .pop_interleaved(&mut buf)
                 .map(|r| r.frames())
@@ -473,11 +563,11 @@ mod tests {
             }
         }
         assert!(
-            received.len() >= BLOCK_SAMPLES,
+            received.len() >= block_samples,
             "bridge 应把接收的网络帧写入 source FIFO"
         );
-        // Float32 往返应一致。
-        assert!(received[..BLOCK_SAMPLES]
+        // Float32 往返应一致（累积后按原顺序写出，不应插入静音）。
+        assert!(received[..block_samples]
             .iter()
             .zip(&test_samples)
             .all(|(a, b)| (a - b).abs() < 1e-5));
