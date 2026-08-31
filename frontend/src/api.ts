@@ -183,6 +183,57 @@ export function removeLocalCa(): Promise<CaTrustStatus> {
   return invoke<CaTrustStatus>("remove_local_ca");
 }
 
+export interface PairingInfo {
+  secret: string;
+  pin: string;
+  expires_in_secs: number;
+}
+
+export interface TrustedDevice {
+  id: string;
+  name: string;
+  permission: string;
+  last_seen_unix: number;
+}
+
+/** 开启配对窗口（5 分钟），返回 secret/PIN 供桌面渲染二维码。 */
+export function startPairing(): Promise<PairingInfo> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({ secret: "", pin: "", expires_in_secs: 0 });
+  }
+  return invoke<PairingInfo>("start_pairing");
+}
+
+/** 关闭配对窗口。 */
+export function stopPairing(): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("stop_pairing");
+}
+
+/** 当前配对窗口状态（未开启/已过期返回 null）。 */
+export function getPairingStatus(): Promise<PairingInfo | null> {
+  if (!isTauriRuntime) return Promise.resolve(null);
+  return invoke<PairingInfo | null>("get_pairing_status");
+}
+
+/** 已信任设备列表。 */
+export function listTrustedDevices(): Promise<TrustedDevice[]> {
+  if (!isTauriRuntime) return Promise.resolve([]);
+  return invoke<TrustedDevice[]>("list_trusted_devices");
+}
+
+/** 忘记单个可信设备（立即关闭其连接）。 */
+export function forgetDevice(deviceId: string): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("forget_device", { deviceId });
+}
+
+/** 重置全部局域网信任。 */
+export function resetTrust(): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("reset_trust");
+}
+
 /** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
 export function addManualVbanNode(params: {
   name: string;

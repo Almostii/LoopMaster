@@ -24,10 +24,11 @@ use tauri::Manager;
 use loopmaster_app_service::{local_ipv4_addresses, AppSettings, NodeIdentityBrief};
 use loopmaster_app_service::{AppConfig, ConfigError, DeviceCompatibility, DeviceStatus};
 use loopmaster_app_service::{
-    CaTrustStatus, DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService,
-    NetworkBridge, NetworkDiscovery, NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, ProcessModel,
-    ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent, StateHub,
-    WebServerConfig, CAPS_VBAN_AUDIO, DEFAULT_METER_HZ, DEFAULT_WEB_PORT, VBAN_SERVICE_PORT,
+    CaTrustStatus, DeviceFlow, DeviceModel, DeviceRepository, DeviceSummary, EngineCommand,
+    EngineService, NetworkBridge, NetworkDiscovery, NetworkEvent, NodeIdentity, NodeInfo, NodeMeta,
+    PairingInfo, ProcessModel, ProcessRepository, RouteEdit, RouteEditor, ServiceError,
+    ServiceEvent, StateHub, WebServerConfig, CAPS_VBAN_AUDIO, DEFAULT_METER_HZ, DEFAULT_WEB_PORT,
+    VBAN_SERVICE_PORT,
 };
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkKind,
@@ -1514,6 +1515,45 @@ fn remove_local_ca(state: tauri::State<'_, Arc<AppState>>) -> Result<CaTrustStat
     loopmaster_app_service::web_server::tls::remove_local_ca(&dir).map_err(|e| e.to_string())
 }
 
+/// 开启配对窗口（5 分钟，候选），返回 secret/PIN 供桌面渲染二维码。
+#[tauri::command]
+fn start_pairing(state: tauri::State<'_, Arc<AppState>>) -> PairingInfo {
+    state.auth().start_pairing()
+}
+
+/// 关闭配对窗口。
+#[tauri::command]
+fn stop_pairing(state: tauri::State<'_, Arc<AppState>>) {
+    state.auth().stop_pairing();
+}
+
+/// 当前配对窗口状态（未开启/已过期返回 None）。
+#[tauri::command]
+fn get_pairing_status(state: tauri::State<'_, Arc<AppState>>) -> Option<PairingInfo> {
+    state.auth().pairing_status()
+}
+
+/// 已信任设备列表（用于"忘记设备 / 重置全部"）。
+#[tauri::command]
+fn list_trusted_devices(state: tauri::State<'_, Arc<AppState>>) -> Vec<DeviceSummary> {
+    state.auth().list_devices()
+}
+
+/// 忘记单个可信设备（立即关闭其 /ws 连接）。
+#[tauri::command]
+fn forget_device(state: tauri::State<'_, Arc<AppState>>, device_id: String) -> Result<(), String> {
+    state
+        .auth()
+        .forget(&device_id)
+        .map_err(|error| error.to_string())
+}
+
+/// 重置全部局域网信任。
+#[tauri::command]
+fn reset_trust(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.auth().reset().map_err(|error| error.to_string())
+}
+
 /// 停止内嵌 Web 控制台（幂等；优雅关闭放后台线程，不阻塞 UI）。
 fn stop_web_console(state: &AppState) {
     let handle = state.web().take();
@@ -2439,6 +2479,12 @@ pub fn run() {
             get_local_ca_status,
             install_local_ca,
             remove_local_ca,
+            start_pairing,
+            stop_pairing,
+            get_pairing_status,
+            list_trusted_devices,
+            forget_device,
+            reset_trust,
             add_manual_vban_node,
             set_network_enabled,
             list_devices,

@@ -9,16 +9,18 @@
 //! - 客户端检测 revision 跳变后必须重新拉取全量快照（broadcast 允许慢消费者丢消息）。
 
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
-    State,
+    ConnectInfo, State,
 };
-use axum::response::Response;
-use axum::routing::get;
-use axum::Router;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,6 +32,9 @@ use loopmaster_audio_core::{
 
 use crate::route::RouteEdit;
 use crate::state::StateHub;
+use crate::web_server::auth::{
+    extract_cookie, AuthError, AuthState, DeviceSummary, COOKIE_MAX_AGE, COOKIE_NAME,
+};
 
 /// 控制消息 `seq` 幂等缓存上限（超出后淘汰最旧，防止无限增长）。
 const MAX_SEQ_CACHE: usize = 512;
@@ -39,23 +44,47 @@ const MAX_SEQ_CACHE: usize = 512;
 pub struct WsState {
     pub hub: Arc<StateHub>,
     pub meter_tx: broadcast::Sender<Vec<u8>>,
+    /// 配对与可信设备。
+    pub auth: Arc<AuthState>,
+    /// 当前服务是否为 HTTPS/WSS（决定 `Secure` Cookie 与凭证策略）。
+    pub is_https: bool,
 }
 
-/// `/ws` 路由（带 `WsState`）。
+/// 实时 + 认证路由（带 `WsState`）。
 pub fn ws_router() -> Router<WsState> {
-    Router::new().route("/ws", get(ws_handler))
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/api/auth/pair", post(pair_handler))
+        .route("/api/auth/session", get(session_handler))
+        .route("/api/auth/forget", post(forget_handler))
 }
 
-/// WebSocket Upgrade 入口。Origin/Cookie 鉴权属子任务 4，M2 先不校验。
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<WsState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+/// WebSocket Upgrade 入口：先校验 Origin 与可信设备 Cookie，通过才升级。
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<WsState>,
+    headers: HeaderMap,
+) -> Response {
+    // Origin 校验：Cookie 有效但 Origin 不匹配时返回 403（任务书 §4.4）。
+    if !origin_matches_request(&headers) {
+        return (StatusCode::FORBIDDEN, "403 Forbidden").into_response();
+    }
+    let cookie = extract_cookie(&headers, COOKIE_NAME);
+    let Some(device) = state.auth.verify_credential(cookie.as_deref()) else {
+        return (StatusCode::UNAUTHORIZED, "401 Unauthorized").into_response();
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, state, device))
 }
 
 /// 单个连接的主循环：先下发快照，再并行走「控制读 + 广播写」。
-async fn handle_socket(socket: WebSocket, state: WsState) {
+async fn handle_socket(socket: WebSocket, state: WsState, device: DeviceSummary) {
     let (mut sink, mut stream) = socket.split();
 
-    // 连接即下发全量快照（鉴权在子任务 4 接入）。
+    // 吊销通知：设备被忘记/重置时立即关闭本连接。
+    let (revoke_tx, mut revoke_rx) = mpsc::channel::<()>(1);
+    state.auth.register_connection(&device.id, revoke_tx);
+
+    // 连接即下发全量快照。
     let initial = json!({
         "event": "initial_state",
         "data": build_initial_state(&state.hub),
@@ -137,6 +166,16 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
                     }
                     let _ = revision_rx.borrow_and_update();
                 },
+                _revoked = revoke_rx.recv() => {
+                    // 设备被忘记/重置：立即关闭连接（任务书 §4.4 忘记设备验收项）。
+                    let _ = sink
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 4001,
+                            reason: "revoked".into(),
+                        })))
+                        .await;
+                    break;
+                },
             }
         }
     };
@@ -145,6 +184,142 @@ async fn handle_socket(socket: WebSocket, state: WsState) {
         _ = reader => {}
         _ = writer => {}
     }
+}
+
+// ---------------------------------------------------------------------------
+// 配对与可信设备（子任务 4）
+// ---------------------------------------------------------------------------
+
+/// 配对请求体：`secret` 或 `pin` 二选一（冻结文档 §2）。
+#[derive(Deserialize)]
+struct PairRequest {
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default)]
+    pin: Option<String>,
+    client_name: String,
+}
+
+/// `POST /api/auth/pair`：配对成功后签发持久化凭证（Set-Cookie）。
+async fn pair_handler(
+    State(state): State<WsState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    let client_ip = addr.ip().to_string();
+    match state.auth.pair(
+        body.secret.as_deref(),
+        body.pin.as_deref(),
+        &body.client_name,
+        &client_ip,
+    ) {
+        Ok(credential) => {
+            let mut response = (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "device_name": body.client_name })),
+            )
+                .into_response();
+            response
+                .headers_mut()
+                .insert(header::SET_COOKIE, set_cookie(&credential, state.is_https));
+            response
+        }
+        Err(error) => auth_error_response(&error),
+    }
+}
+
+/// `GET /api/auth/session`：查询当前连接所属可信设备与权限。
+async fn session_handler(State(state): State<WsState>, headers: HeaderMap) -> Response {
+    let cookie = extract_cookie(&headers, COOKIE_NAME);
+    match state.auth.verify_credential(cookie.as_deref()) {
+        Some(device) => Json(json!({ "ok": true, "device": device })).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/auth/forget`：忘记当前设备（删除凭证并关闭其连接）。
+async fn forget_handler(State(state): State<WsState>, headers: HeaderMap) -> Response {
+    let cookie = extract_cookie(&headers, COOKIE_NAME);
+    let Some(device) = state.auth.verify_credential(cookie.as_deref()) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    };
+    match state.auth.forget(&device.id) {
+        Ok(()) => {
+            let mut response = (StatusCode::OK, Json(json!({ "ok": true }))).into_response();
+            // 同时清掉本机 Cookie。
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&format!(
+                    "{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+                ))
+                .expect("Set-Cookie 头应合法"),
+            );
+            response
+        }
+        Err(error) => auth_error_response(&error),
+    }
+}
+
+fn auth_error_response(error: &AuthError) -> Response {
+    let status = match error {
+        AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        AuthError::PairingClosed => StatusCode::FORBIDDEN,
+        AuthError::InvalidCredential => StatusCode::UNAUTHORIZED,
+        AuthError::Unauthorized => StatusCode::UNAUTHORIZED,
+        AuthError::DeviceNotFound => StatusCode::NOT_FOUND,
+        AuthError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(json!({ "error": "auth_failed", "message": error.to_string() })),
+    )
+        .into_response()
+}
+
+/// 构造持久化凭证 Cookie（HTTPS 模式附加 `Secure`；HTTP 模式浏览器会拒绝
+/// `Secure` 属性，按 ADR-007 仅提供轻量配对）。
+fn set_cookie(credential: &str, is_https: bool) -> HeaderValue {
+    let secure = if is_https { "; Secure" } else { "" };
+    HeaderValue::from_str(&format!(
+        "{COOKIE_NAME}={credential}; Path=/; HttpOnly; SameSite=Strict; Max-Age={COOKIE_MAX_AGE}{secure}"
+    ))
+    .expect("Set-Cookie 头应合法")
+}
+
+/// WebSocket Origin 校验：Origin 的主机/端口必须与请求 Host 一致。
+///
+/// 无 Origin 头（非浏览器客户端）放行；不匹配返回 false（上层 403）。
+fn origin_matches_request(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let Ok(origin_uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(origin_host) = origin_uri.host() else {
+        return false;
+    };
+    let origin_port = origin_uri.port_u16();
+    let request_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let (host, port) = match request_host.split_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok()),
+        None => (request_host, None),
+    };
+    host == origin_host && port == origin_port
 }
 
 // ---------------------------------------------------------------------------

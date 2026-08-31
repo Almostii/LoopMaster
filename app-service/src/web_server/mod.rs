@@ -10,6 +10,7 @@
 //!   供手机 App（Phase 3，固定本机 CA）与高级场景使用；
 //! - `/ws` 双向通道属子任务 2。
 
+pub mod auth;
 pub mod routes;
 pub mod tls;
 pub mod ws;
@@ -267,15 +268,17 @@ async fn serve(
     let mut revision_rx = hub.subscribe();
     let revision_task = tokio::spawn(async move { while revision_rx.changed().await.is_ok() {} });
 
-    // meter 广播任务 + /ws 路由（子任务 2）。
+    // meter 广播任务 + /ws 路由（子任务 2）+ 配对/可信设备（子任务 4）。
     let meter_tx = ws::spawn_meter_task(hub.clone(), config.meter_hz);
     let app = ws::ws_router()
         .with_state(ws::WsState {
             hub: hub.clone(),
             meter_tx,
+            auth: hub.auth().clone(),
+            is_https: config.tls,
         })
         .merge(routes::router())
-        .into_make_service();
+        .into_make_service_with_connect_info::<SocketAddr>();
     match server {
         ServeKind::Http(server) => {
             let _ = server.handle(server_handle).serve(app).await;
@@ -498,8 +501,19 @@ mod tests {
         )
         .expect("启动成功");
 
+        // 配对并取得凭证（/ws 现在要求可信设备 Cookie）。
+        let pairing = hub.auth().start_pairing();
+        let credential = hub
+            .auth()
+            .pair(Some(&pairing.secret), None, "TestPhone", "127.0.0.1")
+            .unwrap();
         let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
-        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        let request = ws_request(
+            &url,
+            Some(&format!("lm_device={credential}")),
+            &format!("http://127.0.0.1:{}", handle.addr().port()),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("连接 /ws");
 
@@ -586,11 +600,21 @@ mod tests {
                     tls: false,
                     meter_hz: hz,
                 },
-                hub,
+                hub.clone(),
             )
             .expect("启动成功");
+            let pairing = hub.auth().start_pairing();
+            let credential = hub
+                .auth()
+                .pair(Some(&pairing.secret), None, "TestPhone", "127.0.0.1")
+                .unwrap();
             let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
-            let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let request = ws_request(
+                &url,
+                Some(&format!("lm_device={credential}")),
+                &format!("http://127.0.0.1:{}", handle.addr().port()),
+            );
+            let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
             // 丢弃 initial_state。
             let _ = tokio::time::timeout(Duration::from_secs(5), ws.next())
                 .await
@@ -615,5 +639,159 @@ mod tests {
             );
             handle.shutdown();
         }
+    }
+
+    /// 构造带自定义 Cookie/Origin 的 WS 握手请求（自动生成合法握手头）。
+    fn ws_request(url: &str, cookie: Option<&str>, origin: &str) -> axum::http::Request<()> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = url.into_client_request().unwrap();
+        if let Some(cookie) = cookie {
+            request
+                .headers_mut()
+                .insert("Cookie", cookie.parse().unwrap());
+        }
+        request
+            .headers_mut()
+            .insert("Origin", origin.parse().unwrap());
+        request
+    }
+
+    /// 极简 HTTP 客户端（测试用）：发送请求并返回状态码、响应文本与 Set-Cookie。
+    async fn http_request(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, String, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut request =
+            format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+        for (key, value) in headers {
+            request.push_str(&format!("{key}: {value}\r\n"));
+        }
+        if !body.is_empty() {
+            request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        request.push_str("\r\n");
+        if !body.is_empty() {
+            request.push_str(body);
+        }
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buffer = Vec::new();
+        stream.read_to_end(&mut buffer).await.unwrap();
+        let text = String::from_utf8_lossy(&buffer).to_string();
+        let status = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let set_cookie = text
+            .split("\r\n")
+            .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
+            .map(|line| {
+                line.trim_start_matches("set-cookie:")
+                    .trim_start_matches("Set-Cookie:")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        (status, text, set_cookie)
+    }
+
+    /// 配对全流程 + /ws 鉴权与 Origin 拒绝（任务书 §4.4 验收项）。
+    #[tokio::test]
+    async fn pair_flow_and_ws_auth_and_origin_rejection() {
+        use futures_util::StreamExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-auth-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                ..Default::default()
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+        let addr = handle.addr();
+
+        // 1) 未开启配对窗口 → 403。
+        let (status, _, _) = http_request(
+            addr,
+            "POST",
+            "/api/auth/pair",
+            &[("Content-Type", "application/json")],
+            r#"{"client_name":"Phone"}"#,
+        )
+        .await;
+        assert_eq!(status, 403, "未开启配对窗口应 403");
+
+        // 2) 开启窗口后配对成功 → 200 + Set-Cookie 持久化凭证。
+        let pairing = hub.auth().start_pairing();
+        let payload = format!(r#"{{"secret":"{}","client_name":"Phone"}}"#, pairing.secret);
+        let (status, body, set_cookie) = http_request(
+            addr,
+            "POST",
+            "/api/auth/pair",
+            &[("Content-Type", "application/json")],
+            &payload,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            set_cookie.contains("lm_device="),
+            "应签发凭证 Cookie: {set_cookie}"
+        );
+        assert!(
+            set_cookie.to_ascii_lowercase().contains("httponly"),
+            "凭证 Cookie 必须 HttpOnly: {set_cookie}"
+        );
+        let cookie = set_cookie.split(';').next().unwrap().trim().to_string();
+
+        // 3) 带凭证 GET /api/auth/session → ok。
+        let (status, body, _) =
+            http_request(addr, "GET", "/api/auth/session", &[("Cookie", &cookie)], "").await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(r#""ok":true"#), "{body}");
+
+        // 4) /ws：无凭证 → 拒绝；有凭证但 Origin 不匹配 → 403。
+        let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let origin = format!("http://127.0.0.1:{}", addr.port());
+        let no_cookie = ws_request(&url, None, &origin);
+        assert!(
+            tokio_tungstenite::connect_async(no_cookie).await.is_err(),
+            "无凭证应被拒绝"
+        );
+        let bad_origin = ws_request(&url, Some(&cookie), "http://evil.example.com");
+        assert!(
+            tokio_tungstenite::connect_async(bad_origin).await.is_err(),
+            "Origin 不匹配应 403"
+        );
+
+        // 5) 有效凭证 + 匹配 Origin → 连接成功并收到 initial_state。
+        let good = ws_request(&url, Some(&cookie), &origin);
+        let (mut ws, _) = tokio_tungstenite::connect_async(good)
+            .await
+            .expect("应连接成功");
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("initial_state 超时")
+            .expect("流结束")
+            .expect("协议错误");
+        assert!(
+            first.into_text().unwrap().contains("initial_state"),
+            "连接应下发 initial_state"
+        );
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
     }
 }
