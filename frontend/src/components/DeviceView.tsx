@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import type { NetworkNodeBrief, NodeIdentityBrief } from "../types";
 import {
   checkNetworkFirewall,
   enableNetworkFirewall,
+  forgetDevice,
   getNetworkNodes,
   getNodeIdentity,
+  getPairingRequired,
+  getPairingStatus,
+  listTrustedDevices,
   onNodeRemoved,
   onNodeResolved,
+  resetTrust,
   setNetworkEnabled,
+  setPairingRequired,
+  startPairing,
+  stopPairing,
   type FirewallCheckResult,
+  type PairingInfo,
+  type TrustedDevice,
 } from "../api";
 
 const emptyIdentity: NodeIdentityBrief = {
@@ -17,6 +28,27 @@ const emptyIdentity: NodeIdentityBrief = {
   network_enabled: false,
   web_port: 0,
 };
+
+/** VBAN 默认端口（与后端 VBAN_SERVICE_PORT 一致），仅用于状态展示。 */
+const vbanPortLabel = "6980";
+
+/** 把 Unix 秒格式化为相对中文时间（用于「最后活跃」展示）。 */
+function formatRelative(unix: number): string {
+  if (!Number.isFinite(unix) || unix <= 0) return "从未活跃";
+  const diffSec = Math.max(0, Math.floor(Date.now() / 1000 - unix));
+  if (diffSec < 60) return "刚刚活跃";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前活跃`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前活跃`;
+  return `${Math.floor(diffSec / 86400)} 天前活跃`;
+}
+
+/** 把配对剩余秒数格式化为 `M:SS` 显示。 */
+function formatCountdown(secs: number): string {
+  const safe = Math.max(0, Math.floor(secs));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 
 /** 电脑显示器图标（紧凑卡片顶部使用）。 */
 function MonitorDeviceIcon() {
@@ -119,34 +151,195 @@ export default function DeviceView() {
 
   // 切换网络功能开关
   const [toggling, setToggling] = useState(false);
-  // 防火墙放行状态（开启时自动放行，失败才展示引导）。
+  // 防火墙放行状态（开启网络功能时展示两条规则各自状态）。
   const [firewall, setFirewall] = useState<FirewallCheckResult | null>(null);
+  // 手动"重新放行"进行中标记与失败文案（UAC 被拒/规则校验失败时展示）。
+  const [firewallToggling, setFirewallToggling] = useState(false);
+  const [firewallError, setFirewallError] = useState<string | null>(null);
+  // 配对开关与可信设备（默认开放访问；开启"要求配对"后展示二维码配对）。
+  const [requirePairing, setRequirePairing] = useState(false);
+  const [pairing, setPairing] = useState<PairingInfo | null>(null);
+  const [pairingRemaining, setPairingRemaining] = useState(0);
+  const [devices, setDevices] = useState<TrustedDevice[]>([]);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
 
-  // 确保防火墙放行 UDP 6980：规则缺失时自动提权放行，用户只需确认一次 UAC。
+  // 配对倒计时：开启后每秒递减，到 0 自动隐藏。
+  useEffect(() => {
+    if (!pairing) {
+      setPairingRemaining(0);
+      return;
+    }
+    setPairingRemaining(pairing.expires_in_secs);
+    const timer = window.setInterval(() => {
+      setPairingRemaining((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing]);
+
+  // 刷新配对开关、可信设备与配对窗口状态。
+  useEffect(() => {
+    if (!identity.network_enabled) {
+      setPairing(null);
+      setDevices([]);
+      return;
+    }
+    void Promise.all([getPairingRequired(), listTrustedDevices(), getPairingStatus()])
+      .then(([required, deviceList, pairingStatus]) => {
+        setRequirePairing(required);
+        setDevices(deviceList);
+        setPairing(pairingStatus);
+      })
+      .catch((e: unknown) => {
+        setPairingError(e instanceof Error ? e.message : "读取配对状态失败。");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity.network_enabled, identity.web_port]);
+
+  async function handleTogglePairing(enabled: boolean) {
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    setPairingError(null);
+    try {
+      await setPairingRequired(enabled);
+      setRequirePairing(enabled);
+      if (!enabled) {
+        // 关闭配对：结束配对窗口并收起可信设备管理。
+        setPairing(null);
+      }
+    } catch (e) {
+      setPairingError(e instanceof Error ? e.message : "切换配对模式失败。");
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
+  async function handleAddDevice() {
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    setPairingError(null);
+    try {
+      setPairing(await startPairing());
+    } catch (e) {
+      setPairingError(e instanceof Error ? e.message : "开启配对窗口失败。");
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
+  async function handleClosePairing() {
+    setPairingBusy(true);
+    try {
+      await stopPairing();
+    } catch {
+      // 关闭失败不阻塞界面
+    }
+    setPairing(null);
+    setPairingBusy(false);
+  }
+
+  async function handleForgetDevice(deviceId: string) {
+    try {
+      await forgetDevice(deviceId);
+      setDevices((prev) => prev.filter((device) => device.id !== deviceId));
+    } catch (e) {
+      setPairingError(e instanceof Error ? e.message : "忘记设备失败。");
+    }
+  }
+
+  async function handleResetAll() {
+    if (!window.confirm("确定重置全部局域网信任？所有已配对设备都需重新扫码配对。")) {
+      return;
+    }
+    try {
+      await resetTrust();
+      setDevices([]);
+    } catch (e) {
+      setPairingError(e instanceof Error ? e.message : "重置信任失败。");
+    }
+  }
+
+  // 配对二维码地址：优先取 RFC1918 私网地址（真实局域网口），跳过虚拟网卡。
+  const lanHost =
+    identity.addresses?.find((addr) =>
+      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(addr),
+    ) ??
+    identity.addresses?.[0] ??
+    "127.0.0.1";
+  const pairingUrl = pairing
+    ? `http://${lanHost}:${identity.web_port > 0 ? identity.web_port : 8920}/pair#secret=${pairing.secret}`
+    : "";
+
+  // 确保防火墙放行 VBAN（UDP）与 Web 控制台（TCP）：规则缺失时自动提权放行，
+  // 用户只需确认一次 UAC；已放行的规则不会重复提权。
   async function ensureFirewall(): Promise<FirewallCheckResult> {
     try {
       const current = await checkNetworkFirewall();
       if (current.rule_exists) {
-        return current; // 已放行，无需操作
+        setFirewall(current); // 两条都已放行：展示状态，不展示错误
+        setFirewallError(null);
+        return current;
       }
       // 规则缺失：自动提权放行（弹一次 UAC）。
       const result = await enableNetworkFirewall();
-      setFirewall(result.rule_exists ? null : result);
+      setFirewall(result);
+      // 后端在规则校验失败时返回 Err，此处不会命中；仍保留兜底判断。
+      setFirewallError(result.rule_exists ? null : result.message);
       return result;
     } catch (e) {
-      // 自动放行被拒（用户拒绝 UAC），保留引导提示。
+      // 自动放行被拒（用户拒绝 UAC）或规则校验失败：保留明确错误文案。
+      const message =
+        e instanceof Error
+          ? e.message
+          : "防火墙未放行。需要放行 VBAN（UDP 6980）与 Web 控制台（TCP）入站。";
       setFirewall({
         port_available: true,
         rule_exists: false,
+        vban_rule_exists: false,
+        web_rule_exists: false,
         checked: true,
-        message: e instanceof Error ? e.message : "防火墙未放行，请手动放行 UDP 6980 入站。",
+        message,
       });
+      setFirewallError(message);
       return {
         port_available: true,
         rule_exists: false,
+        vban_rule_exists: false,
+        web_rule_exists: false,
         checked: true,
-        message: e instanceof Error ? e.message : "防火墙未放行。",
+        message,
       };
+    }
+  }
+
+  // 手动重试放行：重新走一次检测 + 提权，并把失败原因直接显示出来。
+  async function handleRetryFirewall() {
+    setFirewallToggling(true);
+    setFirewallError(null);
+    try {
+      const current = await checkNetworkFirewall();
+      if (current.rule_exists) {
+        setFirewall(current);
+        return;
+      }
+      setFirewall(await enableNetworkFirewall());
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "放行失败，请查看提示手动执行。";
+      setFirewallError(message);
+      setFirewall((prev) =>
+        prev
+          ? { ...prev, message }
+          : {
+              port_available: true,
+              rule_exists: false,
+              vban_rule_exists: false,
+              web_rule_exists: false,
+              checked: true,
+              message,
+            },
+      );
+    } finally {
+      setFirewallToggling(false);
     }
   }
 
@@ -161,6 +354,7 @@ export default function DeviceView() {
       if (!updated.network_enabled) {
         setNodes([]);
         setFirewall(null);
+        setFirewallError(null);
       } else {
         // 开启后自动放行防火墙（规则缺失时提权 UAC），无需手动。
         setFirewall(await ensureFirewall());
@@ -213,18 +407,23 @@ export default function DeviceView() {
         <div className="device-local-meta">
           <div className="device-meta-item">
             <span className="device-meta-label">节点 ID</span>
-            <span className="device-meta-value device-mono">
+            <span
+              className="device-meta-value device-mono device-meta-truncate"
+              title={identity.node_id || undefined}
+            >
               {identity.node_id || "（尚未生成）"}
             </span>
           </div>
           <div className="device-meta-item">
-            <span className="device-meta-label">Web 控制台端口</span>
-            <span className="device-meta-value">
-              {identity.web_port > 0 ? identity.web_port : "未开启"}
+            <span className="device-meta-label">访问地址</span>
+            <span className="device-meta-value device-mono">
+              {identity.network_enabled && identity.web_port > 0
+                ? `http://${lanHost}:${identity.web_port}`
+                : "未开启"}
             </span>
           </div>
           {/* 本机 IP：用户可在其他电脑上手动输入该地址进行连接 */}
-          <div className="device-meta-item device-meta-item-wide">
+          <div className="device-meta-item">
             <span className="device-meta-label">本机 IP</span>
             <span className="device-meta-value device-mono device-meta-wrap">
               {identity.addresses && identity.addresses.length > 0
@@ -232,14 +431,159 @@ export default function DeviceView() {
                 : "（未获取到局域网地址）"}
             </span>
           </div>
+          {identity.network_enabled && (
+            <div className="device-pair-toggle">
+              <label className="device-pair-toggle-label">
+                <input
+                  type="checkbox"
+                  checked={requirePairing}
+                  disabled={pairingBusy}
+                  onChange={(e) => void handleTogglePairing(e.target.checked)}
+                />
+                要求配对才能访问控制台
+              </label>
+              <span className="device-pair-toggle-hint">
+                {requirePairing
+                  ? "开启后，设备需扫码或输入 PIN 配对后才能控制。"
+                  : "关闭（默认）：局域网内设备输入上方地址即可访问，无需配对。"}
+              </span>
+            </div>
+          )}
+          {/* 防火墙放行状态：正常时一行小徽章，异常时才展示"重新放行"与说明 */}
+          {identity.network_enabled && firewall && (
+            <div className="device-firewall-status">
+              <span
+                className={`device-firewall-badge ${
+                  firewall.vban_rule_exists ? "ok" : "warn"
+                }`}
+              >
+                VBAN UDP {vbanPortLabel}{" "}
+                {firewall.vban_rule_exists ? "已放行" : "未放行"}
+              </span>
+              <span
+                className={`device-firewall-badge ${
+                  firewall.web_rule_exists ? "ok" : "warn"
+                }`}
+              >
+                Web TCP {identity.web_port > 0 ? identity.web_port : "—"}{" "}
+                {firewall.web_rule_exists ? "已放行" : "未放行"}
+              </span>
+              {!firewall.rule_exists && (
+                <button
+                  type="button"
+                  className="device-firewall-retry"
+                  onClick={() => void handleRetryFirewall()}
+                  disabled={firewallToggling}
+                >
+                  {firewallToggling ? "放行中…" : "重新放行"}
+                </button>
+              )}
+            </div>
+          )}
+          {identity.network_enabled && firewall && !firewall.rule_exists && (
+            <div className="device-firewall-desc">
+              {firewallError ?? firewall.message}
+            </div>
+          )}
         </div>
       </section>
 
-      {/* 防火墙放行引导（开启网络功能且规则缺失时提示） */}
-      {identity.network_enabled && firewall && !firewall.rule_exists && (
-        <section className="device-firewall-card">
-          <div className="device-firewall-title">防火墙放行提示</div>
-          <div className="device-firewall-desc">{firewall.message}</div>
+      {/* 信任的设备与配对（仅"要求配对"模式下展示） */}
+      {identity.network_enabled && requirePairing && (
+        <section className="device-trust-card">
+          <div className="device-trust-head">
+            <div className="device-trust-titles">
+              <div className="device-trust-title">信任的设备与配对</div>
+              <div className="device-trust-subtitle">
+                为局域网设备签发访问凭证，未配对的设备将被 `/ws` 拒绝
+              </div>
+            </div>
+            <button
+              type="button"
+              className="device-trust-add"
+              onClick={() => void handleAddDevice()}
+              disabled={pairingBusy}
+            >
+              {pairing && pairingRemaining > 0 ? "重新生成" : "添加设备"}
+            </button>
+          </div>
+          {pairingError && <div className="device-trust-desc">{pairingError}</div>}
+          {pairing && pairingRemaining > 0 && (
+            <div className="pairing-box">
+              <div className="pairing-qr">
+                <QRCodeSVG value={pairingUrl} size={176} bgColor="#ffffff" fgColor="#000000" />
+              </div>
+              <div className="pairing-meta">
+                <div className="pairing-pin-row">
+                  <span className="pairing-pin-label">备用 PIN</span>
+                  <b className="pairing-pin-value">{pairing.pin}</b>
+                  <span
+                    className={`pairing-countdown ${
+                      pairingRemaining <= 30 ? "warn" : ""
+                    }`}
+                  >
+                    {formatCountdown(pairingRemaining)} 后过期
+                  </span>
+                </div>
+                <div className="pairing-url">{pairingUrl}</div>
+                <div className="device-trust-desc">
+                  手机扫描二维码，用浏览器打开并按提示完成首次配对；如无法扫码，手动打开上面的链接再输入 PIN 也可完成配对。
+                </div>
+                <button
+                  type="button"
+                  className="device-trust-action"
+                  onClick={() => void handleClosePairing()}
+                >
+                  关闭配对窗口
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="device-trust-list">
+            <div className="device-trust-list-head">
+              <span>已配对设备</span>
+              <span className="device-trust-list-count">{devices.length}</span>
+            </div>
+            {devices.length === 0 ? (
+              <div className="device-trust-empty">
+                尚无已配对设备。点击右上方「添加设备」开启配对窗口，让手机/平板扫码。
+              </div>
+            ) : (
+              devices.map((device) => (
+                <div key={device.id} className="device-row">
+                  <div className="device-row-info">
+                    <div className="device-row-name">{device.name}</div>
+                    <div className="device-row-meta">
+                      <span className="device-row-perm">{device.permission}</span>
+                      <span className="device-row-dot">·</span>
+                      <span className="device-row-time">
+                        {formatRelative(device.last_seen_unix)}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="device-row-forget"
+                    onClick={() => void handleForgetDevice(device.id)}
+                    title="撤销该设备的访问凭证并立即关闭其连接"
+                  >
+                    忘记
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+          {devices.length > 0 && (
+            <div className="device-trust-footer">
+              <button
+                type="button"
+                className="device-trust-reset"
+                onClick={() => void handleResetAll()}
+              >
+                重置全部局域网信任
+              </button>
+            </div>
+          )}
         </section>
       )}
 
