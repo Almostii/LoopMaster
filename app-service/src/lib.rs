@@ -40,5 +40,5 @@ pub use route::{RouteEdit, RouteEditor};
 pub use state::{local_ipv4_addresses, AppSettings, NodeIdentityBrief, StateHub};
 pub use web_server::{
     local_ca_status, tls_dir_for, CaTrustStatus, WebServerConfig, WebServerError, WebServerHandle,
-    DEFAULT_WEB_PORT,
+    DEFAULT_METER_HZ, DEFAULT_WEB_PORT,
 };

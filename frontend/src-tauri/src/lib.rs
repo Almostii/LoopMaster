@@ -27,7 +27,7 @@ use loopmaster_app_service::{
     CaTrustStatus, DeviceFlow, DeviceModel, DeviceRepository, EngineCommand, EngineService,
     NetworkBridge, NetworkDiscovery, NetworkEvent, NodeIdentity, NodeInfo, NodeMeta, ProcessModel,
     ProcessRepository, RouteEdit, RouteEditor, ServiceError, ServiceEvent, StateHub,
-    WebServerConfig, CAPS_VBAN_AUDIO, DEFAULT_WEB_PORT, VBAN_SERVICE_PORT,
+    WebServerConfig, CAPS_VBAN_AUDIO, DEFAULT_METER_HZ, DEFAULT_WEB_PORT, VBAN_SERVICE_PORT,
 };
 use loopmaster_audio_core::{
     BusId, BusSpec, EndpointId, RouteGraph, RouteGraphError, SendId, SendSpec, SinkId, SinkKind,
@@ -1462,6 +1462,7 @@ fn start_web_console(state: &Arc<AppState>) -> Result<(), ServiceErrorBrief> {
     let server_config = WebServerConfig {
         port,
         tls: false, // 产品决策 2026-08-31：浏览器控制台默认 HTTP，直接打开无需证书
+        meter_hz: DEFAULT_METER_HZ,
     };
     match loopmaster_app_service::web_server::start(server_config, state.clone()) {
         Ok(handle) => {

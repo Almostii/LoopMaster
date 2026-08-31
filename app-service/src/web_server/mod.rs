@@ -12,6 +12,7 @@
 
 pub mod routes;
 pub mod tls;
+pub mod ws;
 
 pub use tls::{local_ca_status, tls_dir_for, CaTrustStatus};
 
@@ -33,6 +34,8 @@ use crate::state::StateHub;
 
 /// Web 控制台端口默认值（与 mDNS TXT `web_port` 默认一致，方案 1 §6）。
 pub const DEFAULT_WEB_PORT: u16 = 8920;
+/// 电平广播频率默认值（候选，子任务 2 原型对比 30/60Hz 后冻结）。
+pub const DEFAULT_METER_HZ: u16 = 30;
 
 /// Web 服务配置。
 #[derive(Clone, Debug)]
@@ -47,6 +50,18 @@ pub struct WebServerConfig {
     /// - `true`：HTTPS/WSS，供手机 App（Phase 3，App 固定本机 CA）与高级
     ///   场景使用，需本机 CA（见 `tls.rs`）。
     pub tls: bool,
+    /// 电平广播频率（Hz）。子任务 2 原型对比 30/60Hz 后冻结默认值。
+    pub meter_hz: u16,
+}
+
+impl Default for WebServerConfig {
+    fn default() -> Self {
+        Self {
+            port: DEFAULT_WEB_PORT,
+            tls: false,
+            meter_hz: DEFAULT_METER_HZ,
+        }
+    }
 }
 
 impl WebServerConfig {
@@ -252,7 +267,15 @@ async fn serve(
     let mut revision_rx = hub.subscribe();
     let revision_task = tokio::spawn(async move { while revision_rx.changed().await.is_ok() {} });
 
-    let app = routes::router().into_make_service();
+    // meter 广播任务 + /ws 路由（子任务 2）。
+    let meter_tx = ws::spawn_meter_task(hub.clone(), config.meter_hz);
+    let app = ws::ws_router()
+        .with_state(ws::WsState {
+            hub: hub.clone(),
+            meter_tx,
+        })
+        .merge(routes::router())
+        .into_make_service();
     match server {
         ServeKind::Http(server) => {
             let _ = server.handle(server_handle).serve(app).await;
@@ -280,9 +303,11 @@ mod tests {
         let config = WebServerConfig {
             port: 12345,
             tls: false,
+            ..Default::default()
         };
         assert_eq!(config.bind_addr().to_string(), "0.0.0.0:12345");
         assert_eq!(DEFAULT_WEB_PORT, 8920);
+        assert_eq!(DEFAULT_METER_HZ, 30);
     }
 
     /// 端到端：启动（端口 0）→ TCP 可连接 → 优雅关闭。
@@ -301,6 +326,7 @@ mod tests {
             WebServerConfig {
                 port: 0,
                 tls: false,
+                ..Default::default()
             },
             hub,
         )
@@ -327,6 +353,7 @@ mod tests {
             WebServerConfig {
                 port: 0,
                 tls: false,
+                ..Default::default()
             },
             hub,
         )
@@ -363,7 +390,15 @@ mod tests {
         let config_path = config_dir.join("config.json");
 
         let hub = std::sync::Arc::new(StateHub::new(config_path));
-        let handle = start(WebServerConfig { port: 0, tls: true }, hub).expect("启动成功");
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: true,
+                ..Default::default()
+            },
+            hub,
+        )
+        .expect("启动成功");
 
         // CA 证书即信任锚（手机端显式安装同一张 ca.crt）。
         let ca_pem = std::fs::read_to_string(config_dir.join("tls").join("ca.crt")).unwrap();
@@ -396,5 +431,180 @@ mod tests {
 
         handle.shutdown();
         let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// 端到端（WebSocket）：连接即下发 `initial_state`，控制指令回 `ack` 且
+    /// 写入权威状态，随后收到二进制 meter 帧（30Hz 广播）。
+    #[tokio::test]
+    async fn ws_round_trip_initial_state_ack_and_meter() {
+        use futures_util::SinkExt as _;
+        use futures_util::StreamExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-ws-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        // 准备一张图：source → bus → sink，send `send_mic_to_master`。
+        use crate::route::RouteEdit;
+        use loopmaster_audio_core::{
+            BusSpec, EndpointId, SendSpec, SinkId, SinkKind, SinkSpec, SourceId, SourceKind,
+            SourceSpec,
+        };
+        hub.apply_route_edit(RouteEdit::AddSource(SourceSpec {
+            id: SourceId("src_mic_1".into()),
+            kind: SourceKind::DeviceCapture,
+            endpoint_id: Some(EndpointId("endpoint-1".into())),
+            process_id: None,
+            executable_path: None,
+            stream_name: None,
+            display_name: "麦克风".into(),
+        }))
+        .unwrap();
+        hub.apply_route_edit(RouteEdit::AddBus(BusSpec {
+            id: loopmaster_audio_core::BusId("bus_master_1".into()),
+            display_name: "主通道".into(),
+        }))
+        .unwrap();
+        hub.apply_route_edit(RouteEdit::AddSink(SinkSpec {
+            id: SinkId("out_spk_1".into()),
+            endpoint_id: EndpointId("endpoint-out".into()),
+            display_name: "扬声器".into(),
+            kind: SinkKind::Device,
+            stream_name: None,
+            remote_addr: None,
+        }))
+        .unwrap();
+        hub.apply_route_edit(RouteEdit::SetSend(SendSpec::SourceToBus {
+            id: loopmaster_audio_core::SendId("send_mic_to_master".into()),
+            source_id: SourceId("src_mic_1".into()),
+            bus_id: loopmaster_audio_core::BusId("bus_master_1".into()),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        }))
+        .unwrap();
+
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                meter_hz: 30,
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("连接 /ws");
+
+        // 1) 连接即收 initial_state。
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("initial_state 超时")
+            .expect("流结束")
+            .expect("协议错误");
+        let first = first.into_text().unwrap();
+        assert!(first.contains(r#""event":"initial_state""#), "{first}");
+        assert!(first.contains(r#""state_revision""#), "{first}");
+        assert!(first.contains("send_mic_to_master"), "{first}");
+
+        // 2) 控制指令 → ack，且权威状态被修改。
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "seq": 101,
+                "action": "set_send_gain",
+                "data": { "send_id": "send_mic_to_master", "gain_db": -3.0 }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let ack = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("ack 超时")
+            .expect("流结束")
+            .expect("协议错误");
+        let ack = ack.into_text().unwrap();
+        assert!(ack.contains(r#""ack":"set_send_gain""#), "{ack}");
+        assert!(ack.contains(r#""seq":101"#), "{ack}");
+        assert_eq!(
+            hub.route_snapshot().sends[0].gain_db(),
+            -3.0,
+            "增益应写入权威状态"
+        );
+
+        // 3) 30Hz meter 帧（二进制）应在 1 秒内到达。
+        let mut got_meter = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(Duration::from_millis(50), ws.next()).await {
+                Ok(Some(Ok(message))) if message.is_binary() => {
+                    got_meter = true;
+                    break;
+                }
+                Ok(Some(Ok(_))) => {}
+                _ => break,
+            }
+        }
+        assert!(got_meter, "应在超时前收到二进制 meter 帧");
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// 30/60Hz 电平广播实测（原型对比，`#[ignore]`：手动运行并读输出）。
+    ///
+    /// 统计 2 秒内收到的二进制 meter 帧数与期望帧数之比，用于排期 §2.2
+    /// 「电平刷新率（待冻结）」验收：两档均不应出现持续积压/丢帧。
+    #[tokio::test]
+    #[ignore]
+    async fn measure_meter_hz_30_vs_60() {
+        use futures_util::StreamExt as _;
+        for hz in [30u16, 60] {
+            let hub = std::sync::Arc::new(StateHub::new(std::env::temp_dir().join(format!(
+                "loopmaster-meter-measure-{hz}-{}-{:?}.json",
+                std::process::id(),
+                std::thread::current().id()
+            ))));
+            let handle = start(
+                WebServerConfig {
+                    port: 0,
+                    tls: false,
+                    meter_hz: hz,
+                },
+                hub,
+            )
+            .expect("启动成功");
+            let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+            let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            // 丢弃 initial_state。
+            let _ = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+
+            let window = Duration::from_secs(2);
+            let start = std::time::Instant::now();
+            let mut frames = 0u32;
+            while start.elapsed() < window {
+                match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
+                    Ok(Some(Ok(message))) if message.is_binary() => frames += 1,
+                    Ok(Some(Ok(_))) => {}
+                    _ => break,
+                }
+            }
+            let expected = hz as u32 * 2;
+            println!(
+                "[meter-measure] {hz}Hz：2 秒实收 {frames} 帧（期望 {expected}，约 {:.0}% 送达）",
+                frames as f64 / expected as f64 * 100.0
+            );
+            handle.shutdown();
+        }
     }
 }

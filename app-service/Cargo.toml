@@ -6,9 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 flume = "0.11"
+futures-util = { version = "0.3", features = ["sink"] }
 if-addrs = "0.13"
 loopmaster-audio-core = { path = "../audio-core" }
 loopmaster-audio-windows = { path = "../audio-windows" }
@@ -30,4 +31,6 @@ proptest.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
+# WebSocket 客户端：验证 /ws 通道端到端（仅 ws://，不引入 TLS provider 歧义）。
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
 tower = { version = "0.5", features = ["util"] }
