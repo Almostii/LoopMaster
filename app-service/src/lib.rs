@@ -18,6 +18,8 @@ mod event;
 mod model;
 pub mod network;
 mod route;
+pub mod state;
+pub mod web_server;
 
 pub use command::EngineCommand;
 pub use config::{AppConfig, ConfigError, NetworkConfig, UiState, CURRENT_SCHEMA_VERSION};
@@ -35,3 +37,8 @@ pub use network::{
     CAPS_VBAN_AUDIO, CAPS_WEBRTC_MONITOR, VBAN_SERVICE_PORT, VBAN_SERVICE_TYPE,
 };
 pub use route::{RouteEdit, RouteEditor};
+pub use state::{local_ipv4_addresses, AppSettings, NodeIdentityBrief, StateHub};
+pub use web_server::{
+    local_ca_status, tls_dir_for, CaTrustStatus, WebServerConfig, WebServerError, WebServerHandle,
+    DEFAULT_WEB_PORT,
+};

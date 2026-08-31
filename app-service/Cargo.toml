@@ -6,15 +6,28 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 flume = "0.11"
+if-addrs = "0.13"
 loopmaster-audio-core = { path = "../audio-core" }
 loopmaster-audio-windows = { path = "../audio-windows" }
 mdns-sd = "0.11"
+mime_guess = "2"
+rcgen = { version = "0.13", features = ["x509-parser"] }
+rust-embed = "8"
 serde.workspace = true
 serde_json = "1"
 socket2 = "0.5"
 thiserror.workspace = true
+time = "0.3"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 proptest.workspace = true
+# 集成测试用 TLS 客户端：以本地 CA 信任锚验证 /api/health 全链路。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+tower = { version = "0.5", features = ["util"] }

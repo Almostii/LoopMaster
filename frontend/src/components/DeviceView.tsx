@@ -18,6 +18,9 @@ const emptyIdentity: NodeIdentityBrief = {
   web_port: 0,
 };
 
+/** VBAN 默认端口（与后端 VBAN_SERVICE_PORT 一致），仅用于状态展示。 */
+const vbanPortLabel = "6980";
+
 /** 电脑显示器图标（紧凑卡片顶部使用）。 */
 function MonitorDeviceIcon() {
   return (
@@ -119,34 +122,82 @@ export default function DeviceView() {
 
   // 切换网络功能开关
   const [toggling, setToggling] = useState(false);
-  // 防火墙放行状态（开启时自动放行，失败才展示引导）。
+  // 防火墙放行状态（开启网络功能时展示两条规则各自状态）。
   const [firewall, setFirewall] = useState<FirewallCheckResult | null>(null);
+  // 手动"重新放行"进行中标记与失败文案（UAC 被拒/规则校验失败时展示）。
+  const [firewallToggling, setFirewallToggling] = useState(false);
+  const [firewallError, setFirewallError] = useState<string | null>(null);
 
-  // 确保防火墙放行 UDP 6980：规则缺失时自动提权放行，用户只需确认一次 UAC。
+  // 确保防火墙放行 VBAN（UDP）与 Web 控制台（TCP）：规则缺失时自动提权放行，
+  // 用户只需确认一次 UAC；已放行的规则不会重复提权。
   async function ensureFirewall(): Promise<FirewallCheckResult> {
     try {
       const current = await checkNetworkFirewall();
       if (current.rule_exists) {
-        return current; // 已放行，无需操作
+        setFirewall(current); // 两条都已放行：展示状态，不展示错误
+        setFirewallError(null);
+        return current;
       }
       // 规则缺失：自动提权放行（弹一次 UAC）。
       const result = await enableNetworkFirewall();
-      setFirewall(result.rule_exists ? null : result);
+      setFirewall(result);
+      // 后端在规则校验失败时返回 Err，此处不会命中；仍保留兜底判断。
+      setFirewallError(result.rule_exists ? null : result.message);
       return result;
     } catch (e) {
-      // 自动放行被拒（用户拒绝 UAC），保留引导提示。
+      // 自动放行被拒（用户拒绝 UAC）或规则校验失败：保留明确错误文案。
+      const message =
+        e instanceof Error
+          ? e.message
+          : "防火墙未放行。需要放行 VBAN（UDP 6980）与 Web 控制台（TCP）入站。";
       setFirewall({
         port_available: true,
         rule_exists: false,
+        vban_rule_exists: false,
+        web_rule_exists: false,
         checked: true,
-        message: e instanceof Error ? e.message : "防火墙未放行，请手动放行 UDP 6980 入站。",
+        message,
       });
+      setFirewallError(message);
       return {
         port_available: true,
         rule_exists: false,
+        vban_rule_exists: false,
+        web_rule_exists: false,
         checked: true,
-        message: e instanceof Error ? e.message : "防火墙未放行。",
+        message,
       };
+    }
+  }
+
+  // 手动重试放行：重新走一次检测 + 提权，并把失败原因直接显示出来。
+  async function handleRetryFirewall() {
+    setFirewallToggling(true);
+    setFirewallError(null);
+    try {
+      const current = await checkNetworkFirewall();
+      if (current.rule_exists) {
+        setFirewall(current);
+        return;
+      }
+      setFirewall(await enableNetworkFirewall());
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "放行失败，请查看提示手动执行。";
+      setFirewallError(message);
+      setFirewall((prev) =>
+        prev
+          ? { ...prev, message }
+          : {
+              port_available: true,
+              rule_exists: false,
+              vban_rule_exists: false,
+              web_rule_exists: false,
+              checked: true,
+              message,
+            },
+      );
+    } finally {
+      setFirewallToggling(false);
     }
   }
 
@@ -161,6 +212,7 @@ export default function DeviceView() {
       if (!updated.network_enabled) {
         setNodes([]);
         setFirewall(null);
+        setFirewallError(null);
       } else {
         // 开启后自动放行防火墙（规则缺失时提权 UAC），无需手动。
         setFirewall(await ensureFirewall());
@@ -220,7 +272,9 @@ export default function DeviceView() {
           <div className="device-meta-item">
             <span className="device-meta-label">Web 控制台端口</span>
             <span className="device-meta-value">
-              {identity.web_port > 0 ? identity.web_port : "未开启"}
+              {identity.network_enabled && identity.web_port > 0
+                ? `http://<本机IP>:${identity.web_port}`
+                : "未开启"}
             </span>
           </div>
           {/* 本机 IP：用户可在其他电脑上手动输入该地址进行连接 */}
@@ -235,13 +289,47 @@ export default function DeviceView() {
         </div>
       </section>
 
-      {/* 防火墙放行引导（开启网络功能且规则缺失时提示） */}
-      {identity.network_enabled && firewall && !firewall.rule_exists && (
+      {/* 防火墙放行状态（开启网络功能时展示；两条规则分别列出） */}
+      {identity.network_enabled && firewall && (
         <section className="device-firewall-card">
-          <div className="device-firewall-title">防火墙放行提示</div>
-          <div className="device-firewall-desc">{firewall.message}</div>
+          <div className="device-firewall-title">
+            防火墙放行
+            <button
+              type="button"
+              className="device-firewall-retry"
+              onClick={() => void handleRetryFirewall()}
+              disabled={firewallToggling}
+            >
+              {firewallToggling ? "放行中…" : "重新放行"}
+            </button>
+          </div>
+          <div className="device-firewall-rules">
+            <span
+              className={`device-firewall-badge ${
+                firewall.vban_rule_exists ? "ok" : "warn"
+              }`}
+            >
+              VBAN UDP {vbanPortLabel}
+              {firewall.vban_rule_exists ? " 已放行" : " 未放行"}
+            </span>
+            <span
+              className={`device-firewall-badge ${
+                firewall.web_rule_exists ? "ok" : "warn"
+              }`}
+            >
+              Web TCP {identity.web_port > 0 ? identity.web_port : "—"}
+              {firewall.web_rule_exists ? " 已放行" : " 未放行"}
+            </span>
+          </div>
+          {(!firewall.rule_exists || firewallError) && (
+            <div className="device-firewall-desc">
+              {firewallError ?? firewall.message}
+            </div>
+          )}
         </section>
       )}
+
+      {/* 本机证书信任：默认 HTTP 模式无需证书（HTTPS 模式保留命令，UI 待子任务 4） */}
 
       {/* 局域网节点列表（排除本机自身） */}
       <section className="device-nodes-section">
