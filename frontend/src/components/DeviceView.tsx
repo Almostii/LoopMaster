@@ -7,12 +7,14 @@ import {
   forgetDevice,
   getNetworkNodes,
   getNodeIdentity,
+  getPairingRequired,
   getPairingStatus,
   listTrustedDevices,
   onNodeRemoved,
   onNodeResolved,
   resetTrust,
   setNetworkEnabled,
+  setPairingRequired,
   startPairing,
   stopPairing,
   type FirewallCheckResult,
@@ -136,52 +138,72 @@ export default function DeviceView() {
   // 手动"重新放行"进行中标记与失败文案（UAC 被拒/规则校验失败时展示）。
   const [firewallToggling, setFirewallToggling] = useState(false);
   const [firewallError, setFirewallError] = useState<string | null>(null);
-  // 配对与可信设备（子任务 4）。
+  // 配对开关与可信设备（默认开放访问；开启"要求配对"后展示二维码配对）。
+  const [requirePairing, setRequirePairing] = useState(false);
   const [pairing, setPairing] = useState<PairingInfo | null>(null);
   const [devices, setDevices] = useState<TrustedDevice[]>([]);
-  const [trustBusy, setTrustBusy] = useState(false);
-  const [trustError, setTrustError] = useState<string | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
 
-  // 刷新可信设备与配对窗口状态。
+  // 刷新配对开关、可信设备与配对窗口状态。
   useEffect(() => {
     if (!identity.network_enabled) {
-      setDevices([]);
       setPairing(null);
+      setDevices([]);
       return;
     }
-    void Promise.all([listTrustedDevices(), getPairingStatus()])
-      .then(([deviceList, pairingStatus]) => {
+    void Promise.all([getPairingRequired(), listTrustedDevices(), getPairingStatus()])
+      .then(([required, deviceList, pairingStatus]) => {
+        setRequirePairing(required);
         setDevices(deviceList);
         setPairing(pairingStatus);
       })
       .catch((e: unknown) => {
-        setTrustError(e instanceof Error ? e.message : "读取可信设备失败。");
+        setPairingError(e instanceof Error ? e.message : "读取配对状态失败。");
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [identity.network_enabled, identity.web_port]);
 
+  async function handleTogglePairing(enabled: boolean) {
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    setPairingError(null);
+    try {
+      await setPairingRequired(enabled);
+      setRequirePairing(enabled);
+      if (!enabled) {
+        // 关闭配对：结束配对窗口并收起可信设备管理。
+        setPairing(null);
+      }
+    } catch (e) {
+      setPairingError(e instanceof Error ? e.message : "切换配对模式失败。");
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
   async function handleAddDevice() {
-    if (trustBusy) return;
-    setTrustBusy(true);
-    setTrustError(null);
+    if (pairingBusy) return;
+    setPairingBusy(true);
+    setPairingError(null);
     try {
       setPairing(await startPairing());
     } catch (e) {
-      setTrustError(e instanceof Error ? e.message : "开启配对窗口失败。");
+      setPairingError(e instanceof Error ? e.message : "开启配对窗口失败。");
     } finally {
-      setTrustBusy(false);
+      setPairingBusy(false);
     }
   }
 
   async function handleClosePairing() {
-    setTrustBusy(true);
+    setPairingBusy(true);
     try {
       await stopPairing();
     } catch {
       // 关闭失败不阻塞界面
     }
     setPairing(null);
-    setTrustBusy(false);
+    setPairingBusy(false);
   }
 
   async function handleForgetDevice(deviceId: string) {
@@ -189,7 +211,7 @@ export default function DeviceView() {
       await forgetDevice(deviceId);
       setDevices((prev) => prev.filter((device) => device.id !== deviceId));
     } catch (e) {
-      setTrustError(e instanceof Error ? e.message : "忘记设备失败。");
+      setPairingError(e instanceof Error ? e.message : "忘记设备失败。");
     }
   }
 
@@ -201,12 +223,11 @@ export default function DeviceView() {
       await resetTrust();
       setDevices([]);
     } catch (e) {
-      setTrustError(e instanceof Error ? e.message : "重置信任失败。");
+      setPairingError(e instanceof Error ? e.message : "重置信任失败。");
     }
   }
 
-  // 配对二维码地址：手机用该地址打开后读取 fragment 中的 secret 完成配对。
-  // 优先取 RFC1918 私网地址（真实局域网口），跳过虚拟网卡（如 198.18.x.x）。
+  // 配对二维码地址：优先取 RFC1918 私网地址（真实局域网口），跳过虚拟网卡。
   const lanHost =
     identity.addresses?.find((addr) =>
       /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(addr),
@@ -375,6 +396,33 @@ export default function DeviceView() {
                 : "（未获取到局域网地址）"}
             </span>
           </div>
+          {identity.network_enabled && (
+            <div className="device-pair-toggle">
+              <label className="device-pair-toggle-label">
+                <input
+                  type="checkbox"
+                  checked={requirePairing}
+                  disabled={pairingBusy}
+                  onChange={(e) => void handleTogglePairing(e.target.checked)}
+                />
+                要求配对才能访问控制台
+              </label>
+              <span className="device-pair-toggle-hint">
+                {requirePairing
+                  ? "开启：设备需扫码/PIN 配对后才能控制"
+                  : "关闭（默认）：局域网内设备直接访问"}
+              </span>
+            </div>
+          )}
+          {identity.network_enabled && identity.web_port > 0 && !requirePairing && (
+            <div className="device-open-hint">
+              局域网内设备（电脑/手机/平板）输入{" "}
+              <span className="device-mono">
+                http://&lt;本机IP&gt;:{identity.web_port}
+              </span>{" "}
+              即可访问控制台，无需配对。
+            </div>
+          )}
         </div>
       </section>
 
@@ -418,8 +466,8 @@ export default function DeviceView() {
         </section>
       )}
 
-      {/* 信任的设备与配对（子任务 4） */}
-      {identity.network_enabled && (
+      {/* 信任的设备与配对（仅"要求配对"模式下展示） */}
+      {identity.network_enabled && requirePairing && (
         <section className="device-trust-card">
           <div className="device-trust-title">
             信任的设备与配对
@@ -427,12 +475,12 @@ export default function DeviceView() {
               type="button"
               className="device-trust-action"
               onClick={() => void handleAddDevice()}
-              disabled={trustBusy}
+              disabled={pairingBusy}
             >
               {pairing ? "重新生成" : "添加设备"}
             </button>
           </div>
-          {trustError && <div className="device-trust-desc">{trustError}</div>}
+          {pairingError && <div className="device-trust-desc">{pairingError}</div>}
           {pairing && (
             <div className="pairing-box">
               <div className="pairing-qr">

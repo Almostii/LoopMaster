@@ -54,6 +54,14 @@ pub struct NetworkConfig {
     /// 内嵌 Web 控制台端口（0 表示未开启）。
     #[serde(default)]
     pub web_port: u16,
+    /// 是否要求配对/可信设备才能访问控制台。
+    ///
+    /// 默认 `false`：**局域网内设备直接输入地址即可使用**（产品决策 2026-08-31，
+    /// 家庭局域网场景可接受，任何同网段设备均可控制路由）。
+    /// 为 `true` 时启用 M4 的配对与可信设备流程（扫码/PIN/凭证 Cookie），
+    /// 并限制 `/ws` 只接受已配对设备。
+    #[serde(default)]
+    pub require_pairing: bool,
 }
 
 impl AppConfig {

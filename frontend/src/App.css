@@ -1701,6 +1701,46 @@ button:disabled {
   border-color: #b45309;
 }
 
+.device-open-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  border-top: 1px dashed var(--border-light);
+  padding-top: 8px;
+  word-break: break-all;
+}
+
+.device-pair-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-light);
+}
+
+.device-pair-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.device-pair-toggle-label input {
+  accent-color: var(--accent);
+}
+
+.device-pair-toggle-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
 /* 信任的设备与配对（子任务 4） */
 .device-trust-card {
   background: var(--bg-card-subtle);
