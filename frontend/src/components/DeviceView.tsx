@@ -1,14 +1,23 @@
 import { useEffect, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import type { NetworkNodeBrief, NodeIdentityBrief } from "../types";
 import {
   checkNetworkFirewall,
   enableNetworkFirewall,
+  forgetDevice,
   getNetworkNodes,
   getNodeIdentity,
+  getPairingStatus,
+  listTrustedDevices,
   onNodeRemoved,
   onNodeResolved,
+  resetTrust,
   setNetworkEnabled,
+  startPairing,
+  stopPairing,
   type FirewallCheckResult,
+  type PairingInfo,
+  type TrustedDevice,
 } from "../api";
 
 const emptyIdentity: NodeIdentityBrief = {
@@ -127,6 +136,81 @@ export default function DeviceView() {
   // 手动"重新放行"进行中标记与失败文案（UAC 被拒/规则校验失败时展示）。
   const [firewallToggling, setFirewallToggling] = useState(false);
   const [firewallError, setFirewallError] = useState<string | null>(null);
+  // 配对与可信设备（子任务 4）。
+  const [pairing, setPairing] = useState<PairingInfo | null>(null);
+  const [devices, setDevices] = useState<TrustedDevice[]>([]);
+  const [trustBusy, setTrustBusy] = useState(false);
+  const [trustError, setTrustError] = useState<string | null>(null);
+
+  // 刷新可信设备与配对窗口状态。
+  useEffect(() => {
+    if (!identity.network_enabled) {
+      setDevices([]);
+      setPairing(null);
+      return;
+    }
+    void Promise.all([listTrustedDevices(), getPairingStatus()])
+      .then(([deviceList, pairingStatus]) => {
+        setDevices(deviceList);
+        setPairing(pairingStatus);
+      })
+      .catch((e: unknown) => {
+        setTrustError(e instanceof Error ? e.message : "读取可信设备失败。");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identity.network_enabled, identity.web_port]);
+
+  async function handleAddDevice() {
+    if (trustBusy) return;
+    setTrustBusy(true);
+    setTrustError(null);
+    try {
+      setPairing(await startPairing());
+    } catch (e) {
+      setTrustError(e instanceof Error ? e.message : "开启配对窗口失败。");
+    } finally {
+      setTrustBusy(false);
+    }
+  }
+
+  async function handleClosePairing() {
+    setTrustBusy(true);
+    try {
+      await stopPairing();
+    } catch {
+      // 关闭失败不阻塞界面
+    }
+    setPairing(null);
+    setTrustBusy(false);
+  }
+
+  async function handleForgetDevice(deviceId: string) {
+    try {
+      await forgetDevice(deviceId);
+      setDevices((prev) => prev.filter((device) => device.id !== deviceId));
+    } catch (e) {
+      setTrustError(e instanceof Error ? e.message : "忘记设备失败。");
+    }
+  }
+
+  async function handleResetAll() {
+    if (!window.confirm("确定重置全部局域网信任？所有已配对设备都需重新扫码配对。")) {
+      return;
+    }
+    try {
+      await resetTrust();
+      setDevices([]);
+    } catch (e) {
+      setTrustError(e instanceof Error ? e.message : "重置信任失败。");
+    }
+  }
+
+  // 配对二维码地址：手机用该地址打开后读取 fragment 中的 secret 完成配对。
+  const pairingUrl = pairing
+    ? `http://${identity.addresses?.[0] ?? "127.0.0.1"}:${
+        identity.web_port > 0 ? identity.web_port : 8920
+      }/pair#secret=${pairing.secret}`
+    : "";
 
   // 确保防火墙放行 VBAN（UDP）与 Web 控制台（TCP）：规则缺失时自动提权放行，
   // 用户只需确认一次 UAC；已放行的规则不会重复提权。
@@ -329,7 +413,75 @@ export default function DeviceView() {
         </section>
       )}
 
-      {/* 本机证书信任：默认 HTTP 模式无需证书（HTTPS 模式保留命令，UI 待子任务 4） */}
+      {/* 信任的设备与配对（子任务 4） */}
+      {identity.network_enabled && (
+        <section className="device-trust-card">
+          <div className="device-trust-title">
+            信任的设备与配对
+            <button
+              type="button"
+              className="device-trust-action"
+              onClick={() => void handleAddDevice()}
+              disabled={trustBusy}
+            >
+              {pairing ? "重新生成" : "添加设备"}
+            </button>
+          </div>
+          {trustError && <div className="device-trust-desc">{trustError}</div>}
+          {pairing && (
+            <div className="pairing-box">
+              <div className="pairing-qr">
+                <QRCodeSVG value={pairingUrl} size={168} bgColor="#ffffff" fgColor="#000000" />
+              </div>
+              <div className="pairing-meta">
+                <div className="pairing-pin">
+                  备用 PIN：<b>{pairing.pin}</b>
+                </div>
+                <div className="pairing-url">{pairingUrl}</div>
+                <div className="device-trust-desc">
+                  手机扫描二维码，用浏览器打开并按提示完成首次配对；窗口 5 分钟有效。
+                </div>
+                <button
+                  type="button"
+                  className="device-trust-action"
+                  onClick={() => void handleClosePairing()}
+                >
+                  关闭配对窗口
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="device-trust-rules">
+            {devices.length === 0 ? (
+              <div className="device-trust-desc">尚无已配对设备。</div>
+            ) : (
+              devices.map((device) => (
+                <div key={device.id} className="device-row">
+                  <span className="device-row-name">
+                    {device.name} <em>({device.permission})</em>
+                  </span>
+                  <button
+                    type="button"
+                    className="device-trust-action"
+                    onClick={() => void handleForgetDevice(device.id)}
+                  >
+                    忘记
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+          {devices.length > 0 && (
+            <button
+              type="button"
+              className="device-trust-action"
+              onClick={() => void handleResetAll()}
+            >
+              重置全部局域网信任
+            </button>
+          )}
+        </section>
+      )}
 
       {/* 局域网节点列表（排除本机自身） */}
       <section className="device-nodes-section">

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import Fader from "./components/Fader";
 import Meter from "./components/Meter";
@@ -20,6 +20,76 @@ function busName(state: RemoteState, busId: string): string {
 
 function sinkName(state: RemoteState, sinkId: string): string {
   return state.external_outputs.find((sink) => sink.id === sinkId)?.display_name ?? sinkId;
+}
+
+/** 从 URL fragment（`#secret=...` 或 `#pin=...`）读取配对凭据（桌面端扫码打开）。 */
+function usePairingFromUrl() {
+  const [pairing, setPairing] = useState<{ secret?: string; pin?: string } | null>(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const secret = params.get("secret");
+    const pin = params.get("pin");
+    if (secret || pin) {
+      setPairing({ secret: secret ?? undefined, pin: pin ?? undefined });
+    }
+  }, []);
+  return pairing;
+}
+
+/** 扫码配对面板：携带 fragment 凭据完成首次配对（成功后重载走凭证 Cookie）。 */
+function PairingPanel({
+  pairing,
+  onDone,
+}: {
+  pairing: { secret?: string; pin?: string };
+  onDone: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const doPair = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const body: Record<string, string> = { client_name: name.trim() || "我的设备" };
+      if (pairing.secret) body.secret = pairing.secret;
+      if (pairing.pin) body.pin = pairing.pin;
+      const response = await fetch("/api/auth/pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        throw new Error(detail?.message ?? `配对失败（HTTP ${response.status}）`);
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "配对失败，请重试。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="remote-shell">
+      <h1>配对 LoopMaster</h1>
+      <p>输入设备名称，然后点击配对。</p>
+      <input
+        className="pair-name"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="我的设备"
+        autoFocus
+      />
+      <button type="button" className="pair-button" onClick={() => void doPair()} disabled={busy}>
+        {busy ? "配对中…" : "配对"}
+      </button>
+      {error && <p className="pair-error">{error}</p>}
+    </main>
+  );
 }
 
 /** 一条 send 的推子条：Mute + 电平表 + 推子。 */
@@ -60,6 +130,20 @@ function SendStrip({
 export default function App() {
   const { state, status, meters, setSendGain, setSendMuted } = useRemoteConsole();
   const [tab, setTab] = useState<Tab>("sources");
+  const pairing = usePairingFromUrl();
+
+  if (pairing) {
+    // 扫码进入配对流程：完成配对后清空 fragment 并重载（使用凭证 Cookie）。
+    return (
+      <PairingPanel
+        pairing={pairing}
+        onDone={() => {
+          window.location.hash = "";
+          window.location.reload();
+        }}
+      />
+    );
+  }
 
   if (!state) {
     return (
@@ -67,7 +151,8 @@ export default function App() {
         <h1>LoopMaster Remote</h1>
         <p>{STATUS_TEXT[status]}</p>
         <p className="remote-hint">
-          无法连接宿主，正在自动重连。请确认宿主已开启网络功能并保持在同一局域网。
+          无法连接宿主（未配对或宿主未开启网络功能）。请在桌面端设备页点击「添加设备」
+          后用本机扫码完成首次配对；已配对设备将自动重连。
         </p>
       </main>
     );

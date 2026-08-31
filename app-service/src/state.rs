@@ -26,7 +26,7 @@ use crate::engine::EngineService;
 use crate::error::ServiceError;
 use crate::network::{NetworkBridge, NetworkDiscovery};
 use crate::route::{RouteEdit, RouteEditor};
-use crate::web_server::WebServerHandle;
+use crate::web_server::{auth::AuthState, WebServerHandle};
 
 /// 应用设置 DTO（前端设置页持久化的内容）。
 ///
@@ -151,6 +151,8 @@ pub struct StateHub {
     bridge: Mutex<Option<NetworkBridge>>,
     /// 内嵌 Web 控制台句柄（随网络开关启停）。
     web: Mutex<Option<WebServerHandle>>,
+    /// 局域网配对与可信设备（首次配对/长期记住/显式撤销）。
+    auth: std::sync::Arc<AuthState>,
     revision: AtomicU64,
     /// revision 变更通知：只保留最新值，订阅者只关心"变了"。
     notify: watch::Sender<u64>,
@@ -163,7 +165,7 @@ impl StateHub {
     pub fn new(config_path: PathBuf) -> Self {
         let (notify, notify_rx) = watch::channel(0);
         Self {
-            config_path,
+            config_path: config_path.clone(),
             route_operation: Mutex::new(()),
             editor: Mutex::new(RouteEditor::new(RouteGraph::default())),
             engine: Mutex::new(None),
@@ -172,6 +174,7 @@ impl StateHub {
             discovery: Mutex::new(None),
             bridge: Mutex::new(None),
             web: Mutex::new(None),
+            auth: std::sync::Arc::new(AuthState::new(config_path.clone())),
             revision: AtomicU64::new(0),
             notify,
             _notify_rx: notify_rx,
@@ -365,6 +368,11 @@ impl StateHub {
     pub fn set_web(&self, web: Option<WebServerHandle>) {
         *self.web() = web;
         self.bump();
+    }
+
+    /// 局域网配对与可信设备状态（首次配对/长期记住/显式撤销）。
+    pub fn auth(&self) -> &std::sync::Arc<AuthState> {
+        &self.auth
     }
 }
 

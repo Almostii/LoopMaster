@@ -1,14 +1,13 @@
-//! Web 控制台路由：HTTPS 静态资源 + REST API（子任务 1 范围）。
+//! Web 控制台路由：静态资源 + REST API。
 //!
 //! - `GET /api/health`：最小暴露，仅返回 `{"ok":true}`，不返回 node_id、
 //!   网卡地址、配对状态或版本细节（排期 §2.2 配对凭证隔离验收项）；
-//! - `/api/auth/*`：占位（501），配对与可信设备在子任务 4 实现；
-//! - 静态资源：rust-embed 编译期内联 `frontend-remote/dist`，SPA fallback；
-//!   `/ws` 双向通道属子任务 2，此处不注册。
+//! - `/api/auth/*` 与 `/ws` 由 `ws.rs` 注册（配对/可信设备/实时通道）；
+//! - 静态资源：rust-embed 编译期内联 `frontend-remote/dist`，SPA fallback。
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use rust_embed::RustEmbed;
 
@@ -43,28 +42,10 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
 }
 
-/// `/api/auth/*` 占位：配对与可信设备持久化在子任务 4 实现。
-///
-/// 返回 501 而非 404，便于区分"路由已规划未实现"与"路径不存在"，
-/// 同时不暴露任何鉴权信息。
-async fn auth_placeholder() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "auth_not_available",
-            "message": "配对与可信设备功能尚未实现（子任务 4）"
-        })),
-    )
-        .into_response()
-}
-
-/// 组装应用路由。
+/// 组装应用路由（静态资源 + `/api/health`；`/ws` 与 `/api/auth/*` 由 `ws.rs` 合并）。
 pub fn router() -> Router {
     Router::new()
         .route("/api/health", get(health))
-        .route("/api/auth/pair", post(auth_placeholder))
-        .route("/api/auth/session", get(auth_placeholder))
-        .route("/api/auth/forget", post(auth_placeholder))
         .fallback(static_handler)
 }
 
@@ -86,31 +67,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], br#"{"ok":true}"#);
-    }
-
-    #[tokio::test]
-    async fn auth_routes_are_explicit_placeholders() {
-        for (method, path) in [
-            ("POST", "/api/auth/pair"),
-            ("GET", "/api/auth/session"),
-            ("POST", "/api/auth/forget"),
-        ] {
-            let response = router()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                response.status(),
-                Status::NOT_IMPLEMENTED,
-                "{method} {path}"
-            );
-        }
     }
 
     #[tokio::test]
