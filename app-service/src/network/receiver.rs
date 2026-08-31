@@ -212,10 +212,19 @@ mod tests {
 
     /// 自环往返：VBanSender 发送 → VBanReceiver 接收抽取 → 校验 PCM 一致。
     fn round_trip(bit_format: VBanBitFormat, channels: usize, sample_rate: u32, frames: usize) {
-        let port = random_port();
-        let bind_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        // 「探测空闲端口→释放→再绑定」存在 TOCTOU 竞态：并发测试可能占用
+        // 刚释放的端口，绑定失败时换端口重试。
+        let (bind_addr, mut receiver) = (|| {
+            for _ in 0..8 {
+                let port = random_port();
+                let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+                if let Ok(receiver) = VBanReceiver::bind(addr) {
+                    return (addr, receiver);
+                }
+            }
+            panic!("多次尝试后仍无法绑定测试端口");
+        })();
         let frame_samples = frames * channels;
-        let mut receiver = VBanReceiver::bind(bind_addr).unwrap();
 
         let samples: Vec<f32> = (0..frame_samples)
             .map(|i| (i as f32 / frame_samples as f32) * 0.8 - 0.4)

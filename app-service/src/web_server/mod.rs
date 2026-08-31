@@ -525,13 +525,22 @@ mod tests {
         ))
         .await
         .unwrap();
-        let ack = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("ack 超时")
-            .expect("流结束")
-            .expect("协议错误");
-        let ack = ack.into_text().unwrap();
-        assert!(ack.contains(r#""ack":"set_send_gain""#), "{ack}");
+        // 控制命令会使 revision 变化并触发 initial_state 重推，可能先于 ack 到达；
+        // 客户端本就应容忍任意消息顺序，这里循环跳过直到收到 ack。
+        let mut ack: Option<String> = None;
+        for _ in 0..10 {
+            let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("ack 超时")
+                .expect("流结束")
+                .expect("协议错误");
+            let text = message.into_text().unwrap();
+            if text.contains(r#""ack":"set_send_gain""#) {
+                ack = Some(text);
+                break;
+            }
+        }
+        let ack = ack.expect("应收到 set_send_gain 的 ack");
         assert!(ack.contains(r#""seq":101"#), "{ack}");
         assert_eq!(
             hub.route_snapshot().sends[0].gain_db(),
