@@ -48,6 +48,11 @@ pub struct WsState {
     pub auth: Arc<AuthState>,
     /// 当前服务是否为 HTTPS/WSS（决定 `Secure` Cookie 与凭证策略）。
     pub is_https: bool,
+    /// 是否要求配对/可信设备（`StateHub.require_pairing`，运行时可切换）。
+    ///
+    /// `false`（默认）：局域网内设备直接访问，`/ws` 不做凭证校验（仍校验 Origin）；
+    /// `true`：启用 M4 配对流程，`/ws` 只接受已配对设备的凭证 Cookie。
+    pub require_pairing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 实时 + 认证路由（带 `WsState`）。
@@ -59,30 +64,43 @@ pub fn ws_router() -> Router<WsState> {
         .route("/api/auth/forget", post(forget_handler))
 }
 
-/// WebSocket Upgrade 入口：先校验 Origin 与可信设备 Cookie，通过才升级。
+/// WebSocket Upgrade 入口：
+/// - 始终校验 Origin（与请求 Host 不匹配返回 403，防跨站 WebSocket 劫持）；
+/// - `require_pairing=false`（默认）：不校验凭证，局域网设备直接连接；
+/// - `require_pairing=true`：校验可信设备 Cookie（无凭证 401）。
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<WsState>,
     headers: HeaderMap,
 ) -> Response {
-    // Origin 校验：Cookie 有效但 Origin 不匹配时返回 403（任务书 §4.4）。
     if !origin_matches_request(&headers) {
         return (StatusCode::FORBIDDEN, "403 Forbidden").into_response();
     }
-    let cookie = extract_cookie(&headers, COOKIE_NAME);
-    let Some(device) = state.auth.verify_credential(cookie.as_deref()) else {
-        return (StatusCode::UNAUTHORIZED, "401 Unauthorized").into_response();
+    let require_pairing = state
+        .require_pairing
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let device = if require_pairing {
+        let cookie = extract_cookie(&headers, COOKIE_NAME);
+        match state.auth.verify_credential(cookie.as_deref()) {
+            Some(device) => Some(device),
+            None => return (StatusCode::UNAUTHORIZED, "401 Unauthorized").into_response(),
+        }
+    } else {
+        None
     };
     ws.on_upgrade(move |socket| handle_socket(socket, state, device))
 }
 
 /// 单个连接的主循环：先下发快照，再并行走「控制读 + 广播写」。
-async fn handle_socket(socket: WebSocket, state: WsState, device: DeviceSummary) {
+async fn handle_socket(socket: WebSocket, state: WsState, device: Option<DeviceSummary>) {
     let (mut sink, mut stream) = socket.split();
 
-    // 吊销通知：设备被忘记/重置时立即关闭本连接。
-    let (revoke_tx, mut revoke_rx) = mpsc::channel::<()>(1);
-    state.auth.register_connection(&device.id, revoke_tx);
+    // 吊销通知：仅配对模式下有设备；设备被忘记/重置时立即关闭本连接。
+    let mut revoke_rx = device.as_ref().map(|device| {
+        let (revoke_tx, revoke_rx) = mpsc::channel::<()>(1);
+        state.auth.register_connection(&device.id, revoke_tx);
+        revoke_rx
+    });
 
     // 连接即下发全量快照。
     let initial = json!({
@@ -166,8 +184,13 @@ async fn handle_socket(socket: WebSocket, state: WsState, device: DeviceSummary)
                     }
                     let _ = revision_rx.borrow_and_update();
                 },
-                _revoked = revoke_rx.recv() => {
-                    // 设备被忘记/重置：立即关闭连接（任务书 §4.4 忘记设备验收项）。
+                _revoked = async {
+                    match revoke_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    // 设备被忘记/重置（配对模式）：立即关闭连接。
                     let _ = sink
                         .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                             code: 4001,

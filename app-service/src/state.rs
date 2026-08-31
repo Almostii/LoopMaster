@@ -11,8 +11,8 @@
 //!   访问，绝不在 WASAPI 实时线程上触碰本模块。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use loopmaster_audio_core::RouteGraph;
 use serde::{Deserialize, Serialize};
@@ -125,7 +125,8 @@ pub fn local_ipv4_addresses() -> Vec<String> {
             }
             let octets = v4.octets();
             // 排除虚拟网卡/代理常用段：198.18/15（TUN）、100.64/10（CGNAT）。
-            if (octets[0] == 198 && octets[1] & 0xfe == 18) || (octets[0] == 100 && octets[1] & 0xc0 == 0x40)
+            if (octets[0] == 198 && octets[1] & 0xfe == 18)
+                || (octets[0] == 100 && octets[1] & 0xc0 == 0x40)
             {
                 continue;
             }
@@ -171,7 +172,9 @@ pub struct StateHub {
     /// 内嵌 Web 控制台句柄（随网络开关启停）。
     web: Mutex<Option<WebServerHandle>>,
     /// 局域网配对与可信设备（首次配对/长期记住/显式撤销）。
-    auth: std::sync::Arc<AuthState>,
+    auth: Arc<AuthState>,
+    /// 是否要求配对才能访问控制台（运行时可切换；`/ws` 与设备页共用）。
+    require_pairing: Arc<AtomicBool>,
     revision: AtomicU64,
     /// revision 变更通知：只保留最新值，订阅者只关心"变了"。
     notify: watch::Sender<u64>,
@@ -183,6 +186,10 @@ pub struct StateHub {
 impl StateHub {
     pub fn new(config_path: PathBuf) -> Self {
         let (notify, notify_rx) = watch::channel(0);
+        // 读取持久化的配对要求（默认开放访问）。
+        let require_pairing = AppConfig::load_from(&config_path)
+            .map(|config| config.network.require_pairing)
+            .unwrap_or(false);
         Self {
             config_path: config_path.clone(),
             route_operation: Mutex::new(()),
@@ -193,7 +200,8 @@ impl StateHub {
             discovery: Mutex::new(None),
             bridge: Mutex::new(None),
             web: Mutex::new(None),
-            auth: std::sync::Arc::new(AuthState::new(config_path.clone())),
+            auth: Arc::new(AuthState::new(config_path.clone())),
+            require_pairing: Arc::new(AtomicBool::new(require_pairing)),
             revision: AtomicU64::new(0),
             notify,
             _notify_rx: notify_rx,
@@ -390,8 +398,30 @@ impl StateHub {
     }
 
     /// 局域网配对与可信设备状态（首次配对/长期记住/显式撤销）。
-    pub fn auth(&self) -> &std::sync::Arc<AuthState> {
+    pub fn auth(&self) -> &Arc<AuthState> {
         &self.auth
+    }
+
+    /// 是否要求配对才能访问控制台（动态开关，`/ws` 每请求实时读取）。
+    pub fn require_pairing(&self) -> bool {
+        self.require_pairing.load(Ordering::Relaxed)
+    }
+
+    /// 共享的"要求配对"开关（供 `/ws` 处理器与设备页实时读取/切换）。
+    pub fn require_pairing_flag(&self) -> Arc<AtomicBool> {
+        self.require_pairing.clone()
+    }
+
+    /// 切换"要求配对"并持久化到配置。
+    pub fn set_require_pairing(&self, enabled: bool) -> Result<(), ConfigError> {
+        self.require_pairing.store(enabled, Ordering::Relaxed);
+        let mut config = match AppConfig::load_from(&self.config_path) {
+            Ok(config) => config,
+            Err(ConfigError::NotFound(_)) => AppConfig::new(RouteGraph::default()),
+            Err(error) => return Err(error),
+        };
+        config.network.require_pairing = enabled;
+        config.save_to(&self.config_path)
     }
 }
 

@@ -276,6 +276,7 @@ async fn serve(
             meter_tx,
             auth: hub.auth().clone(),
             is_https: config.tls,
+            require_pairing: hub.require_pairing_flag(),
         })
         .merge(routes::router())
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -711,7 +712,13 @@ mod tests {
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&config_dir).unwrap();
-        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        let config_path = config_dir.join("config.json");
+        // 本测试验证配对/鉴权路径，需显式开启 require_pairing。
+        let mut config =
+            crate::config::AppConfig::new(loopmaster_audio_core::RouteGraph::default());
+        config.network.require_pairing = true;
+        config.save_to(&config_path).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_path));
         let handle = start(
             WebServerConfig {
                 port: 0,

@@ -1554,6 +1554,21 @@ fn reset_trust(state: tauri::State<'_, Arc<AppState>>) -> Result<(), String> {
     state.auth().reset().map_err(|error| error.to_string())
 }
 
+/// 是否要求配对才能访问控制台（默认关闭：局域网内设备直接访问）。
+#[tauri::command]
+fn get_pairing_required(state: tauri::State<'_, Arc<AppState>>) -> bool {
+    state.require_pairing()
+}
+
+/// 切换"要求配对"：动态生效（/ws 实时校验）并持久化到配置。
+#[tauri::command]
+fn set_pairing_required(
+    state: tauri::State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    state.set_require_pairing(enabled).map_err(|error| error.to_string())
+}
+
 /// 停止内嵌 Web 控制台（幂等；优雅关闭放后台线程，不阻塞 UI）。
 fn stop_web_console(state: &AppState) {
     let handle = state.web().take();
@@ -2485,6 +2500,8 @@ pub fn run() {
             list_trusted_devices,
             forget_device,
             reset_trust,
+            get_pairing_required,
+            set_pairing_required,
             add_manual_vban_node,
             set_network_enabled,
             list_devices,

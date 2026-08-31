@@ -234,6 +234,18 @@ export function resetTrust(): Promise<void> {
   return invoke<void>("reset_trust");
 }
 
+/** 是否要求配对才能访问控制台（默认 false：局域网内设备直接访问）。 */
+export function getPairingRequired(): Promise<boolean> {
+  if (!isTauriRuntime) return Promise.resolve(false);
+  return invoke<boolean>("get_pairing_required");
+}
+
+/** 切换"要求配对"（动态生效并持久化）。 */
+export function setPairingRequired(enabled: boolean): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("set_pairing_required", { enabled });
+}
+
 /** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
 export function addManualVbanNode(params: {
   name: string;

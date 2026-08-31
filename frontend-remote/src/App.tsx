@@ -151,8 +151,8 @@ export default function App() {
         <h1>LoopMaster Remote</h1>
         <p>{STATUS_TEXT[status]}</p>
         <p className="remote-hint">
-          无法连接宿主（未配对或宿主未开启网络功能）。请在桌面端设备页点击「添加设备」
-          后用本机扫码完成首次配对；已配对设备将自动重连。
+          无法连接宿主，正在自动重连。请确认宿主已开启网络功能、本机与宿主在同一局域网，
+          并访问宿主的局域网 IP（不是本机自己的 IP）。
         </p>
       </main>
     );
