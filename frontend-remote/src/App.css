@@ -1,0 +1,36 @@
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #1b1e23;
+  color: #e5e7eb;
+}
+
+.remote-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  gap: 0.5rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.remote-shell h1 {
+  font-size: 1.5rem;
+  margin: 0;
+}
+
+.remote-shell p {
+  margin: 0.25rem 0;
+  color: #9aa3ad;
+}
+
+.remote-hint {
+  max-width: 28rem;
+  font-size: 0.9rem;
+}

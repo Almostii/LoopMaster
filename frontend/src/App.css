@@ -1609,17 +1609,70 @@ button:disabled {
   margin-bottom: 16px;
 }
 .device-firewall-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 13px;
   font-weight: 700;
   color: #92400e;
   margin-bottom: 6px;
 }
+
+.device-firewall-retry {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: #92400e;
+  background: transparent;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.device-firewall-retry:hover:not(:disabled) {
+  background: #fef3c7;
+}
+
+.device-firewall-retry:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.device-firewall-rules {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.device-firewall-badge {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+}
+
+.device-firewall-badge.ok {
+  color: #065f46;
+  background: #d1fae5;
+  border-color: #10b981;
+}
+
+.device-firewall-badge.warn {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #f59e0b;
+}
+
 .device-firewall-desc {
   font-size: 12px;
   color: #78350f;
   line-height: 1.7;
   word-break: break-all;
 }
+
 [data-theme="dark"] .device-firewall-card {
   background: rgba(245, 158, 11, 0.1);
   border-color: #b45309;
@@ -1629,6 +1682,23 @@ button:disabled {
 }
 [data-theme="dark"] .device-firewall-desc {
   color: #fcd34d;
+}
+[data-theme="dark"] .device-firewall-retry {
+  color: #fbbf24;
+  border-color: #b45309;
+}
+[data-theme="dark"] .device-firewall-retry:hover:not(:disabled) {
+  background: rgba(245, 158, 11, 0.18);
+}
+[data-theme="dark"] .device-firewall-badge.ok {
+  color: #a7f3d0;
+  background: rgba(16, 185, 129, 0.16);
+  border-color: #10b981;
+}
+[data-theme="dark"] .device-firewall-badge.warn {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.16);
+  border-color: #b45309;
 }
 .device-nodes-head {
   display: flex;
