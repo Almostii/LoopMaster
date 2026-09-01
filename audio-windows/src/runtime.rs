@@ -9,8 +9,9 @@ use crate::{
     WindowsAudioError,
 };
 use loopmaster_audio_core::{
-    AudioFifo, AudioFifoConsumer, FixedOutputResampler, MixerPlan, RouteGraphSnapshot, SourceKind,
-    SourceSpec, DEFAULT_BLOCK_FRAMES, INTERNAL_CHANNELS,
+    AudioFifo, AudioFifoConsumer, AudioFifoProducer, FixedOutputResampler, MixerPlan,
+    RouteGraphSnapshot, SinkId, SinkKind, SourceId, SourceKind, SourceSpec, DEFAULT_BLOCK_FRAMES,
+    INTERNAL_CHANNELS,
 };
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -178,6 +179,9 @@ pub struct AudioEngineStats {
     /// 每条 send 的逐通道（L/R）输出峰值幅度（0.0~1.0，静音为 0.0）。
     /// 键为 send id；值 `[left_peak, right_peak]`。用于逐通道电平表。
     pub send_peaks: std::collections::HashMap<String, [f32; 2]>,
+    /// 每条 send 的逐通道（L/R）RMS 幅度（0.0~1.0，静音为 0.0）。
+    /// 键为 send id；值 `[left_rms, right_rms]`。与 `send_peaks` 同批产生。
+    pub send_rms: std::collections::HashMap<String, [f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -211,6 +215,8 @@ struct Counters {
     /// 每条 send 的逐通道（L/R）输出峰值，随时间取最大值并衰减。
     /// 用 Mutex<HashMap> 承载，因为需要按 send id 动态读写并整体快照。
     send_peaks: Mutex<std::collections::HashMap<loopmaster_audio_core::SendId, [f32; 2]>>,
+    /// 每条 send 的逐通道（L/R）RMS，随 block 更新（与峰值同批）。
+    send_rms: Mutex<std::collections::HashMap<loopmaster_audio_core::SendId, [f32; 2]>>,
 }
 
 impl Counters {
@@ -241,8 +247,29 @@ impl Counters {
                 .iter()
                 .map(|(id, peaks)| (id.0.clone(), *peaks))
                 .collect(),
+            send_rms: self
+                .send_rms
+                .lock()
+                .expect("RMS 锁未中毒")
+                .iter()
+                .map(|(id, rms)| (id.0.clone(), *rms))
+                .collect(),
         }
     }
+}
+
+/// 网络（VBAN）节点与引擎 FIFO 的桥接句柄。
+///
+/// 引擎启动时，为 VBAN 源/目标创建 FIFO 并把"非 WASAPI 端"暴露给网络桥接层：
+/// - `vban_source_producers`：网络接收线程把 VBAN 帧写入这些 producer，混音从
+///   对应 consumer 读取（作为普通 source 处理）；
+/// - `vban_sink_consumers`：混音把结果写入对应 producer，网络发送线程从这些
+///   consumer 读取帧经 VBAN 发送。
+pub struct NetworkIoHandles {
+    /// `(source_id, producer)`：VBAN 接收帧写入的 FIFO producer。
+    pub vban_source_producers: Vec<(SourceId, AudioFifoProducer)>,
+    /// `(sink_id, consumer)`：VBAN 发送帧读取的 FIFO consumer。
+    pub vban_sink_consumers: Vec<(SinkId, AudioFifoConsumer)>,
 }
 
 pub struct AudioEngine {
@@ -253,6 +280,8 @@ pub struct AudioEngine {
     counters: Arc<Counters>,
     last_error: Arc<Mutex<Option<String>>>,
     graph_tx: Arc<Mutex<Option<mpsc::Sender<RouteGraphSnapshot>>>>,
+    /// 网络桥接句柄接收端（supervisor 每次创建 session 时发送）。
+    network_handles_rx: Mutex<Option<mpsc::Receiver<NetworkIoHandles>>>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -284,9 +313,11 @@ impl AudioEngine {
                 rendered_peak: AtomicU32::new(0),
                 rendered_non_silent_blocks: AtomicU64::new(0),
                 send_peaks: Mutex::new(std::collections::HashMap::new()),
+                send_rms: Mutex::new(std::collections::HashMap::new()),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
+            network_handles_rx: Mutex::new(None),
             workers: Vec::new(),
         })
     }
@@ -306,6 +337,9 @@ impl AudioEngine {
         let counters = Arc::clone(&self.counters);
         let last_error = Arc::clone(&self.last_error);
         let graph_tx = Arc::clone(&self.graph_tx);
+        // 网络桥接句柄通道：supervisor 每次成功创建 session 时发送。
+        let (network_handles_tx, network_handles_rx) = mpsc::channel();
+        *self.network_handles_rx.lock().expect("网络句柄锁未中毒") = Some(network_handles_rx);
         let supervisor = thread::Builder::new()
             .name("loopmaster-audio-supervisor".into())
             .spawn(move || {
@@ -318,11 +352,27 @@ impl AudioEngine {
                     last_error,
                     counters,
                     graph_tx,
+                    network_handles_tx,
                 );
             })
             .expect("创建音频 supervisor 失败");
         self.workers = vec![supervisor];
         Ok(())
+    }
+
+    /// 取最近一次启动 session 的网络桥接句柄（若有）。
+    ///
+    /// 供网络桥接层在引擎启动后获取 VBAN 源/目标的 FIFO 句柄。
+    ///
+    /// 阻塞直到 supervisor 完成首次 session 并把 `NetworkIoHandles` 发送到通道
+    /// （supervisor 在每个成功 session 后都会重发；首次 session 建好后即可拿到）。
+    /// 引擎未运行（无 receiver）时返回 `None`。
+    pub fn recv_network_handles(&self) -> Option<NetworkIoHandles> {
+        let mut slot = self.network_handles_rx.lock().expect("网络句柄锁未中毒");
+        match slot.as_mut() {
+            Some(rx) => rx.recv().ok(),
+            None => None,
+        }
     }
 
     pub fn update_graph(&mut self, graph: RouteGraphSnapshot) -> Result<(), AudioEngineError> {
@@ -431,18 +481,11 @@ fn validate_config(config: &AudioEngineConfig) -> Result<(), AudioEngineError> {
             SourceKind::DeviceCapture
             | SourceKind::DeviceLoopback
             | SourceKind::ProcessLoopback => {}
+            // VBAN 网络源不依赖真实 endpoint/进程，无需校验。
+            SourceKind::Vban => {}
         }
     }
     Ok(())
-}
-
-fn graph_sink_endpoints(graph: &RouteGraphSnapshot) -> Vec<loopmaster_audio_core::EndpointId> {
-    graph
-        .graph()
-        .sinks
-        .iter()
-        .map(|sink| sink.endpoint_id.clone())
-        .collect()
 }
 
 /// 路由图中是否存在需要按端点 active 检查的普通设备捕获/回环 source。
@@ -481,9 +524,15 @@ fn all_endpoints_active(graph: &RouteGraphSnapshot) -> Result<bool, WindowsAudio
                 }
             }
             SourceKind::ProcessLoopback => {}
+            // VBAN 网络源不依赖真实设备。
+            SourceKind::Vban => {}
         }
     }
     for sink in &graph.graph().sinks {
+        // VBAN 网络目标不依赖真实渲染设备。
+        if sink.kind == SinkKind::Vban {
+            continue;
+        }
         if !backend.is_endpoint_active(&sink.endpoint_id, EndpointFlow::Render)? {
             return Ok(false);
         }
@@ -560,6 +609,7 @@ fn supervisor_worker(
     error: Arc<Mutex<Option<String>>>,
     counters: Arc<Counters>,
     graph_tx_slot: Arc<Mutex<Option<mpsc::Sender<RouteGraphSnapshot>>>>,
+    network_handles_tx: mpsc::Sender<NetworkIoHandles>,
 ) {
     for attempt in 0..=DEFAULT_RECONNECT_ATTEMPTS {
         if engine_stop.load(Ordering::Acquire) {
@@ -617,10 +667,18 @@ fn supervisor_worker(
             };
         let (session_graph_tx, graph_rx) = mpsc::channel();
         *graph_tx_slot.lock().expect("路由通道锁未中毒") = Some(session_graph_tx);
-        let sink_endpoints = graph_sink_endpoints(&graph);
         let mut workers =
             Vec::with_capacity(graph.graph().sources.len() + graph.graph().sinks.len() + 1);
+        // 收集 VBAN 源/目标的网络桥接句柄。
+        let mut vban_source_producers = Vec::new();
+        let mut vban_sink_consumers = Vec::new();
         for (source, producer) in graph.graph().sources.iter().cloned().zip(source_producers) {
+            if source.kind == SourceKind::Vban {
+                // 网络源：由网络桥接层直接写入 FIFO producer，混音从对应
+                // consumer 读取；不启动 WASAPI capture_worker。
+                vban_source_producers.push((source.id, producer));
+                continue;
+            }
             workers.push(spawn_capture_worker(
                 source,
                 block_frames,
@@ -642,9 +700,15 @@ fn supervisor_worker(
             mixer_consumers,
             mixer_producers,
         ));
-        for (endpoint, consumer) in sink_endpoints.into_iter().zip(render_consumers) {
+        for (sink, consumer) in graph.graph().sinks.iter().cloned().zip(render_consumers) {
+            if sink.kind == SinkKind::Vban {
+                // 网络目标：混音结果写入对应 producer，网络发送线程从该
+                // consumer 读取；不启动 WASAPI render_worker。
+                vban_sink_consumers.push((sink.id, consumer));
+                continue;
+            }
             workers.push(spawn_render_worker(
-                endpoint,
+                sink.endpoint_id,
                 block_frames,
                 Arc::clone(&session_stop),
                 Arc::clone(&state),
@@ -653,6 +717,11 @@ fn supervisor_worker(
                 consumer,
             ));
         }
+        // 把网络桥接句柄发给 AudioEngine（供网络桥接层获取）。
+        let _ = network_handles_tx.send(NetworkIoHandles {
+            vban_source_producers,
+            vban_sink_consumers,
+        });
         // 给三个 worker 一个有界启动窗口；设备在打开阶段失效时，
         // session_stop 会先置位，避免把尚未建立的会话报告为 Running。
         thread::sleep(Duration::from_millis(50));
@@ -924,6 +993,17 @@ fn capture_worker(
                 },
             )?)
         }
+        // VBAN 网络源由网络桥接层直接把接收帧写入 mixer FIFO，不经过 WASAPI
+        // capture_worker。此处不应被调度到；防御性返回错误。
+        SourceKind::Vban => {
+            fail(
+                &state,
+                &stop,
+                &error,
+                "VBAN 网络源不应进入 WASAPI 捕获 worker".into(),
+            );
+            return Err(());
+        }
     };
     let silence = vec![0.0f32; block_frames * INTERNAL_CHANNELS];
     let mut capture_resampler = CaptureResampler::new(
@@ -1128,7 +1208,7 @@ fn mixer_worker(
                 INTERNAL_CHANNELS,
             ) {
                 Ok(next_plan) => {
-                    // plan 变更时清理已不存在的 send 峰值，避免旧路由的峰值残留。
+                    // plan 变更时清理已不存在的 send 峰值/RMS，避免旧路由数据残留。
                     {
                         let valid_ids: std::collections::HashSet<_> = next_plan
                             .send_peaks()
@@ -1137,6 +1217,8 @@ fn mixer_worker(
                             .collect();
                         let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
                         peaks.retain(|id, _| valid_ids.contains(id));
+                        let mut rms = counters.send_rms.lock().expect("RMS 锁未中毒");
+                        rms.retain(|id, _| valid_ids.contains(id));
                     }
                     plan = next_plan;
                     counters.graph_updates.fetch_add(1, Ordering::Relaxed);
@@ -1206,13 +1288,18 @@ fn mixer_worker(
             fail(&state, &stop, &error, e.to_string());
             return Err(());
         }
-        // 收集每条 send 的逐通道（L/R）峰值。
-        // 直接采用当前处理块的峰值，由前端负责 peak-hold / decay 的平滑显示。
+        // 收集每条 send 的逐通道（L/R）峰值与 RMS。
+        // 直接采用当前处理块的数值，由前端负责 peak-hold / decay 的平滑显示。
         {
             let mut peaks = counters.send_peaks.lock().expect("峰值锁未中毒");
             for (id, block_peaks) in plan.send_peaks() {
                 let entry = peaks.entry(id.clone()).or_insert([0.0f32; 2]);
                 entry.copy_from_slice(block_peaks);
+            }
+            let mut rms = counters.send_rms.lock().expect("RMS 锁未中毒");
+            for (id, block_rms) in plan.send_rms() {
+                let entry = rms.entry(id.clone()).or_insert([0.0f32; 2]);
+                entry.copy_from_slice(block_rms);
             }
         }
 
@@ -1355,8 +1442,8 @@ mod tests {
     use super::*;
     use crate::AUDCLNT_E_DEVICE_INVALIDATED;
     use loopmaster_audio_core::{
-        BusId, BusSpec, EndpointId, RouteGraph, SendId, SendSpec, SinkId, SinkSpec, SourceId,
-        SourceKind, SourceSpec,
+        BusId, BusSpec, EndpointId, RouteGraph, SendId, SendSpec, SinkId, SinkKind, SinkSpec,
+        SourceId, SourceKind, SourceSpec,
     };
 
     fn config(source_kind: SourceKind, source_count: usize) -> AudioEngineConfig {
@@ -1367,6 +1454,7 @@ mod tests {
                 endpoint_id: Some(EndpointId(format!("capture-{index}"))),
                 process_id: None,
                 executable_path: None,
+                stream_name: None,
                 display_name: format!("Source {index}"),
             })
             .collect::<Vec<_>>();
@@ -1380,6 +1468,9 @@ mod tests {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1435,6 +1526,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: Some(1234),
                 executable_path: None,
+                stream_name: None,
                 display_name: "process".into(),
             }],
             buses: vec![BusSpec {
@@ -1445,6 +1537,9 @@ mod tests {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1478,6 +1573,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: None,
                 executable_path: None,
+                stream_name: None,
                 display_name: "process".into(),
             }],
             buses: vec![BusSpec {
@@ -1488,6 +1584,9 @@ mod tests {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {
@@ -1526,6 +1625,7 @@ mod tests {
                 endpoint_id: None,
                 process_id: Some(1234),
                 executable_path: Some("C:/process-1.exe".into()),
+                stream_name: None,
                 display_name: "process-1".into(),
             }],
             buses: vec![BusSpec {
@@ -1536,6 +1636,9 @@ mod tests {
                 id: SinkId("sink".into()),
                 endpoint_id: EndpointId("render".into()),
                 display_name: "Render".into(),
+                kind: SinkKind::Device,
+                stream_name: None,
+                remote_addr: None,
             }],
             sends: vec![
                 SendSpec::SourceToBus {

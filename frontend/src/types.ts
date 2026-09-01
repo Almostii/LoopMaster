@@ -34,6 +34,10 @@ export interface ExternalOutputBrief {
   id: string;
   endpoint_id: string;
   display_name: string;
+  /** 输出目标类型："device" | "vban"。旧版本无此字段时视为 "device"。 */
+  kind?: "device" | "vban";
+  /** VBAN 网络目标的流名（kind === "vban" 时使用）。 */
+  stream_name?: string | null;
 }
 
 /** 应用设置（设置页持久化内容）。 */
@@ -107,3 +111,36 @@ export const DEVICE_STATUS_LABEL: Record<string, string> = {
   unsupported: "不支持",
   error: "错误",
 };
+
+// ---------- 网络设备（局域网 VBAN 节点） ----------
+
+/** 本机网络身份概要。 */
+export interface NodeIdentityBrief {
+  node_id: string;
+  device_name: string;
+  network_enabled: boolean;
+  web_port: number;
+  /** 本机 IPv4 地址列表（多网卡时多个），供跨机连接时查看。 */
+  addresses?: string[];
+}
+
+/** 局域网发现的 VBAN 节点概要。 */
+export interface NetworkNodeBrief {
+  node_id: string;
+  name: string;
+  addresses: string[];
+  port: number;
+  sample_rate: number;
+  channels: number;
+  caps: string;
+}
+
+/** 节点上线事件负载。 */
+export interface NodeResolvedEvent {
+  node: NetworkNodeBrief;
+}
+
+/** 节点下线事件负载。 */
+export interface NodeRemovedEvent {
+  node_id: string;
+}

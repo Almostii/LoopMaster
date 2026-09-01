@@ -10,6 +10,7 @@ mod mixer;
 mod resampler;
 mod route_snapshot;
 mod test_tone;
+pub mod vban;
 
 pub use fifo::{
     AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
@@ -21,6 +22,14 @@ pub use resampler::{
 };
 pub use route_snapshot::RouteGraphSnapshot;
 pub use test_tone::{fill_block, TestToneConfig, TestToneKind, TonePhase};
+pub use vban::clock_drift::ClockDriftCompensator;
+pub use vban::jitter::{VBanJitterBuffer, VBanJitterError, VBanJitterStats};
+pub use vban::packet::{
+    max_samples_per_channel, sample_rate_to_index, VBanBitFormat, VBanHeader, VBanPacketError,
+    VBanProtocol, VBanStreamConfig, SAMPLE_RATE_INDEX_TO_HZ, VBAN_FRAME_WINDOW, VBAN_HEADER_SIZE,
+    VBAN_MAGIC, VBAN_MAX_PACKET_SIZE, VBAN_MAX_PAYLOAD_SIZE, VBAN_MAX_SAMPLES_PER_CHANNEL,
+    VBAN_STREAM_NAME_SIZE,
+};
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 48_000;
 pub const INTERNAL_CHANNELS: usize = 2;
@@ -63,6 +72,9 @@ pub enum SourceKind {
     DeviceCapture,
     DeviceLoopback,
     ProcessLoopback,
+    /// VBAN 网络接收源：接收远端电脑经 UDP 发送的音频，作为本机混音输入。
+    /// 不依赖真实 WASAPI endpoint，`endpoint_id` 为 `None`。
+    Vban,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,7 +88,20 @@ pub struct SourceSpec {
     /// 旧配置（无此字段）通过 `#[serde(default)]` 回退为 `None`。
     #[serde(default)]
     pub executable_path: Option<String>,
+    /// VBAN 网络接收源的流名（`SourceKind::Vban` 时使用）；其它类型为 `None`。
+    #[serde(default)]
+    pub stream_name: Option<String>,
     pub display_name: String,
+}
+
+/// 输出目标的类型。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SinkKind {
+    /// 物理/虚拟 WASAPI 渲染设备。
+    #[default]
+    Device,
+    /// VBAN 网络发送目标：把混音结果经 UDP 发送到远端电脑。
+    Vban,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +109,16 @@ pub struct SinkSpec {
     pub id: SinkId,
     pub endpoint_id: EndpointId,
     pub display_name: String,
+    /// 输出目标类型（默认 `Device`）。旧配置缺省时回退到 `Device`。
+    #[serde(default)]
+    pub kind: SinkKind,
+    /// VBAN 发送目标的流名（`SinkKind::Vban` 时使用）；`Device` 为 `None`。
+    #[serde(default)]
+    pub stream_name: Option<String>,
+    /// VBAN 发送目标的远端地址（`"ip:port"`，`SinkKind::Vban` 时使用）；
+    /// `Device` 为 `None`。
+    #[serde(default)]
+    pub remote_addr: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -173,6 +208,10 @@ pub enum RouteGraphError {
     DuplicateSourceEndpoint(String),
     #[error("sink endpoint ID 重复: {0}")]
     DuplicateSinkEndpoint(String),
+    #[error("VBAN 目标流名非法（须为 1..=16 字节可打印 ASCII）: {0}")]
+    InvalidVbanStreamName(String),
+    #[error("VBAN 目标远端地址非法（须为 ip:port）: {0}")]
+    InvalidVbanRemoteAddr(String),
     #[error("source 不存在: {0}")]
     MissingSource(String),
     #[error("bus 不存在: {0}")]
@@ -193,7 +232,16 @@ impl RouteGraph {
             if !source_ids.insert(source.id.clone()) {
                 return Err(RouteGraphError::DuplicateSource(source.id.0.clone()));
             }
-            if let Some(endpoint_id) = &source.endpoint_id {
+            if source.kind == SourceKind::Vban {
+                // VBAN 接收源必须携带合法流名（1..=16 字节可打印 ASCII）。
+                let name = source.stream_name.as_deref().unwrap_or_default();
+                let valid = !name.is_empty()
+                    && name.len() <= crate::vban::packet::VBAN_STREAM_NAME_SIZE
+                    && name.bytes().all(|b| (32..=126).contains(&b));
+                if !valid {
+                    return Err(RouteGraphError::InvalidVbanStreamName(source.id.0.clone()));
+                }
+            } else if let Some(endpoint_id) = &source.endpoint_id {
                 if !source_endpoints.insert(endpoint_id.clone()) {
                     return Err(RouteGraphError::DuplicateSourceEndpoint(
                         endpoint_id.0.clone(),
@@ -207,7 +255,27 @@ impl RouteGraph {
             if !sink_ids.insert(sink.id.clone()) {
                 return Err(RouteGraphError::DuplicateSink(sink.id.0.clone()));
             }
-            if !sink_endpoints.insert(sink.endpoint_id.clone()) {
+            // 仅对真实渲染设备校验 endpoint 去重；VBAN 网络目标不依赖真实
+            // endpoint，其身份由 stream_name 标识。
+            if sink.kind == SinkKind::Vban {
+                // VBAN 目标必须携带合法流名（1..=16 字节可打印 ASCII）与远端地址。
+                let name = sink.stream_name.as_deref().unwrap_or_default();
+                let valid = !name.is_empty()
+                    && name.len() <= crate::vban::packet::VBAN_STREAM_NAME_SIZE
+                    && name.bytes().all(|b| (32..=126).contains(&b));
+                if !valid {
+                    return Err(RouteGraphError::InvalidVbanStreamName(sink.id.0.clone()));
+                }
+                // 远端地址必须存在且可解析为 SocketAddr。
+                let addr_ok = sink
+                    .remote_addr
+                    .as_deref()
+                    .and_then(|s| s.parse::<std::net::SocketAddr>().ok())
+                    .is_some();
+                if !addr_ok {
+                    return Err(RouteGraphError::InvalidVbanRemoteAddr(sink.id.0.clone()));
+                }
+            } else if !sink_endpoints.insert(sink.endpoint_id.clone()) {
                 return Err(RouteGraphError::DuplicateSinkEndpoint(
                     sink.endpoint_id.0.clone(),
                 ));
@@ -265,6 +333,7 @@ mod route_graph_tests {
             endpoint_id: endpoint.map(|value| EndpointId(value.into())),
             process_id: None,
             executable_path: None,
+            stream_name: None,
             display_name: id.into(),
         }
     }
@@ -274,6 +343,9 @@ mod route_graph_tests {
             id: SinkId(id.into()),
             endpoint_id: EndpointId(endpoint.into()),
             display_name: id.into(),
+            kind: SinkKind::Device,
+            stream_name: None,
+            remote_addr: None,
         }
     }
 

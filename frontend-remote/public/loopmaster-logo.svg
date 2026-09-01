@@ -1,0 +1,20 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="c1" x1="60" y1="60" x2="160" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34D399"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="c2" x1="196" y1="60" x2="96" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FB7185"/>
+      <stop offset="1" stop-color="#EC4899"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 白底圆角方 -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#FFFFFF"/>
+
+  <!-- 左下环：绿→蓝，带斜度，闭合无断口 -->
+  <circle cx="106" cy="146" r="58" stroke="url(#c1)" stroke-width="16" fill="none" transform="rotate(-18 106 146)"/>
+  <!-- 右上环：粉，带斜度，闭合无断口 -->
+  <circle cx="150" cy="110" r="58" stroke="url(#c2)" stroke-width="16" fill="none" transform="rotate(-18 150 110)"/>
+</svg>
