@@ -445,9 +445,17 @@ function App() {
     setSelectedCard(null);
   }
 
-  /** 键盘 Delete 删除当前选中项 */
+  /** 键盘 Delete 删除当前选中项（在重命名输入框等可编辑元素聚焦时跳过，
+   * 让 Delete/Backspace 走正常的字符编辑；否则在重命名时按一下就删整张卡片）。 */
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedCard) {
           handleDeleteSelectedCard();
