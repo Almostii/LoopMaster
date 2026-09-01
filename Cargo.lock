@@ -746,7 +746,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "loopmaster-app-service"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "axum",
  "axum-server",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "loopmaster-audio-core"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "proptest",
  "rtrb",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "loopmaster-audio-windows"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "loopmaster-audio-core",
  "thiserror 2.0.20",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "loopmaster-diagnostics"
-version = "1.0.0"
+version = "1.2.0"
 dependencies = [
  "loopmaster-audio-core",
  "loopmaster-audio-windows",

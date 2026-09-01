@@ -98,9 +98,10 @@ export default function DeviceView() {
         setIdentity(id);
         setNodes(list);
         setError(null);
-        // 应用启动时网络功能已开启：自动放行防火墙（规则缺失时提权 UAC）。
+        // 仅展示防火墙放行状态，**不自动提权**：规则缺失/有遗留规则时由用户
+        // 点「重新放行」显式授权（避免每次打开页面触发 UAC 与提权进程闪现）。
         if (id.network_enabled) {
-          void ensureFirewall().catch(() => {});
+          void checkNetworkFirewall().then(setFirewall).catch(() => {});
         }
       })
       .catch((e) => {
