@@ -1,5 +1,5 @@
 // 远程控制台协议层（与 app-service/src/web_server/ws.rs 严格对齐）。
-// 协议冻结文档：Plan/2026-08-31-Web控制台DTO与可信设备模型冻结.md §1。
+// 协议冻结文档：Doc/Web控制台/2026-08-31-Web控制台DTO与可信设备模型冻结.md §1。
 
 export interface Source {
   id: string;

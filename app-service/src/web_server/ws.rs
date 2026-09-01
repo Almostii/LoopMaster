@@ -1,6 +1,6 @@
 //! WebSocket 实时通道（Phase 2 子任务 2）。
 //!
-//! 协议见 `Plan/2026-08-31-Web控制台DTO与可信设备模型冻结.md` §1：
+//! 协议见 `Doc/Web控制台/2026-08-31-Web控制台DTO与可信设备模型冻结.md` §1：
 //! - 上行：JSON 控制指令（`set_send_gain` / `set_send_muted` / `set_send_enabled` /
 //!   `add_send`），每条必须收到含相同 `seq` 的 `ack`/`error`；同一连接内重复
 //!   `seq` 幂等（直接回旧响应，不重复应用）；
