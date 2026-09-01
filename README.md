@@ -114,7 +114,7 @@ node scripts/build-remote.mjs   # 1) 安装依赖并构建 frontend-remote/dist
 
 ```powershell
 cd frontend
-npm run build:installer          # 2) tauri build（含桌面前端构建）+ 拷贝安装包
+npm run build:installer   # 2) tauri build（含桌面前端构建）+ 拷贝安装包
 ```
 
 产物：
@@ -151,10 +151,8 @@ LoopMaster/
 ├─ frontend-remote/  # 远程 Web 控制台（React + Vite，移动端触控调音台）
 │  ├─ src/           # App.tsx（音源/输出通道视图）、Fader/Meter、协议层
 │  └─ public/        # logo、PWA manifest、Service Worker
-├─ scripts/          # 仓库级构建脚本（build-remote、export-public）
+├─ scripts/          # 构建脚本（build-remote：远程前端构建入口）
 ├─ docs/             # 文档资源（如 README 截图）
-├─ Doc/              # 设计与开发文档（主文档、方案计划、开发日志）
-├─ Plan/             # 冻结文档（如 Web 控制台 DTO 与可信设备模型）
 ├─ LICENSE           # CC BY-NC 4.0
 └─ README.md
 ```
