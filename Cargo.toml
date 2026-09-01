@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 license = "CC-BY-NC-4.0"
 publish = false
@@ -16,3 +16,5 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+# 属性/模糊测试基础设施：用于音频算法与网络包（如 VBAN）的随机化验证。
+proptest = "1"

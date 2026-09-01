@@ -5,6 +5,10 @@ import type {
   DeviceBrief,
   EngineStateBrief,
   EngineStatsEvent,
+  NetworkNodeBrief,
+  NodeIdentityBrief,
+  NodeRemovedEvent,
+  NodeResolvedEvent,
   ProcessBrief,
   RouteProfileSnapshot,
 } from "./types";
@@ -50,6 +54,218 @@ export function listDevices(): Promise<DeviceBrief[]> {
 export function listAudioProcesses(): Promise<ProcessBrief[]> {
   if (!isTauriRuntime) return Promise.resolve([]);
   return invoke<ProcessBrief[]>("list_audio_processes");
+}
+
+const emptyIdentity: NodeIdentityBrief = {
+  node_id: "",
+  device_name: "",
+  network_enabled: false,
+  web_port: 0,
+};
+
+/** 返回本机网络身份（node_id/device_name/network_enabled/web_port）。 */
+export function getNodeIdentity(): Promise<NodeIdentityBrief> {
+  if (!isTauriRuntime) return Promise.resolve(emptyIdentity);
+  return invoke<NodeIdentityBrief>("get_node_identity");
+}
+
+/** 开启/关闭网络功能，返回更新后的本机身份。 */
+export function setNetworkEnabled(enabled: boolean): Promise<NodeIdentityBrief> {
+  if (!isTauriRuntime) return Promise.resolve(emptyIdentity);
+  return invoke<NodeIdentityBrief>("set_network_enabled", { enabled });
+}
+
+/** 返回当前局域网发现的 VBAN 节点列表快照。 */
+export function getNetworkNodes(): Promise<NetworkNodeBrief[]> {
+  if (!isTauriRuntime) return Promise.resolve([]);
+  return invoke<NetworkNodeBrief[]>("get_network_nodes");
+}
+
+export interface FirewallCheckResult {
+  port_available: boolean;
+  /** 两条规则（VBAN UDP + Web TCP）是否都已存在。 */
+  rule_exists: boolean;
+  /** VBAN（UDP 6980）入站规则是否存在。 */
+  vban_rule_exists: boolean;
+  /** Web 控制台（TCP）入站规则是否存在。 */
+  web_rule_exists: boolean;
+  checked: boolean;
+  message: string;
+}
+
+/** 检测网络功能所需的防火墙放行情况（VBAN UDP 6980 + Web 控制台 TCP）。 */
+export function checkNetworkFirewall(): Promise<FirewallCheckResult> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      port_available: true,
+      rule_exists: true,
+      vban_rule_exists: true,
+      web_rule_exists: true,
+      checked: false,
+      message: "",
+    });
+  }
+  return invoke<FirewallCheckResult>("check_network_firewall");
+}
+
+/**
+ * 自动放行 VBAN（UDP）与 Web 控制台（TCP）入站防火墙（提权，一次 UAC）。
+ *
+ * 幂等：规则已存在时不触发 UAC；规则校验失败时 reject，错误信息含可复制的
+ * 手动 netsh 命令。
+ */
+export function enableNetworkFirewall(): Promise<FirewallCheckResult> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      port_available: true,
+      rule_exists: true,
+      vban_rule_exists: true,
+      web_rule_exists: true,
+      checked: false,
+      message: "",
+    });
+  }
+  return invoke<FirewallCheckResult>("enable_network_firewall");
+}
+
+export interface CaTrustStatus {
+  /** 本机（当前用户受信任根证书存储）是否已信任该根证书。 */
+  installed: boolean;
+  /** 状态是否成功检测（Windows 且 PowerShell 可用）。 */
+  checked: boolean;
+  /** CA 证书文件路径（供 Firefox 等场景手动导入）。 */
+  ca_path: string | null;
+  message: string;
+}
+
+/** 查询本机根证书信任状态（只读）。 */
+export function getLocalCaStatus(): Promise<CaTrustStatus> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      installed: false,
+      checked: false,
+      ca_path: null,
+      message: "",
+    });
+  }
+  return invoke<CaTrustStatus>("get_local_ca_status");
+}
+
+/**
+ * 把本机根证书安装到当前用户的受信任根证书存储（无需管理员）。
+ *
+ * 安装后 Chrome / Edge 访问 https://<本机IP>:<端口> 不再告警；
+ * Firefox 不读 Windows 证书存储，需要手动导入或在 about:config 打开
+ * security.enterprise_roots.enabled。
+ */
+export function installLocalCa(): Promise<CaTrustStatus> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      installed: false,
+      checked: false,
+      ca_path: null,
+      message: "",
+    });
+  }
+  return invoke<CaTrustStatus>("install_local_ca");
+}
+
+/** 从当前用户的受信任根证书存储中移除 LoopMaster 根证书。 */
+export function removeLocalCa(): Promise<CaTrustStatus> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({
+      installed: false,
+      checked: false,
+      ca_path: null,
+      message: "",
+    });
+  }
+  return invoke<CaTrustStatus>("remove_local_ca");
+}
+
+export interface PairingInfo {
+  secret: string;
+  pin: string;
+  expires_in_secs: number;
+}
+
+export interface TrustedDevice {
+  id: string;
+  name: string;
+  permission: string;
+  last_seen_unix: number;
+}
+
+/** 开启配对窗口（5 分钟），返回 secret/PIN 供桌面渲染二维码。 */
+export function startPairing(): Promise<PairingInfo> {
+  if (!isTauriRuntime) {
+    return Promise.resolve({ secret: "", pin: "", expires_in_secs: 0 });
+  }
+  return invoke<PairingInfo>("start_pairing");
+}
+
+/** 关闭配对窗口。 */
+export function stopPairing(): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("stop_pairing");
+}
+
+/** 当前配对窗口状态（未开启/已过期返回 null）。 */
+export function getPairingStatus(): Promise<PairingInfo | null> {
+  if (!isTauriRuntime) return Promise.resolve(null);
+  return invoke<PairingInfo | null>("get_pairing_status");
+}
+
+/** 已信任设备列表。 */
+export function listTrustedDevices(): Promise<TrustedDevice[]> {
+  if (!isTauriRuntime) return Promise.resolve([]);
+  return invoke<TrustedDevice[]>("list_trusted_devices");
+}
+
+/** 忘记单个可信设备（立即关闭其连接）。 */
+export function forgetDevice(deviceId: string): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("forget_device", { deviceId });
+}
+
+/** 重置全部局域网信任。 */
+export function resetTrust(): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("reset_trust");
+}
+
+/** 是否要求配对才能访问控制台（默认 false：局域网内设备直接访问）。 */
+export function getPairingRequired(): Promise<boolean> {
+  if (!isTauriRuntime) return Promise.resolve(false);
+  return invoke<boolean>("get_pairing_required");
+}
+
+/** 切换"要求配对"（动态生效并持久化）。 */
+export function setPairingRequired(enabled: boolean): Promise<void> {
+  if (!isTauriRuntime) return Promise.resolve();
+  return invoke<void>("set_pairing_required", { enabled });
+}
+
+/** 手动添加一个 VBAN 网络节点（mDNS 不可用时的回退）。 */
+export function addManualVbanNode(params: {
+  name: string;
+  address: string;
+  port: number;
+  stream_name: string;
+  sample_rate?: number;
+  channels?: number;
+}): Promise<NetworkNodeBrief> {
+  if (!isTauriRuntime) {
+    return Promise.reject(unavailableInBrowser());
+  }
+  return invoke<NetworkNodeBrief>("add_manual_vban_node", {
+    name: params.name,
+    address: params.address,
+    port: params.port,
+    streamName: params.stream_name,
+    sampleRate: params.sample_rate,
+    channels: params.channels,
+  });
 }
 
 /** 返回进程可执行文件图标的 PNG data URI；无图标或平台不支持时返回 null。 */
@@ -110,6 +326,10 @@ export interface RouteEditRequest {
   endpoint_id?: string | null;
   process_id?: number | null;
   executable_path?: string | null;
+  /** VBAN 源/目标的流名（kind === "vban" 时使用）。 */
+  stream_name?: string | null;
+  /** VBAN 目标的远端地址（ip:port）。 */
+  remote_addr?: string | null;
   source_id?: string;
   output_channel_id?: string;
   external_output_id?: string;
@@ -203,6 +423,22 @@ export function onDeviceRestored(
   if (!isTauriRuntime) return Promise.resolve(() => {});
   return listen<{ endpoint_id: string }>("device-restored", (e) =>
     handler(e.payload.endpoint_id),
+  );
+}
+
+export function onNodeResolved(
+  handler: (node: NetworkNodeBrief) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime) return Promise.resolve(() => {});
+  return listen<NodeResolvedEvent>("node-resolved", (e) => handler(e.payload.node));
+}
+
+export function onNodeRemoved(
+  handler: (nodeId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime) return Promise.resolve(() => {});
+  return listen<NodeRemovedEvent>("node-removed", (e) =>
+    handler(e.payload.node_id),
   );
 }
 

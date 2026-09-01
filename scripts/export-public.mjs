@@ -23,6 +23,8 @@ const INCLUDE = [
   'frontend',
   // 远程控制台源码必须随公开仓库同步；dist 仍由 EXCLUDE_FRAGMENTS 排除并在构建时生成。
   'frontend-remote',
+  // 公开仓库构建入口（README 引用）；export-public.mjs 属私有仓库工具，不导出。
+  'scripts/build-remote.mjs',
   'Cargo.toml',
   'Cargo.lock',
   'README.md',
@@ -49,6 +51,7 @@ function isExcluded(relPath) {
   if (parts.some((part) => EXCLUDED_DIR_NAMES.has(part))) return true;
 
   const basename = parts.at(-1)?.toLowerCase() ?? '';
+  if (basename === 'agents.md') return true;
   if (basename === '.env' || basename.startsWith('.env.')) return true;
   if (basename.endsWith('.user') || basename.endsWith('.log')) return true;
   if (basename === 'id_rsa' || basename === 'id_ed25519') return true;
@@ -58,6 +61,7 @@ function isExcluded(relPath) {
 
 function checkExclusionRules() {
   const mustExclude = [
+    'AGENTS.md',
     'frontend-remote/dist/index.html',
     'frontend-remote/node_modules/pkg/index.js',
     'frontend-remote/.env',
