@@ -4,7 +4,7 @@
 
 [package]
 name = "loopmaster-frontend"
-version = "1.0.1-dev"
+version = "1.2.0"
 description = "LoopMaster 音频路由前端（Tauri 2 + React + TypeScript）"
 authors = ["LoopMaster"]
 edition = "2021"
