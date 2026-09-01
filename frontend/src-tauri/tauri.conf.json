@@ -45,7 +45,8 @@
         "headerImage": "icons/nsis-header.bmp",
         "sidebarImage": "icons/nsis-sidebar.bmp",
         "installMode": "perMachine",
-        "startMenuFolder": "LoopMaster"
+        "startMenuFolder": "LoopMaster",
+        "installerHooks": "./windows/hooks.nsh"
       },
       "wix": {
         "language": "zh-CN",
