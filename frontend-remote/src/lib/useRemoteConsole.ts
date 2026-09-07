@@ -60,6 +60,29 @@ interface PendingRequest {
   timer: number;
 }
 
+/**
+ * 在 offer SDP 中为所有 Opus 编码注入 `stereo=1`（SDP munging，业界通行做法）。
+ * 缺少它时 Chrome/Safari 的 Opus 解码器按单声道配置，立体声源会被混成单声道。
+ */
+function forceStereoOpus(sdp: string): string {
+  const lines = sdp.split("\r\n");
+  const opusPts = new Set<string>();
+  for (const line of lines) {
+    const m = line.match(/^a=rtpmap:(\d+) opus\/48000/i);
+    if (m) opusPts.add(m[1]);
+  }
+  if (opusPts.size === 0) return sdp;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^a=fmtp:(\d+) (.*)$/);
+    if (!m || !opusPts.has(m[1])) continue;
+    let params = m[2];
+    if (!/(^|;)stereo=1/.test(params)) params += ";stereo=1";
+    if (!/(^|;)sprop-stereo=1/.test(params)) params += ";sprop-stereo=1";
+    lines[i] = `a=fmtp:${m[1]} ${params}`;
+  }
+  return lines.join("\r\n");
+}
+
 /** 远程控制台连接状态机 + 指令发送 + 无线监听（Phase 6.3）。 */
 export function useRemoteConsole(): RemoteConsole {
   const [state, setState] = useState<RemoteState | null>(null);
@@ -284,7 +307,11 @@ export function useRemoteConsole(): RemoteConsole {
         };
 
         const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+        // SDP 改写（关键）：Chrome 的 Opus 解码器按「本地 offer」的 fmtp 配置
+        // 声道数，无视 answer 里的 stereo=1。浏览器 offer 默认不带 stereo，
+        // 不改写则远端立体声流会被解码成单声道。
+        const sdpWithStereo = forceStereoOpus(offer.sdp ?? "");
+        await pc.setLocalDescription({ type: "offer", sdp: sdpWithStereo });
         // answer 事件可能在 ack 之前到达（服务端写端双通道），
         // applyAnswer 会把 SDP 缓存到 pendingAnswerRef。
         if (pendingAnswerRef.current) {
@@ -293,10 +320,7 @@ export function useRemoteConsole(): RemoteConsole {
           remoteSetRef.current = true;
           await pc.setRemoteDescription({ type: "answer", sdp: cached });
         }
-        const localSdp = pc.localDescription?.sdp;
-        if (!localSdp) {
-          throw { code: "monitor_internal", message: "本地 SDP 缺失" };
-        }
+        const localSdp = pc.localDescription?.sdp ?? sdpWithStereo;
         await signal("webrtc_offer", { peer_id: peerId, sdp: localSdp });
         if (!remoteSetRef.current && pendingAnswerRef.current) {
           const cached = pendingAnswerRef.current;
@@ -306,6 +330,11 @@ export function useRemoteConsole(): RemoteConsole {
         }
         monitorActiveRef.current = true;
         startStats();
+        // 诊断挂钩：供自动化测试读取 PC 与音频元素（不影响正常功能）
+        (window as unknown as Record<string, unknown>).__monitor = {
+          pc,
+          getAudio: () => audioRef.current,
+        };
         await acquireWakeLock();
       } catch (err) {
         const { code, message } = err as { code?: string; message?: string };
