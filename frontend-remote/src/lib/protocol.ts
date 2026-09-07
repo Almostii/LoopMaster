@@ -41,6 +41,40 @@ export interface RemoteState {
   output_channels: OutputChannel[];
   external_outputs: ExternalOutput[];
   sends: Send[];
+  /** 6.3：当前可监听的输出通道 id 列表（引擎运行时非空）。 */
+  monitor_available?: string[];
+}
+
+/** 6.3 监听连接状态机（任务书 S3-2 六态）。 */
+export type MonitorStatus =
+  | "idle"
+  | "connecting"
+  | "playing"
+  | "degraded"
+  | "reconnecting"
+  | "permission_required"
+  | "failed";
+
+/** 服务端下行 `webrtc_answer` 事件负载。 */
+export interface WebRtcAnswerEvent {
+  event: "webrtc_answer";
+  data: { peer_id: number; sdp: string };
+}
+
+/** 服务端下行 `webrtc_ice_candidate` 事件负载。 */
+export interface WebRtcIceEvent {
+  event: "webrtc_ice_candidate";
+  data: { peer_id: number; candidate: RTCIceCandidateInit };
+}
+
+/** 服务端 ack/error 响应（含监听信令的结构化 `code`）。 */
+export interface AckMessage {
+  seq: number;
+  ack?: string;
+  error?: string;
+  code?: string;
+  message?: string;
+  peer_id?: number;
 }
 
 /** 一条二进制 meter 帧内的节点读数（dBFS）。 */

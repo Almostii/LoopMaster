@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useRemoteConsole, type ConnectionStatus } from "./lib/useRemoteConsole";
-import { dbToFaderPos, faderPosToDb, type RemoteState, type Send } from "./lib/protocol";
+import {
+  dbToFaderPos,
+  faderPosToDb,
+  type MonitorStatus,
+  type RemoteState,
+  type Send,
+} from "./lib/protocol";
 
 type Tab = "sources" | "channels";
 
@@ -10,6 +16,16 @@ const STATUS_TEXT: Record<ConnectionStatus, string> = {
   connected: "已连接",
   reconnecting: "重连中…",
   disconnected: "未连接",
+};
+
+const MONITOR_STATUS_TEXT: Record<MonitorStatus, string> = {
+  idle: "未监听",
+  connecting: "监听连接中…",
+  playing: "监听中",
+  degraded: "监听中（网络劣化）",
+  reconnecting: "监听重连中…",
+  permission_required: "需要配对",
+  failed: "监听失败",
 };
 
 /** 引擎状态 → 中文（后端下发原始字符串，做兜底映射）。 */
@@ -288,7 +304,7 @@ function SendRow({
 }
 
 export default function App() {
-  const { state, status, setSendGain, setSendMuted } = useRemoteConsole();
+  const { state, status, setSendGain, setSendMuted, monitor } = useRemoteConsole();
   const [tab, setTab] = useState<Tab>("sources");
   const pairing = usePairingFromUrl();
   const { theme, toggle: toggleTheme } = useTheme();
@@ -345,6 +361,47 @@ export default function App() {
           <div className="console-title">LoopMaster Remote</div>
         </div>
         <div className="console-header-right">
+          {monitor.availableBuses.length > 0 && (
+            <div className="monitor-chip">
+              {monitor.availableBuses.length > 1 && monitor.status === "idle" && (
+                <select
+                  className="monitor-bus-select"
+                  id="monitor-bus-select"
+                  defaultValue={monitor.availableBuses[0]}
+                  aria-label="监听通道"
+                >
+                  {monitor.availableBuses.map((busId) => (
+                    <option key={busId} value={busId}>
+                      {busName(state, busId)}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                className={`monitor-toggle ${monitor.status}`}
+                onClick={() => {
+                  if (monitor.status === "idle" || monitor.status === "failed") {
+                    const select = document.getElementById(
+                      "monitor-bus-select",
+                    ) as HTMLSelectElement | null;
+                    void monitor.start(select?.value ?? undefined);
+                  } else {
+                    void monitor.stop();
+                  }
+                }}
+              >
+                {monitor.status === "idle" || monitor.status === "failed"
+                  ? "开始监听"
+                  : "停止监听"}
+              </button>
+              {monitor.status !== "idle" && (
+                <span className={`monitor-state ${monitor.status}`}>
+                  {MONITOR_STATUS_TEXT[monitor.status]}
+                </span>
+              )}
+            </div>
+          )}
           <button
             type="button"
             className="theme-toggle"

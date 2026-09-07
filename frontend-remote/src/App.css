@@ -244,6 +244,78 @@ body {
   opacity: 0.45;
 }
 
+/* ------------------------------------------------------------------ */
+/* 6.3 网页端无线监听                                                    */
+/* ------------------------------------------------------------------ */
+.monitor-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.monitor-bus-select {
+  max-width: 120px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.monitor-toggle {
+  padding: 4px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.monitor-toggle.playing,
+.monitor-toggle.degraded,
+.monitor-toggle.connecting,
+.monitor-toggle.reconnecting {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.monitor-toggle.permission_required {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.monitor-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.monitor-state {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.monitor-state.playing {
+  color: var(--accent-strong);
+}
+
+.monitor-state.degraded {
+  color: var(--warn);
+}
+
+.monitor-state.failed,
+.monitor-state.permission_required {
+  color: var(--danger);
+}
+
+.monitor-state.reconnecting,
+.monitor-state.connecting {
+  animation: pulse 1s infinite;
+}
+
 .console-tabs {
   flex: none;
   display: flex;
