@@ -18,7 +18,7 @@ use loopmaster_audio_core::RouteGraph;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use loopmaster_audio_windows::AudioEngineState;
+use loopmaster_audio_windows::{AudioEngineState, MonitorTapEndpoint};
 
 use crate::command::EngineCommand;
 use crate::config::{AppConfig, ConfigError};
@@ -171,6 +171,9 @@ pub struct StateHub {
     bridge: Mutex<Option<NetworkBridge>>,
     /// 内嵌 Web 控制台句柄（随网络开关启停）。
     web: Mutex<Option<WebServerHandle>>,
+    /// 监听抽头（MonitorTap）注册表：key = bus_id，由壳层 pump 线程随
+    /// 引擎 session 重建写入（Phase 6.3 网页端无线监听）。
+    monitor_taps: Mutex<Vec<(loopmaster_audio_core::BusId, MonitorTapEndpoint)>>,
     /// 局域网配对与可信设备（首次配对/长期记住/显式撤销）。
     auth: Arc<AuthState>,
     /// 是否要求配对才能访问控制台（运行时可切换；`/ws` 与设备页共用）。
@@ -200,6 +203,7 @@ impl StateHub {
             discovery: Mutex::new(None),
             bridge: Mutex::new(None),
             web: Mutex::new(None),
+            monitor_taps: Mutex::new(Vec::new()),
             auth: Arc::new(AuthState::new(config_path.clone())),
             require_pairing: Arc::new(AtomicBool::new(require_pairing)),
             revision: AtomicU64::new(0),
@@ -395,6 +399,29 @@ impl StateHub {
     pub fn set_web(&self, web: Option<WebServerHandle>) {
         *self.web() = web;
         self.bump();
+    }
+
+    /// 替换监听抽头注册表（壳层 monitor-tap pump 随引擎 session 重建调用）。
+    pub fn set_monitor_taps(&self, taps: Vec<(loopmaster_audio_core::BusId, MonitorTapEndpoint)>) {
+        *self.monitor_taps.lock().expect("监听抽头锁未中毒") = taps;
+    }
+
+    /// 清空监听抽头（引擎停止）。
+    pub fn clear_monitor_taps(&self) {
+        self.set_monitor_taps(Vec::new());
+    }
+
+    /// 当前监听抽头快照。
+    pub fn monitor_taps(&self) -> Vec<(loopmaster_audio_core::BusId, MonitorTapEndpoint)> {
+        self.monitor_taps.lock().expect("监听抽头锁未中毒").clone()
+    }
+
+    /// 按 bus id 取监听抽头端点。
+    pub fn monitor_tap(&self, bus_id: &str) -> Option<MonitorTapEndpoint> {
+        self.monitor_taps()
+            .into_iter()
+            .find(|(bus, _)| bus.0 == bus_id)
+            .map(|(_, endpoint)| endpoint)
     }
 
     /// 局域网配对与可信设备状态（首次配对/长期记住/显式撤销）。

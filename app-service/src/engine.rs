@@ -11,7 +11,7 @@ use std::time::Duration;
 use loopmaster_audio_core::{EndpointId, RouteGraph, RouteGraphSnapshot, SendId, SendSpec};
 use loopmaster_audio_windows::{
     AudioEngine, AudioEngineConfig, AudioEngineState, AudioEngineStats, AudioEngineStatus,
-    NetworkIoHandles,
+    MonitorTapHandles, NetworkIoHandles,
 };
 
 use crate::command::EngineCommand;
@@ -75,6 +75,19 @@ impl EngineService {
             .lock()
             .expect("引擎锁未中毒")
             .recv_network_handles()
+    }
+
+    /// 非阻塞轮询监听抽头句柄（Phase 6.3）。
+    ///
+    /// 返回 `Some(handles)` 表示 supervisor 刚发送了新 session 的抽头；
+    /// `None` 表示暂无新句柄（引擎未运行或尚未发送）。供壳层常驻 pump
+    /// 线程低频轮询（避免阻塞持锁）。
+    pub fn poll_monitor_tap_handles(&self) -> Option<MonitorTapHandles> {
+        self.inner
+            .engine
+            .lock()
+            .expect("引擎锁未中毒")
+            .try_recv_monitor_tap_handles()
     }
 
     /// 提交命令；非法命令返回错误，引擎状态不变。

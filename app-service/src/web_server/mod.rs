@@ -11,6 +11,7 @@
 //! - `/ws` 双向通道属子任务 2。
 
 pub mod auth;
+pub mod monitor;
 pub mod routes;
 pub mod tls;
 pub mod ws;
@@ -270,6 +271,8 @@ async fn serve(
 
     // meter 广播任务 + /ws 路由（子任务 2）+ 配对/可信设备（子任务 4）。
     let meter_tx = ws::spawn_meter_task(hub.clone(), config.meter_hz);
+    // 6.3 网页端无线监听服务（抽头注册表在 StateHub，peer 表在此）。
+    let monitor = monitor::MonitorService::new(hub.clone());
     let app = ws::ws_router()
         .with_state(ws::WsState {
             hub: hub.clone(),
@@ -277,6 +280,7 @@ async fn serve(
             auth: hub.auth().clone(),
             is_https: config.tls,
             require_pairing: hub.require_pairing_flag(),
+            monitor: monitor.clone(),
         })
         .merge(routes::router())
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -288,6 +292,8 @@ async fn serve(
             let _ = server.handle(server_handle).serve(app).await;
         }
     }
+    // 服务退出：回收全部监听 peer（S1-5 网络开关联动）。
+    monitor.shutdown().await;
     shutdown_task.abort();
     revision_task.abort();
 }
@@ -576,6 +582,183 @@ mod tests {
             }
         }
         assert!(got_meter, "应在超时前收到二进制 meter 帧");
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// 6.3 监听信令：结构化错误（unknown_bus / unknown_peer / limit）、
+    /// seq 幂等（重复 monitor_start 不重复分配 peer）、stop 后可再开。
+    #[tokio::test]
+    async fn ws_monitor_signaling_validation_and_idempotency() {
+        use futures_util::StreamExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-ws-monitor-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                meter_hz: 1,
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+
+        // 开放访问模式（默认）：无需配对直接连接。
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let request = ws_request(
+            &url,
+            None,
+            &format!("http://127.0.0.1:{}", handle.addr().port()),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("连接 /ws");
+        // 丢弃 initial_state。
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("initial_state 超时")
+            .expect("流结束")
+            .expect("协议错误");
+        assert!(first.into_text().unwrap().contains("initial_state"));
+
+        // 注入两条监听抽头（不启动真实引擎，直接写 StateHub）。
+        hub.set_monitor_taps(vec![
+            (
+                loopmaster_audio_core::BusId("bus_a".into()),
+                loopmaster_audio_windows::MonitorTapEndpoint::new().unwrap(),
+            ),
+            (
+                loopmaster_audio_core::BusId("bus_b".into()),
+                loopmaster_audio_windows::MonitorTapEndpoint::new().unwrap(),
+            ),
+        ]);
+
+        type TestWs = tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >;
+
+        async fn send_action(ws: &mut TestWs, seq: u64, action: &str, data: serde_json::Value) {
+            use futures_util::SinkExt as _;
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({ "seq": seq, "action": action, "data": data }).to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+
+        async fn next_text(ws: &mut TestWs) -> String {
+            use futures_util::StreamExt as _;
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("响应超时")
+                    .expect("流结束")
+                    .expect("协议错误");
+                if let Ok(text) = message.into_text() {
+                    return text;
+                }
+            }
+        }
+
+        // 1) 未知 bus → 结构化错误。
+        send_action(
+            &mut ws,
+            1,
+            "monitor_start",
+            serde_json::json!({"bus_id": "nope"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""error":"rejected""#), "{text}");
+        assert!(text.contains(r#""code":"unknown_bus""#), "{text}");
+
+        // 2) 正常 start → ack + peer_id。
+        send_action(
+            &mut ws,
+            2,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_start""#), "{text}");
+        let peer1: u64 = serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap()
+            .get("peer_id")
+            .and_then(|v| v.as_u64())
+            .expect("ack 应带 peer_id");
+
+        // 3) 同 seq 幂等：回放缓存响应，不分配新 peer。
+        send_action(
+            &mut ws,
+            2,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        let replayed: u64 = serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap()
+            .get("peer_id")
+            .and_then(|v| v.as_u64())
+            .expect("幂等响应应带相同 peer_id");
+        assert_eq!(replayed, peer1, "重复 seq 不得创建新 peer");
+
+        // 4) 并发上限 = 2：第二条成功，第三条 limit_reached。
+        send_action(
+            &mut ws,
+            3,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_b"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_start""#), "{text}");
+        send_action(
+            &mut ws,
+            4,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""code":"monitor_limit_reached""#), "{text}");
+
+        // 5) webrtc_offer 未知 peer → unknown_peer；stop 后可再开。
+        send_action(
+            &mut ws,
+            5,
+            "webrtc_offer",
+            serde_json::json!({"peer_id": 999, "sdp": "v=0"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""code":"unknown_peer""#), "{text}");
+        send_action(
+            &mut ws,
+            6,
+            "monitor_stop",
+            serde_json::json!({"peer_id": peer1}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_stop""#), "{text}");
+        send_action(
+            &mut ws,
+            7,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_start""#), "{text}");
 
         handle.shutdown();
         let _ = std::fs::remove_dir_all(&config_dir);

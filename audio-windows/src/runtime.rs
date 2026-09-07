@@ -490,6 +490,19 @@ impl AudioEngine {
         }
     }
 
+    /// 非阻塞轮询监听抽头句柄：有新 session 句柄返回 `Some`，否则 `None`。
+    /// 供上层低频轮询（避免阻塞持锁）。
+    pub fn try_recv_monitor_tap_handles(&self) -> Option<MonitorTapHandles> {
+        let mut slot = self
+            .monitor_tap_handles_rx
+            .lock()
+            .expect("监听抽头句柄锁未中毒");
+        match slot.as_mut() {
+            Some(rx) => rx.try_recv().ok(),
+            None => None,
+        }
+    }
+
     pub fn update_graph(&mut self, graph: RouteGraphSnapshot) -> Result<(), AudioEngineError> {
         validate_config(&AudioEngineConfig {
             graph: graph.clone(),
