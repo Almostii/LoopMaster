@@ -251,6 +251,14 @@ export function useRemoteConsole(): RemoteConsole {
           const audio = ensureAudio();
           audio.srcObject = streams[0];
           audio.play().catch(() => undefined);
+          // 只有媒体轨真正到达才报"监听中"（协商成功 ≠ 链路连通）。
+          setMonStatus("playing");
+        };
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === "failed") {
+            setMonitorError("音频链路连接失败（检查防火墙对 UDP 的放行）");
+            setMonStatus("failed");
+          }
         };
         pc.onicecandidate = ({ candidate }) => {
           if (candidate && peerIdRef.current != null) {
@@ -286,7 +294,6 @@ export function useRemoteConsole(): RemoteConsole {
         }
         monitorActiveRef.current = true;
         startStats();
-        setMonStatus("playing");
         await acquireWakeLock();
       } catch (err) {
         const { code, message } = err as { code?: string; message?: string };
