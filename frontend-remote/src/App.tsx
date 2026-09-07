@@ -397,8 +397,18 @@ export default function App() {
               </button>
               {monitor.status !== "idle" && (
                 <span className={`monitor-state ${monitor.status}`}>
-                  {MONITOR_STATUS_TEXT[monitor.status]}
+                  {monitor.paused ? "已被浏览器暂停，请点按播放" : MONITOR_STATUS_TEXT[monitor.status]}
+                  <span className="status-revision"> · {monitor.packets} 包</span>
                 </span>
+              )}
+              {monitor.paused && (
+                <button
+                  type="button"
+                  className="monitor-toggle connecting"
+                  onClick={() => void monitor.resume()}
+                >
+                  点按播放
+                </button>
               )}
             </div>
           )}

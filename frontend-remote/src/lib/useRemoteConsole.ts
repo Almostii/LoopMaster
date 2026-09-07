@@ -31,10 +31,16 @@ export interface MonitorApi {
   availableBuses: string[];
   /** 最近一次失败原因（用户可读）。 */
   error: string | null;
+  /** 手机侧收到的 RTP 包数（诊断用，随 stats 刷新）。 */
+  packets: number;
+  /** 媒体元素被浏览器暂停（自动播放被拦截）时为 true。 */
+  paused: boolean;
   /** 用户手势入口：开始监听指定通道（缺省取第一个可用）。 */
   start: (busId?: string) => Promise<void>;
   /** 停止监听并回收资源。 */
   stop: () => Promise<void>;
+  /** 手势内恢复播放（自动播放被拦时点按）。 */
+  resume: () => Promise<void>;
 }
 
 export interface RemoteConsole {
@@ -62,6 +68,8 @@ export function useRemoteConsole(): RemoteConsole {
   const [monitorStatus, setMonitorStatus] = useState<MonitorStatus>("idle");
   const [monitorError, setMonitorError] = useState<string | null>(null);
   const [availableBuses, setAvailableBuses] = useState<string[]>([]);
+  const [monitorPaused, setMonitorPaused] = useState(false);
+  const [phonePackets, setPhonePackets] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const seqRef = useRef(0);
@@ -180,11 +188,15 @@ export function useRemoteConsole(): RemoteConsole {
       try {
         const report = await pc.getStats();
         let concealed: number | null = null;
+        let packets = 0;
         report.forEach((entry) => {
           if (entry.type === "inbound-rtp" && (entry.kind === "audio" || entry.mediaType === "audio")) {
             concealed = entry.concealedSamples ?? 0;
+            packets = entry.packetsReceived ?? 0;
           }
         });
+        setPhonePackets(packets);
+        setMonitorPaused(audioRef.current?.paused ?? false);
         if (concealed != null) {
           if (concealedRef.current != null && concealed > concealedRef.current) {
             degradedStreakRef.current += 1;
@@ -503,6 +515,17 @@ export function useRemoteConsole(): RemoteConsole {
     await stopMonitorInternal();
   }, [stopMonitorInternal]);
 
+  /** 手势内恢复播放（自动播放被浏览器拦截时的兜底）。 */
+  const resumeMonitor = useCallback(async () => {
+    const audio = ensureAudio();
+    try {
+      await audio.play();
+      setMonitorPaused(false);
+    } catch {
+      // 仍被拦截则保持提示
+    }
+  }, [ensureAudio]);
+
   return {
     state,
     status,
@@ -513,8 +536,11 @@ export function useRemoteConsole(): RemoteConsole {
       status: monitorStatus,
       availableBuses,
       error: monitorError,
+      packets: phonePackets,
+      paused: monitorPaused,
       start: startMonitor,
       stop: stopMonitor,
+      resume: resumeMonitor,
     },
   };
 }
