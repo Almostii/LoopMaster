@@ -239,7 +239,10 @@ impl RouteGraph {
                     && name.len() <= crate::vban::packet::VBAN_STREAM_NAME_SIZE
                     && name.bytes().all(|b| (32..=126).contains(&b));
                 if !valid {
-                    return Err(RouteGraphError::InvalidVbanStreamName(source.id.0.clone()));
+                    return Err(RouteGraphError::InvalidVbanStreamName(format!(
+                        "source={} stream_name={:?}",
+                        source.id.0, source.stream_name
+                    )));
                 }
             } else if let Some(endpoint_id) = &source.endpoint_id {
                 if !source_endpoints.insert(endpoint_id.clone()) {
@@ -264,7 +267,10 @@ impl RouteGraph {
                     && name.len() <= crate::vban::packet::VBAN_STREAM_NAME_SIZE
                     && name.bytes().all(|b| (32..=126).contains(&b));
                 if !valid {
-                    return Err(RouteGraphError::InvalidVbanStreamName(sink.id.0.clone()));
+                    return Err(RouteGraphError::InvalidVbanStreamName(format!(
+                        "sink={} stream_name={:?}",
+                        sink.id.0, sink.stream_name
+                    )));
                 }
                 // 远端地址必须存在且可解析为 SocketAddr。
                 let addr_ok = sink
@@ -320,6 +326,46 @@ impl RouteGraph {
         }
         Ok(())
     }
+
+    /// 就地清洗所有 VBAN source/sink 的流名，使其满足
+    /// "1..=16 字节可打印 ASCII" 约束（去除非法字符、按字节截断、
+    /// 空则回退 `Stream1`）。用于兼容历史配置里以节点主机名
+    /// （可能含中文或超过 16 字节）直接充当流名的脏数据。
+    pub fn sanitize_vban_stream_names(&mut self) {
+        for source in &mut self.sources {
+            if source.kind == SourceKind::Vban {
+                source.stream_name = Some(sanitize_stream_name(source.stream_name.as_deref()));
+            }
+        }
+        for sink in &mut self.sinks {
+            if sink.kind == SinkKind::Vban {
+                sink.stream_name = Some(sanitize_stream_name(sink.stream_name.as_deref()));
+            }
+        }
+    }
+}
+
+/// 单个流名的清洗规则（与前端 `sanitizeVbanStreamName` 语义一致）。
+fn sanitize_stream_name(raw: Option<&str>) -> String {
+    let mut bytes = 0usize;
+    let mut out = String::new();
+    for ch in raw.unwrap_or_default().chars() {
+        let code = ch as u32;
+        if !(32..=126).contains(&code) {
+            continue;
+        }
+        if bytes + ch.len_utf8() > crate::vban::packet::VBAN_STREAM_NAME_SIZE {
+            break;
+        }
+        out.push(ch);
+        bytes += ch.len_utf8();
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "Stream1".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +412,44 @@ mod route_graph_tests {
             enabled: true,
             channel_map: Vec::new(),
         }
+    }
+
+    #[test]
+    fn sanitizes_vban_stream_names_to_protocol_constraints() {
+        fn vban_source(name: Option<&str>) -> SourceSpec {
+            SourceSpec {
+                kind: SourceKind::Vban,
+                endpoint_id: None,
+                stream_name: name.map(str::to_string),
+                ..source("src-vban", None)
+            }
+        }
+        fn vban_sink(name: Option<&str>) -> SinkSpec {
+            SinkSpec {
+                kind: SinkKind::Vban,
+                endpoint_id: EndpointId("vban".into()),
+                stream_name: name.map(str::to_string),
+                remote_addr: Some("192.168.1.9:6980".into()),
+                ..sink("sink-vban", "vban")
+            }
+        }
+
+        let mut graph = RouteGraph {
+            sources: vec![vban_source(Some("中文主机名"))],
+            sinks: vec![vban_sink(Some("DESKTOP-1234567890ABCDEF"))],
+            ..RouteGraph::default()
+        };
+        graph.sanitize_vban_stream_names();
+
+        // 非 ASCII 全部剔除后为空 → 回退 Stream1。
+        assert_eq!(graph.sources[0].stream_name.as_deref(), Some("Stream1"));
+        // 超长名按字节截断到 16。
+        assert_eq!(
+            graph.sinks[0].stream_name.as_deref(),
+            Some("DESKTOP-12345678")
+        );
+        // 清洗后通过校验。
+        graph.validate().unwrap();
     }
 
     #[test]
