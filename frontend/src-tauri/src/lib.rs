@@ -510,21 +510,30 @@ fn get_node_identity(state: tauri::State<'_, Arc<AppState>>) -> NodeIdentityBrie
     ensure_node_identity(&state)
 }
 
+/// 抑制子进程控制台窗口闪现（netsh/powershell 是控制台程序，不加会闪黑框）。
+fn suppress_child_console(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+}
+
 /// 查询某条入站放行规则是否存在。
 ///
 /// `netsh show rule` 无需提权；`None` 表示查询本身执行失败（平台不支持或
 /// netsh 不可用），与"规则不存在"（`Some(false)`）区分开。
 fn firewall_rule_exists(name: &str) -> Option<bool> {
-    let output = std::process::Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "show",
-            "rule",
-            &format!("name={name}"),
-        ])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("netsh");
+    cmd.args([
+        "advfirewall",
+        "firewall",
+        "show",
+        "rule",
+        &format!("name={name}"),
+    ]);
+    suppress_child_console(&mut cmd);
+    let output = cmd.output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     Some(text.contains(name))
 }
@@ -670,16 +679,16 @@ fn enable_network_firewall(
     std::fs::write(&script_path, lines.join("\r\n"))
         .map_err(|e| format!("写入放行脚本失败: {e}"))?;
     let command = format!(
-        "Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','{}' -Verb RunAs -Wait; exit $LASTEXITCODE",
+        "Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','{}' -Verb RunAs -WindowStyle Hidden -Wait; exit $LASTEXITCODE",
         script_path.display()
     );
     log_line(&format!(
         "enable_network_firewall: 提权放行（vban={vban_rule_exists} web={web_rule_exists} legacy={legacy_exists}）"
     ));
-    let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
-        .status()
-        .map_err(|e| format!("触发放行失败: {e}"))?;
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
+    suppress_child_console(&mut cmd);
+    let status = cmd.status().map_err(|e| format!("触发放行失败: {e}"))?;
     let _ = std::fs::remove_file(&script_path);
 
     if !status.success() {
@@ -1566,7 +1575,9 @@ fn set_pairing_required(
     state: tauri::State<'_, Arc<AppState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    state.set_require_pairing(enabled).map_err(|error| error.to_string())
+    state
+        .set_require_pairing(enabled)
+        .map_err(|error| error.to_string())
 }
 
 /// 停止内嵌 Web 控制台（幂等；优雅关闭放后台线程，不阻塞 UI）。
@@ -2481,6 +2492,28 @@ pub fn run() {
             // 后台进程监控：进程重启后按可执行路径自动重绑 ProcessLoopback 声源
             let watcher_state = app.state::<Arc<AppState>>().inner().clone();
             spawn_process_watcher(app.handle().clone(), watcher_state);
+
+            // 6.3 监听抽头 pump：随引擎 session 重建把 MonitorTap 句柄写入
+            // StateHub（Web 监听管线按 bus_id 查询）。引擎停止时清空。
+            let pump_state = app.state::<Arc<AppState>>().inner().clone();
+            std::thread::Builder::new()
+                .name("loopmaster-monitor-tap-pump".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let engine = pump_state.engine();
+                    let Some(engine) = engine.as_ref() else {
+                        continue;
+                    };
+                    if let Some(handles) = engine.poll_monitor_tap_handles() {
+                        let count = handles.taps.len();
+                        pump_state.set_monitor_taps(handles.taps);
+                        log_line(&format!("monitor-tap: 已注册 {count} 条 bus 监听抽头"));
+                    }
+                    if !engine.status().running {
+                        pump_state.clear_monitor_taps();
+                    }
+                })
+                .expect("创建监听抽头 pump 线程失败");
 
             Ok(())
         })

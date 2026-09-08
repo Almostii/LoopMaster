@@ -11,7 +11,7 @@ import SettingsView from "./components/SettingsView";
 import DeviceView from "./components/DeviceView";
 import AddManualVbanNodeDialog from "./components/AddManualVbanNodeDialog";
 import WireLayer from "./components/WireLayer";
-import { computeWires, isExternalEnabled, isSourceEnabled } from "./lib";
+import { computeWires, isExternalEnabled, isSourceEnabled, sanitizeVbanStreamName } from "./lib";
 import { useLoopMaster } from "./useLoopMaster";
 import { listAudioProcesses, processIconDataUri } from "./api";
 import {
@@ -445,9 +445,17 @@ function App() {
     setSelectedCard(null);
   }
 
-  /** 键盘 Delete 删除当前选中项 */
+  /** 键盘 Delete 删除当前选中项（在重命名输入框等可编辑元素聚焦时跳过，
+   * 让 Delete/Backspace 走正常的字符编辑；否则在重命名时按一下就删整张卡片）。 */
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedCard) {
           handleDeleteSelectedCard();
@@ -498,8 +506,11 @@ function App() {
     } else if (kind === "vban") {
       const node = networkNodes.find((n) => n.node_id === id);
       if (node) {
-        // 最小可行：接收流名默认用节点名；后续可提供手动输入流名。
-        void addVbanSource(node.name || node.node_id.slice(0, 8), node.name || "Stream1");
+        // 最小可行：接收流名默认取节点名清洗后的结果（VBAN 流名须 1..=16 字节可打印 ASCII）。
+        void addVbanSource(
+          node.name || node.node_id.slice(0, 8),
+          sanitizeVbanStreamName(node.name),
+        );
       }
     }
   }
@@ -513,10 +524,10 @@ function App() {
       const nodeId = value.slice("vban:".length);
       const node = networkNodes.find((n) => n.node_id === nodeId);
       if (node && node.addresses[0]) {
-        // 发送流名默认用节点名；remote_addr 用节点首个 IPv4 地址 + VBAN 端口。
+        // 发送流名同样经清洗；remote_addr 用节点首个 IPv4 地址 + VBAN 端口。
         void addVbanExternalOutput(
           node.name || node.node_id.slice(0, 8),
-          node.name || "Stream1",
+          sanitizeVbanStreamName(node.name),
           `${node.addresses[0]}:${node.port}`,
         );
       }

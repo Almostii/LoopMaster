@@ -9,6 +9,25 @@ export function freshId(prefix: string): string {
   return `${prefix}-${Date.now()}-${idCounter++}`;
 }
 
+/**
+ * 清洗 VBAN 流名：协议要求 1..=16 字节可打印 ASCII。
+ * 去除非可打印 ASCII 字符、按字节截断到 16、空则回退 "Stream1"。
+ * 典型场景：发现节点的 name 是中文/超长主机名，不能直接当流名。
+ */
+export function sanitizeVbanStreamName(raw: string): string {
+  let bytes = 0;
+  let out = "";
+  for (const ch of raw) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 32 || code > 126) continue;
+    if (bytes + ch.length > 16) break;
+    out += ch;
+    bytes += ch.length;
+  }
+  out = out.trim();
+  return out.length > 0 ? out : "Stream1";
+}
+
 /** 格式化错误信息 */
 export function formatError(e: unknown): string {
   const brief = e as { message?: string; hint?: string | null };

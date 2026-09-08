@@ -218,6 +218,7 @@ fn store_script(open_mode: &str, body: &[&str], ca_path: &Path) -> String {
 /// 执行 PowerShell 脚本（脚本写入临时文件，避免多层引号转义）。
 #[cfg(windows)]
 fn run_powershell(script: &str) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
     let script_path = std::env::temp_dir().join("loopmaster-ca-store.ps1");
     std::fs::write(&script_path, script).map_err(|e| format!("写入脚本失败: {e}"))?;
     let output = std::process::Command::new("powershell")
@@ -229,6 +230,7 @@ fn run_powershell(script: &str) -> Result<String, String> {
             "-File",
             &script_path.display().to_string(),
         ])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW：抑制控制台窗口闪现
         .output()
         .map_err(|e| format!("执行 PowerShell 失败: {e}"))?;
     let _ = std::fs::remove_file(&script_path);

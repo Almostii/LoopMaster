@@ -1,4 +1,4 @@
-//! WebSocket 实时通道（Phase 2 子任务 2）。
+//! WebSocket 实时通道（Phase 2 子任务 2 + Phase 6.3 监听信令）。
 //!
 //! 协议见 `Doc/Web控制台/2026-08-31-Web控制台DTO与可信设备模型冻结.md` §1：
 //! - 上行：JSON 控制指令（`set_send_gain` / `set_send_muted` / `set_send_enabled` /
@@ -7,6 +7,14 @@
 //! - 下行：连接即下发 `initial_state` 全量快照（含 `state_revision`）；之后按
 //!   原型频率（默认 30Hz）广播二进制 meter 帧（帧类型 `0x01`，见方案 2 §4.2）；
 //! - 客户端检测 revision 跳变后必须重新拉取全量快照（broadcast 允许慢消费者丢消息）。
+//!
+//! Phase 6.3 监听信令（任务书 S2-1~S2-5）：
+//! - 上行 action：`monitor_start{bus_id,client_request_id}` / `webrtc_offer{peer_id,sdp}` /
+//!   `webrtc_ice_candidate{peer_id,candidate}` / `monitor_stop{peer_id}`，
+//!   沿用 seq 幂等与 ack/error 契约（错误额外带结构化 `code`）；
+//! - 下行事件：`webrtc_answer{peer_id,sdp}` / `webrtc_ice_candidate{peer_id,candidate}`；
+//! - `peer_id` 绑定当前连接；连接断开/吊销/服务停止时回收全部 PeerConnection；
+//! - SDP/ICE 内容不落日志（S2-5）。
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -29,15 +37,19 @@ use tokio::sync::{broadcast, mpsc};
 use loopmaster_audio_core::{
     BusId, SendId, SendSpec, SinkKind, SourceId, SourceKind, INTERNAL_SAMPLE_RATE,
 };
+use rtc::peer_connection::transport::RTCIceCandidateInit;
 
 use crate::route::RouteEdit;
 use crate::state::StateHub;
 use crate::web_server::auth::{
     extract_cookie, AuthError, AuthState, DeviceSummary, COOKIE_MAX_AGE, COOKIE_NAME,
 };
+use crate::web_server::monitor::MonitorService;
 
 /// 控制消息 `seq` 幂等缓存上限（超出后淘汰最旧，防止无限增长）。
 const MAX_SEQ_CACHE: usize = 512;
+/// 监听信令消息大小上限（S2-1；SDP 实际数 KB，64KB 足够宽裕）。
+const MAX_MONITOR_MESSAGE_BYTES: usize = 65_536;
 
 /// WebSocket 处理器所需共享状态。
 #[derive(Clone)]
@@ -53,6 +65,8 @@ pub struct WsState {
     /// `false`（默认）：局域网内设备直接访问，`/ws` 不做凭证校验（仍校验 Origin）；
     /// `true`：启用 M4 配对流程，`/ws` 只接受已配对设备的凭证 Cookie。
     pub require_pairing: Arc<std::sync::atomic::AtomicBool>,
+    /// 6.3 网页端无线监听（peer 生命周期归属本连接）。
+    pub monitor: Arc<MonitorService>,
 }
 
 /// 实时 + 认证路由（带 `WsState`）。
@@ -115,6 +129,14 @@ async fn handle_socket(socket: WebSocket, state: WsState, device: Option<DeviceS
         return;
     }
 
+    // 6.3 监听：本连接的 peer 归属 id 与监听下行事件通道（answer/ICE）。
+    let monitor_owner = state.monitor.new_owner();
+    let monitor_allowed = device
+        .as_ref()
+        .map(|device| device.permission == "control")
+        .unwrap_or(true); // 开放访问模式与现有控制权限一致（任务书 S2-3）
+    let (monitor_event_tx, mut monitor_event_rx) = mpsc::unbounded_channel::<Message>();
+
     // 控制响应（ack/error）经该通道交给写端，避免读写抢占同一 sink。
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(64);
     let mut seq_cache = SeqCache::default();
@@ -131,7 +153,31 @@ async fn handle_socket(socket: WebSocket, state: WsState, device: Option<DeviceS
             };
             match message {
                 Message::Text(text) => {
-                    if let Some(response) =
+                    let parsed: Option<ControlMessage> = serde_json::from_str(text.as_str()).ok();
+                    let is_monitor = parsed
+                        .as_ref()
+                        .map(|m| is_monitor_action(&m.action))
+                        .unwrap_or(false);
+                    if is_monitor {
+                        let Some(control) = parsed else {
+                            continue;
+                        };
+                        let Some(response) = handle_monitor_control(
+                            &state,
+                            monitor_owner,
+                            monitor_allowed,
+                            control,
+                            &mut seq_cache,
+                            &monitor_event_tx,
+                        )
+                        .await
+                        else {
+                            continue;
+                        };
+                        if out_tx.send(Message::Text(response.into())).await.is_err() {
+                            break;
+                        }
+                    } else if let Some(response) =
                         handle_control(&state.hub, text.as_str(), &mut seq_cache)
                     {
                         if out_tx.send(Message::Text(response.into())).await.is_err() {
@@ -155,6 +201,14 @@ async fn handle_socket(socket: WebSocket, state: WsState, device: Option<DeviceS
                         }
                     }
                     None => break,
+                },
+                event = monitor_event_rx.recv() => {
+                    // 事件通道关闭只意味着本连接的转发任务结束，不影响主循环。
+                    if let Some(message) = event {
+                        if sink.send(message).await.is_err() {
+                            break;
+                        }
+                    }
                 },
                 frame = meter_rx.recv() => match frame {
                     Ok(data) => {
@@ -206,6 +260,185 @@ async fn handle_socket(socket: WebSocket, state: WsState, device: Option<DeviceS
     tokio::select! {
         _ = reader => {}
         _ = writer => {}
+    }
+
+    // 连接结束：回收本连接的全部监听 peer（S2-2）。
+    state.monitor.close_owner(monitor_owner).await;
+}
+
+// ---------------------------------------------------------------------------
+// 监听信令（Phase 6.3，任务书 S2-1~S2-5）
+// ---------------------------------------------------------------------------
+
+/// 是否为监听信令 action（与既有控制 action 分流处理）。
+fn is_monitor_action(action: &str) -> bool {
+    matches!(
+        action,
+        "monitor_start" | "webrtc_offer" | "webrtc_ice_candidate" | "monitor_stop"
+    )
+}
+
+/// 处理监听信令 action（seq 幂等与既有控制通道一致）。
+///
+/// 返回 `Some(response_json)` 作为对上行的应答；下行事件
+/// （`webrtc_answer` / `webrtc_ice_candidate`）经 `event_tx` 直送写端。
+async fn handle_monitor_control(
+    state: &WsState,
+    owner: u64,
+    allowed: bool,
+    control: ControlMessage,
+    cache: &mut SeqCache,
+    event_tx: &mpsc::UnboundedSender<Message>,
+) -> Option<String> {
+    let seq = control.seq;
+    // 幂等：重复 seq 直接回放缓存响应（S2-1，与控制通道同契约）。
+    if let Some(cached) = cache.get(&seq) {
+        return Some(cached.clone());
+    }
+    let response = handle_monitor_action_inner(state, owner, allowed, &control, event_tx).await;
+    let response = match response {
+        Ok(response) => response,
+        Err((code, message)) => json!({
+            "seq": seq,
+            "error": "rejected",
+            "code": code,
+            "message": message,
+        })
+        .to_string(),
+    };
+    cache.insert(seq, response.clone());
+    Some(response)
+}
+
+/// 监听信令动作实现。`Err((code, message))` 为结构化错误。
+async fn handle_monitor_action_inner(
+    state: &WsState,
+    owner: u64,
+    allowed: bool,
+    control: &ControlMessage,
+    event_tx: &mpsc::UnboundedSender<Message>,
+) -> Result<String, (&'static str, String)> {
+    // 权限判定（S2-3）：约定 "control" 权限包含监听能力；开放访问模式下
+    // 与现有控制权限一致（任务书 S2-3：A-1 决策落地前）。
+    if !allowed {
+        return Err(("permission_required", "当前设备无监听权限".into()));
+    }
+    // 消息大小上限（S2-1）：SDP 为大消息的唯一来源。
+    let payload = serde_json::to_string(&control.data).unwrap_or_default();
+    if payload.len() > MAX_MONITOR_MESSAGE_BYTES {
+        return Err(("payload_too_large", "监听信令消息超过大小上限".into()));
+    }
+    match control.action.as_str() {
+        "monitor_start" => {
+            let bus_id = control
+                .data
+                .get("bus_id")
+                .and_then(|v| v.as_str())
+                .ok_or(("invalid_request", "缺少 bus_id".into()))?;
+            let peer_id = state
+                .monitor
+                .start_peer(owner, bus_id)
+                .map_err(|e| (e.code(), e.to_string()))?;
+            Ok(json!({
+                "seq": control.seq,
+                "ack": "monitor_start",
+                "peer_id": peer_id,
+            })
+            .to_string())
+        }
+        "webrtc_offer" => {
+            let peer_id = control
+                .data
+                .get("peer_id")
+                .and_then(|v| v.as_u64())
+                .ok_or(("invalid_request", "缺少 peer_id".into()))?;
+            let sdp = control
+                .data
+                .get("sdp")
+                .and_then(|v| v.as_str())
+                .ok_or(("invalid_request", "缺少 sdp".into()))?
+                .to_owned();
+            // 服务端 trickle 候选经独立任务转成下行事件。
+            let (cand_tx, mut cand_rx) = mpsc::unbounded_channel::<RTCIceCandidateInit>();
+            let forward_tx = event_tx.clone();
+            let forward_peer = peer_id;
+            tokio::spawn(async move {
+                while let Some(init) = cand_rx.recv().await {
+                    let event = json!({
+                        "event": "webrtc_ice_candidate",
+                        "data": { "peer_id": forward_peer, "candidate": init },
+                    });
+                    if forward_tx
+                        .send(Message::Text(event.to_string().into()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let answer_sdp = state
+                .monitor
+                .offer_peer(owner, peer_id, sdp, cand_tx)
+                .await
+                .map_err(|e| (e.code(), e.to_string()))?;
+            // 先回 ack，再推 webrtc_answer 事件（客户端按 event 处理）。
+            let _ = event_tx.send(
+                json!({
+                    "event": "webrtc_answer",
+                    "data": { "peer_id": peer_id, "sdp": answer_sdp },
+                })
+                .to_string()
+                .into(),
+            );
+            Ok(json!({
+                "seq": control.seq,
+                "ack": "webrtc_offer",
+            })
+            .to_string())
+        }
+        "webrtc_ice_candidate" => {
+            let peer_id = control
+                .data
+                .get("peer_id")
+                .and_then(|v| v.as_u64())
+                .ok_or(("invalid_request", "缺少 peer_id".into()))?;
+            let candidate: RTCIceCandidateInit = control
+                .data
+                .get("candidate")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| ("invalid_request", format!("candidate 格式错误: {e}")))?
+                .ok_or(("invalid_request", "缺少 candidate".into()))?;
+            state
+                .monitor
+                .add_ice(owner, peer_id, candidate)
+                .await
+                .map_err(|e| (e.code(), e.to_string()))?;
+            Ok(json!({
+                "seq": control.seq,
+                "ack": "webrtc_ice_candidate",
+            })
+            .to_string())
+        }
+        "monitor_stop" => {
+            let peer_id = control
+                .data
+                .get("peer_id")
+                .and_then(|v| v.as_u64())
+                .ok_or(("invalid_request", "缺少 peer_id".into()))?;
+            state
+                .monitor
+                .stop_peer(owner, peer_id)
+                .await
+                .map_err(|e| (e.code(), e.to_string()))?;
+            Ok(json!({
+                "seq": control.seq,
+                "ack": "monitor_stop",
+            })
+            .to_string())
+        }
+        other => Err(("unknown_action", format!("未知监听 action: {other}"))),
     }
 }
 
@@ -349,7 +582,7 @@ fn origin_matches_request(headers: &HeaderMap) -> bool {
 // 上行控制
 // ---------------------------------------------------------------------------
 
-/// 控制消息（协议 §1.3）。
+/// 控制消息（协议 §1.3 + Phase 6.3 监听信令）。
 #[derive(Deserialize)]
 struct ControlMessage {
     seq: u64,
@@ -481,6 +714,8 @@ struct InitialState {
     output_channels: Vec<OutputChannelDto>,
     external_outputs: Vec<ExternalOutputDto>,
     sends: Vec<SendDto>,
+    /// 6.3：当前可监听的输出通道（bus）id 列表（S2-4，避免重复建模）。
+    monitor_available: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -540,6 +775,12 @@ fn build_initial_state(hub: &StateHub) -> InitialState {
     let engine = hub.engine();
     let status = engine.as_ref().map(|engine| engine.status());
     drop(engine);
+    let mut monitor_available: Vec<String> = hub
+        .monitor_taps()
+        .into_iter()
+        .map(|(bus, _)| bus.0)
+        .collect();
+    monitor_available.sort();
 
     InitialState {
         state_revision: hub.revision(),
@@ -548,6 +789,7 @@ fn build_initial_state(hub: &StateHub) -> InitialState {
             .map(|status| status.state.as_str().to_string())
             .unwrap_or_else(|| "stopped".to_owned()),
         sample_rate: INTERNAL_SAMPLE_RATE,
+        monitor_available,
         sources: graph
             .sources
             .iter()

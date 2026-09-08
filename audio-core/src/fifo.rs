@@ -6,6 +6,8 @@
 //! 计数表示。
 
 use rtrb::{Consumer, Producer, RingBuffer};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use thiserror::Error;
 
 /// 创建音频 FIFO 时的配置错误。
@@ -207,6 +209,230 @@ impl AudioFifoConsumer {
             n if n == requested_frames => PopResult::Complete { frames: n },
             n => PopResult::Partial { frames: n },
         })
+    }
+}
+
+/// 丢旧 FIFO：满时丢弃**最旧**数据腾位（与 [`AudioFifo`] 的丢新语义相反），
+/// 生产者永不阻塞、永不丢弃本次写入的新数据。
+///
+/// 用途：监听（MonitorTap）等"追实时"的媒体桥接——消费者滞后时应丢弃
+/// 过期音频使播放尽快追上实时位置，而不是让实时线程等待或丢新数据。
+///
+/// 实现说明：
+/// - 底层沿用 `rtrb` 无锁环形缓冲；单一类型内部持有一对 producer/consumer
+///   端点，经一把互斥锁串行化。"丢最旧"必须在同一临界区内"弹头部 + 写尾部"，
+///   这是该语义的直接代价；锁内只有 memcpy 级操作、无分配。
+/// - SPSC 由使用方约定：一个生产任务、一个消费任务。
+#[derive(Debug)]
+pub struct LossyFifo {
+    inner: Mutex<Inner>,
+    dropped_samples: AtomicU64,
+    pushed_samples: AtomicU64,
+    capacity_samples: usize,
+}
+
+#[derive(Debug)]
+struct Inner {
+    producer: rtrb::Producer<f32>,
+    consumer: rtrb::Consumer<f32>,
+}
+
+impl LossyFifo {
+    /// 创建容量为 `capacity_samples` 个样本的丢旧 FIFO。
+    ///
+    /// 容量应明显大于单次写入量：容量 == 单块写入量时，消费者任何滞后
+    /// 都会把上一块整体判为"最旧"丢弃（语义正确但等同于无缓冲）。
+    pub fn new(capacity_samples: usize) -> Result<Self, FifoConfigError> {
+        if capacity_samples == 0 {
+            return Err(FifoConfigError::ZeroCapacity);
+        }
+        let (producer, consumer) = rtrb::RingBuffer::new(capacity_samples);
+        Ok(Self {
+            inner: Mutex::new(Inner { producer, consumer }),
+            dropped_samples: AtomicU64::new(0),
+            pushed_samples: AtomicU64::new(0),
+            capacity_samples,
+        })
+    }
+
+    /// 写入 interleaved 样本。满时先丢弃最旧样本腾位；单次写入超过容量时
+    /// 只保留最新 `capacity_samples` 个样本。永不阻塞。
+    ///
+    /// 返回本次因溢出丢弃的样本数（0 = 无溢出），供调用方计入引擎统计。
+    pub fn push(&self, samples: &[f32]) -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut inner = self.inner.lock().expect("lossy fifo lock poisoned");
+        let mut dropped_this_call = 0u64;
+
+        // consumer.slots() 是占用数的精确值（读端 head 只被消费方移动），
+        // 据此推导精确剩余空间，避免 producer 端 cached head 过估
+        let occupied = inner.consumer.slots();
+        let free = self.capacity_samples - occupied;
+
+        // 单次超容量：丢弃最旧段，只保留最新 capacity 个
+        let samples = if samples.len() > self.capacity_samples {
+            let skip = samples.len() - self.capacity_samples;
+            dropped_this_call += skip as u64;
+            &samples[skip..]
+        } else {
+            samples
+        };
+
+        if free < samples.len() {
+            let deficit = samples.len() - free;
+            for _ in 0..deficit.min(occupied) {
+                match inner.consumer.pop() {
+                    Ok(_) => dropped_this_call += 1,
+                    Err(_) => break, // 理论不可达：deficit ≤ 已存数据
+                }
+            }
+        }
+        inner
+            .producer
+            .push_entire_slice(samples)
+            .expect("lossy fifo：腾位后空间必然充足");
+        drop(inner);
+        if dropped_this_call > 0 {
+            self.dropped_samples
+                .fetch_add(dropped_this_call, Ordering::Relaxed);
+        }
+        self.pushed_samples
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
+        dropped_this_call
+    }
+
+    /// 读取至多 `out.len()` 个样本，返回实际读取数（可能为 0）。
+    /// 不阻塞；数据不足时返回部分结果，由调用方决定等待策略。
+    pub fn pop(&self, out: &mut [f32]) -> usize {
+        if out.is_empty() {
+            return 0;
+        }
+        let mut inner = self.inner.lock().expect("lossy fifo lock poisoned");
+        let (filled, _rest) = inner.consumer.pop_partial_slice(out);
+        filled.len()
+    }
+
+    /// 当前可读样本数。
+    pub fn available_samples(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("lossy fifo lock poisoned")
+            .consumer
+            .slots()
+    }
+
+    /// 容量（样本数）。
+    pub const fn capacity_samples(&self) -> usize {
+        self.capacity_samples
+    }
+
+    /// 累计丢弃样本数（含单次超容量时的尾部截断）。
+    pub fn dropped_samples(&self) -> u64 {
+        self.dropped_samples.load(Ordering::Relaxed)
+    }
+
+    /// 累计成功进入队列的样本数。
+    pub fn pushed_samples(&self) -> u64 {
+        self.pushed_samples.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod lossy_tests {
+    use super::*;
+    use std::thread;
+
+    #[test]
+    fn lossy_basic_roundtrip_preserves_order() {
+        let fifo = LossyFifo::new(1024).unwrap();
+        assert_eq!(fifo.push(&[1.0, 2.0, 3.0, 4.0]), 0);
+        let mut out = [0.0f32; 4];
+        assert_eq!(fifo.pop(&mut out), 4);
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn lossy_overflow_drops_oldest_not_newest() {
+        let fifo = LossyFifo::new(8).unwrap();
+        assert_eq!(fifo.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]), 0);
+        let dropped = fifo.push(&[9.0, 10.0, 11.0, 12.0]);
+        assert_eq!(dropped, 4);
+        assert_eq!(fifo.dropped_samples(), 4);
+        let mut out = [0.0f32; 8];
+        assert_eq!(fifo.pop(&mut out), 8);
+        assert_eq!(out, [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        assert_eq!(fifo.pushed_samples(), 12);
+    }
+
+    #[test]
+    fn lossy_push_never_blocks_and_never_loses_new() {
+        let fifo = LossyFifo::new(8).unwrap();
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        assert_eq!(fifo.push(&data), 16);
+        let mut out = vec![0.0f32; 8];
+        assert_eq!(fifo.pop(&mut out), 8);
+        assert_eq!(out, (16..24).map(|i| i as f32).collect::<Vec<_>>()[..]);
+    }
+
+    #[test]
+    fn lossy_pop_returns_partial_when_empty() {
+        let fifo = LossyFifo::new(64).unwrap();
+        assert_eq!(fifo.pop(&mut [0.0f32; 8]), 0);
+        fifo.push(&[1.0, 2.0, 3.0]);
+        let mut out = [0.0f32; 8];
+        assert_eq!(fifo.pop(&mut out), 3);
+        assert_eq!(&out[..3], &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn lossy_zero_capacity_rejected() {
+        assert!(matches!(
+            LossyFifo::new(0),
+            Err(FifoConfigError::ZeroCapacity)
+        ));
+    }
+
+    #[test]
+    fn lossy_concurrent_push_pop_order_and_accounting() {
+        use std::sync::Arc;
+        // 容量 480 = 每块保留量：消费者慢时旧数据按"丢最旧"语义合法丢弃。
+        // 验证保序 + 会计恒等式（送达 + 环内丢弃 == 环接收总量）。
+        let fifo = Arc::new(LossyFifo::new(480).unwrap());
+        let total_blocks = 1_000u64;
+        let ph = {
+            let fifo = Arc::clone(&fifo);
+            thread::spawn(move || {
+                for b in 0..total_blocks {
+                    let block: Vec<f32> = (0..960).map(|i| (b * 960 + i) as f32).collect();
+                    fifo.push(&block);
+                }
+            })
+        };
+        let mut seen_last = -1.0f32;
+        let mut got = 0u64;
+        loop {
+            let mut out = [0.0f32; 1920];
+            let n = fifo.pop(&mut out);
+            if n > 0 {
+                for v in &out[..n] {
+                    assert!(*v > seen_last, "样本必须保序: {v} after {seen_last}");
+                    seen_last = *v;
+                    got += 1;
+                }
+            } else if ph.is_finished() {
+                break;
+            } else {
+                thread::sleep(std::time::Duration::from_micros(50));
+            }
+        }
+        ph.join().unwrap();
+        assert_eq!(fifo.pushed_samples(), total_blocks * 480);
+        assert!(fifo.dropped_samples() >= total_blocks * 480);
+        let dropped_in_ring = fifo.dropped_samples() - total_blocks * 480;
+        assert_eq!(got + dropped_in_ring, fifo.pushed_samples());
+        assert!(got > 0, "消费者至少应收到部分数据");
     }
 }
 

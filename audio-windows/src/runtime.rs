@@ -176,6 +176,8 @@ pub struct AudioEngineStats {
     /// 混音后写入 render 且超过静音阈值的 block 数。运行中静音切换后
     /// 该计数停止增长，用于验证 send 级路由变更是否在块边界生效。
     pub rendered_non_silent_blocks: u64,
+    /// 监听抽头（MonitorTap）丢旧 FIFO 因消费者滞后丢弃的样本数。
+    pub monitor_tap_dropped_samples: u64,
     /// 每条 send 的逐通道（L/R）输出峰值幅度（0.0~1.0，静音为 0.0）。
     /// 键为 send id；值 `[left_peak, right_peak]`。用于逐通道电平表。
     pub send_peaks: std::collections::HashMap<String, [f32; 2]>,
@@ -212,6 +214,7 @@ struct Counters {
     non_silent_packets: AtomicU64,
     rendered_peak: AtomicU32,
     rendered_non_silent_blocks: AtomicU64,
+    monitor_tap_dropped_samples: AtomicU64,
     /// 每条 send 的逐通道（L/R）输出峰值，随时间取最大值并衰减。
     /// 用 Mutex<HashMap> 承载，因为需要按 send id 动态读写并整体快照。
     send_peaks: Mutex<std::collections::HashMap<loopmaster_audio_core::SendId, [f32; 2]>>,
@@ -254,6 +257,7 @@ impl Counters {
                 .iter()
                 .map(|(id, rms)| (id.0.clone(), *rms))
                 .collect(),
+            monitor_tap_dropped_samples: self.monitor_tap_dropped_samples.load(Ordering::Relaxed),
         }
     }
 }
@@ -272,6 +276,91 @@ pub struct NetworkIoHandles {
     pub vban_sink_consumers: Vec<(SinkId, AudioFifoConsumer)>,
 }
 
+/// 监听抽头（MonitorTap）端点：mixer worker → 媒体桥接（Web 监听）的
+/// 单 bus 丢旧 FIFO 通道。
+///
+/// 实时边界：mixer worker 侧只做一次原子读 +（有订阅者时）一次拷贝进
+/// 预分配 FIFO，无锁、无分配、不等待；无订阅者时零拷贝直接跳过。
+/// 消费侧（web runtime）通过 [`MonitorTapEndpoint::subscribe`] 取读取句柄，
+/// 句柄 Drop 时自动递减订阅计数。
+#[derive(Clone)]
+pub struct MonitorTapEndpoint {
+    fifo: Arc<loopmaster_audio_core::LossyFifo>,
+    subscribers: Arc<AtomicU64>,
+}
+
+/// 监听读取句柄：持有期间该 bus 的抽头保持激活（有拷贝）。
+pub struct MonitorTapReader {
+    endpoint: MonitorTapEndpoint,
+}
+
+impl MonitorTapEndpoint {
+    /// 容量起点：4 block ≈ 40 ms（任务书 §4 候选值；= 2 个 20ms 编码帧）。
+    pub const CAPACITY_SAMPLES: usize = 4 * DEFAULT_BLOCK_FRAMES * INTERNAL_CHANNELS;
+
+    pub fn new() -> Result<Self, loopmaster_audio_core::FifoConfigError> {
+        Ok(Self {
+            fifo: Arc::new(loopmaster_audio_core::LossyFifo::new(
+                Self::CAPACITY_SAMPLES,
+            )?),
+            subscribers: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// mixer worker 实时路径：有订阅者时写入 bus block（满时丢旧），
+    /// 返回丢弃样本数（无订阅者返回 0 且零拷贝）。
+    pub fn write_bus_block(&self, block: &[f32]) -> u64 {
+        if self.subscribers.load(Ordering::Acquire) == 0 {
+            return 0;
+        }
+        self.fifo.push(block)
+    }
+
+    /// 消费侧订阅：订阅计数 +1，返回读取句柄。
+    pub fn subscribe(&self) -> MonitorTapReader {
+        self.subscribers.fetch_add(1, Ordering::AcqRel);
+        MonitorTapReader {
+            endpoint: self.clone(),
+        }
+    }
+
+    /// 当前订阅数（诊断用）。
+    pub fn subscriber_count(&self) -> u64 {
+        self.subscribers.load(Ordering::Acquire)
+    }
+
+    /// 累计丢弃样本数。
+    pub fn dropped_samples(&self) -> u64 {
+        self.fifo.dropped_samples()
+    }
+}
+
+impl MonitorTapReader {
+    /// 非阻塞读取至多 `out.len()` 个样本，返回实际读取数。
+    pub fn pop(&self, out: &mut [f32]) -> usize {
+        self.endpoint.fifo.pop(out)
+    }
+
+    /// 当前可读样本数。
+    pub fn available_samples(&self) -> usize {
+        self.endpoint.fifo.available_samples()
+    }
+}
+
+impl Drop for MonitorTapReader {
+    fn drop(&mut self) {
+        self.endpoint.subscribers.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 监听抽头句柄：引擎每个 session 为图中的每条 bus 创建一个端点，
+/// 顺序与 `graph.buses` 一致；经 mpsc 一次性发送给引擎外（StateHub）。
+#[derive(Clone)]
+pub struct MonitorTapHandles {
+    /// `(bus_id, endpoint)`，每条 bus 一项。
+    pub taps: Vec<(loopmaster_audio_core::BusId, MonitorTapEndpoint)>,
+}
+
 pub struct AudioEngine {
     config: AudioEngineConfig,
     graph_config: Arc<Mutex<RouteGraphSnapshot>>,
@@ -282,6 +371,8 @@ pub struct AudioEngine {
     graph_tx: Arc<Mutex<Option<mpsc::Sender<RouteGraphSnapshot>>>>,
     /// 网络桥接句柄接收端（supervisor 每次创建 session 时发送）。
     network_handles_rx: Mutex<Option<mpsc::Receiver<NetworkIoHandles>>>,
+    /// 监听抽头句柄接收端（supervisor 每次创建 session 时发送）。
+    monitor_tap_handles_rx: Mutex<Option<mpsc::Receiver<MonitorTapHandles>>>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -312,12 +403,14 @@ impl AudioEngine {
                 non_silent_packets: AtomicU64::new(0),
                 rendered_peak: AtomicU32::new(0),
                 rendered_non_silent_blocks: AtomicU64::new(0),
+                monitor_tap_dropped_samples: AtomicU64::new(0),
                 send_peaks: Mutex::new(std::collections::HashMap::new()),
                 send_rms: Mutex::new(std::collections::HashMap::new()),
             }),
             last_error: Arc::new(Mutex::new(None)),
             graph_tx: Arc::new(Mutex::new(None)),
             network_handles_rx: Mutex::new(None),
+            monitor_tap_handles_rx: Mutex::new(None),
             workers: Vec::new(),
         })
     }
@@ -340,6 +433,12 @@ impl AudioEngine {
         // 网络桥接句柄通道：supervisor 每次成功创建 session 时发送。
         let (network_handles_tx, network_handles_rx) = mpsc::channel();
         *self.network_handles_rx.lock().expect("网络句柄锁未中毒") = Some(network_handles_rx);
+        // 监听抽头句柄通道：supervisor 每次成功创建 session 时发送。
+        let (monitor_tap_handles_tx, monitor_tap_handles_rx) = mpsc::channel();
+        *self
+            .monitor_tap_handles_rx
+            .lock()
+            .expect("监听抽头句柄锁未中毒") = Some(monitor_tap_handles_rx);
         let supervisor = thread::Builder::new()
             .name("loopmaster-audio-supervisor".into())
             .spawn(move || {
@@ -353,6 +452,7 @@ impl AudioEngine {
                     counters,
                     graph_tx,
                     network_handles_tx,
+                    monitor_tap_handles_tx,
                 );
             })
             .expect("创建音频 supervisor 失败");
@@ -371,6 +471,34 @@ impl AudioEngine {
         let mut slot = self.network_handles_rx.lock().expect("网络句柄锁未中毒");
         match slot.as_mut() {
             Some(rx) => rx.recv().ok(),
+            None => None,
+        }
+    }
+
+    /// 取最近一次启动 session 的监听抽头句柄（若有）。
+    ///
+    /// 阻塞直到 supervisor 完成首次 session 并发送 `MonitorTapHandles`
+    /// （每个成功 session 后都会重发）。引擎未运行时返回 `None`。
+    pub fn recv_monitor_tap_handles(&self) -> Option<MonitorTapHandles> {
+        let mut slot = self
+            .monitor_tap_handles_rx
+            .lock()
+            .expect("监听抽头句柄锁未中毒");
+        match slot.as_mut() {
+            Some(rx) => rx.recv().ok(),
+            None => None,
+        }
+    }
+
+    /// 非阻塞轮询监听抽头句柄：有新 session 句柄返回 `Some`，否则 `None`。
+    /// 供上层低频轮询（避免阻塞持锁）。
+    pub fn try_recv_monitor_tap_handles(&self) -> Option<MonitorTapHandles> {
+        let mut slot = self
+            .monitor_tap_handles_rx
+            .lock()
+            .expect("监听抽头句柄锁未中毒");
+        match slot.as_mut() {
+            Some(rx) => rx.try_recv().ok(),
             None => None,
         }
     }
@@ -610,6 +738,7 @@ fn supervisor_worker(
     counters: Arc<Counters>,
     graph_tx_slot: Arc<Mutex<Option<mpsc::Sender<RouteGraphSnapshot>>>>,
     network_handles_tx: mpsc::Sender<NetworkIoHandles>,
+    monitor_tap_handles_tx: mpsc::Sender<MonitorTapHandles>,
 ) {
     for attempt in 0..=DEFAULT_RECONNECT_ATTEMPTS {
         if engine_stop.load(Ordering::Acquire) {
@@ -672,6 +801,23 @@ fn supervisor_worker(
         // 收集 VBAN 源/目标的网络桥接句柄。
         let mut vban_source_producers = Vec::new();
         let mut vban_sink_consumers = Vec::new();
+        // 为每条 bus 创建监听抽头端点（顺序与 graph.buses 一致）。
+        let taps_result: Result<Vec<_>, _> = graph
+            .graph()
+            .buses
+            .iter()
+            .map(|bus| MonitorTapEndpoint::new().map(|endpoint| (bus.id.clone(), endpoint)))
+            .collect();
+        let (monitor_tap_handles, monitor_taps) = match taps_result {
+            Ok(pairs) => {
+                let taps = pairs.iter().map(|(_, endpoint)| endpoint.clone()).collect();
+                (pairs, taps)
+            }
+            Err(e) => {
+                fail(&state, &engine_stop, &error, e.to_string());
+                break;
+            }
+        };
         for (source, producer) in graph.graph().sources.iter().cloned().zip(source_producers) {
             if source.kind == SourceKind::Vban {
                 // 网络源：由网络桥接层直接写入 FIFO producer，混音从对应
@@ -699,6 +845,7 @@ fn supervisor_worker(
             Arc::clone(&counters),
             mixer_consumers,
             mixer_producers,
+            monitor_taps,
         ));
         for (sink, consumer) in graph.graph().sinks.iter().cloned().zip(render_consumers) {
             if sink.kind == SinkKind::Vban {
@@ -721,6 +868,10 @@ fn supervisor_worker(
         let _ = network_handles_tx.send(NetworkIoHandles {
             vban_source_producers,
             vban_sink_consumers,
+        });
+        // 把监听抽头句柄发给 AudioEngine（供 Web 监听管线获取）。
+        let _ = monitor_tap_handles_tx.send(MonitorTapHandles {
+            taps: monitor_tap_handles,
         });
         // 给三个 worker 一个有界启动窗口；设备在打开阶段失效时，
         // session_stop 会先置位，避免把尚未建立的会话报告为 Running。
@@ -788,6 +939,7 @@ fn spawn_mixer_worker(
     counters: Arc<Counters>,
     consumers: Vec<loopmaster_audio_core::AudioFifoConsumer>,
     producers: Vec<loopmaster_audio_core::AudioFifoProducer>,
+    monitor_taps: Vec<MonitorTapEndpoint>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("loopmaster-mixer".into())
@@ -802,6 +954,7 @@ fn spawn_mixer_worker(
                 counters,
                 consumers,
                 producers,
+                monitor_taps,
             );
         })
         .expect("创建 mixer worker 失败")
@@ -1175,6 +1328,7 @@ fn mixer_worker(
     counters: Arc<Counters>,
     mut consumers: Vec<loopmaster_audio_core::AudioFifoConsumer>,
     mut producers: Vec<loopmaster_audio_core::AudioFifoProducer>,
+    monitor_taps: Vec<MonitorTapEndpoint>,
 ) -> Result<(), ()> {
     let mut plan = MixerPlan::new(
         graph.graph(),
@@ -1300,6 +1454,20 @@ fn mixer_worker(
             for (id, block_rms) in plan.send_rms() {
                 let entry = rms.entry(id.clone()).or_insert([0.0f32; 2]);
                 entry.copy_from_slice(block_rms);
+            }
+        }
+
+        // 监听抽头：把各 bus 的混音结果多写一份到预分配丢旧 FIFO。
+        // 无订阅者时 write_bus_block 只做一次原子读即返回（零拷贝）；
+        // 有订阅者时满即丢旧，实时线程不等待、不分配。
+        for (index, tap) in monitor_taps.iter().enumerate() {
+            if let Some(block) = plan.bus_block(index) {
+                let dropped = tap.write_bus_block(block);
+                if dropped > 0 {
+                    counters
+                        .monitor_tap_dropped_samples
+                        .fetch_add(dropped, Ordering::Relaxed);
+                }
             }
         }
 

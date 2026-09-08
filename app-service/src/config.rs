@@ -91,11 +91,14 @@ impl AppConfig {
                     "配置缺少有效的 schema_version",
                 )))
             })? as u32;
-        let config = match schema_version {
+        let mut config = match schema_version {
             CURRENT_SCHEMA_VERSION => serde_json::from_value(value)?,
             1 => migrate_v1(serde_json::from_value(value)?)?,
             version => return Err(ConfigError::UnsupportedSchemaVersion(version)),
         };
+        // 先清洗历史脏数据（如以中文/超长主机名充当 VBAN 流名），再校验，
+        // 避免旧配置永远无法通过加载校验。
+        config.graph.sanitize_vban_stream_names();
         config.graph.validate()?;
         Ok(config)
     }
