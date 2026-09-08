@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useRemoteConsole, type ConnectionStatus } from "./lib/useRemoteConsole";
-import { dbToFaderPos, faderPosToDb, type RemoteState, type Send } from "./lib/protocol";
+import {
+  dbToFaderPos,
+  faderPosToDb,
+  type MonitorStatus,
+  type RemoteState,
+  type Send,
+} from "./lib/protocol";
 
 type Tab = "sources" | "channels";
 
@@ -10,6 +16,17 @@ const STATUS_TEXT: Record<ConnectionStatus, string> = {
   connected: "已连接",
   reconnecting: "重连中…",
   disconnected: "未连接",
+};
+
+/** 胶囊按钮上的文案（idle/failed 为可开始动作，其余为状态展示、点击停止）。 */
+const MONITOR_BUTTON_TEXT: Record<MonitorStatus, string> = {
+  idle: "监听",
+  connecting: "连接中…",
+  playing: "监听中",
+  degraded: "监听中·劣化",
+  reconnecting: "重连中…",
+  permission_required: "需配对",
+  failed: "重试监听",
 };
 
 /** 引擎状态 → 中文（后端下发原始字符串，做兜底映射）。 */
@@ -288,7 +305,7 @@ function SendRow({
 }
 
 export default function App() {
-  const { state, status, setSendGain, setSendMuted } = useRemoteConsole();
+  const { state, status, setSendGain, setSendMuted, monitor } = useRemoteConsole();
   const [tab, setTab] = useState<Tab>("sources");
   const pairing = usePairingFromUrl();
   const { theme, toggle: toggleTheme } = useTheme();
@@ -345,6 +362,54 @@ export default function App() {
           <div className="console-title">LoopMaster Remote</div>
         </div>
         <div className="console-header-right">
+          {monitor.availableBuses.length > 0 && (
+            <div className="monitor-chip">
+              {monitor.availableBuses.length > 1 && (
+                <select
+                  className="monitor-bus-select"
+                  id="monitor-bus-select"
+                  defaultValue={monitor.availableBuses[0]}
+                  disabled={monitor.status !== "idle" && monitor.status !== "failed"}
+                  aria-label="监听通道"
+                >
+                  {monitor.availableBuses.map((busId) => (
+                    <option key={busId} value={busId}>
+                      {busName(state, busId)}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                className={`monitor-toggle ${monitor.paused ? "paused" : monitor.status}`}
+                title={
+                  monitor.status === "playing" || monitor.status === "degraded"
+                    ? `已收 ${monitor.packets} 包；点击停止监听`
+                    : undefined
+                }
+                onClick={() => {
+                  if (monitor.paused) {
+                    void monitor.resume();
+                  } else if (monitor.status === "idle" || monitor.status === "failed") {
+                    const select = document.getElementById(
+                      "monitor-bus-select",
+                    ) as HTMLSelectElement | null;
+                    void monitor.start(select?.value ?? undefined);
+                  } else {
+                    void monitor.stop();
+                  }
+                }}
+              >
+                <span className={`monitor-dot ${monitor.paused ? "paused" : monitor.status}`} />
+                {monitor.paused ? "点按播放" : MONITOR_BUTTON_TEXT[monitor.status]}
+              </button>
+              {monitor.status === "failed" && monitor.error && (
+                <span className="monitor-error" title={monitor.error}>
+                  {monitor.error}
+                </span>
+              )}
+            </div>
+          )}
           <button
             type="button"
             className="theme-toggle"

@@ -11,6 +11,7 @@
 //! - `/ws` 双向通道属子任务 2。
 
 pub mod auth;
+pub mod monitor;
 pub mod routes;
 pub mod tls;
 pub mod ws;
@@ -270,6 +271,8 @@ async fn serve(
 
     // meter 广播任务 + /ws 路由（子任务 2）+ 配对/可信设备（子任务 4）。
     let meter_tx = ws::spawn_meter_task(hub.clone(), config.meter_hz);
+    // 6.3 网页端无线监听服务（抽头注册表在 StateHub，peer 表在此）。
+    let monitor = monitor::MonitorService::new(hub.clone());
     let app = ws::ws_router()
         .with_state(ws::WsState {
             hub: hub.clone(),
@@ -277,6 +280,7 @@ async fn serve(
             auth: hub.auth().clone(),
             is_https: config.tls,
             require_pairing: hub.require_pairing_flag(),
+            monitor: monitor.clone(),
         })
         .merge(routes::router())
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -288,6 +292,8 @@ async fn serve(
             let _ = server.handle(server_handle).serve(app).await;
         }
     }
+    // 服务退出：回收全部监听 peer（S1-5 网络开关联动）。
+    monitor.shutdown().await;
     shutdown_task.abort();
     revision_task.abort();
 }
@@ -579,6 +585,510 @@ mod tests {
 
         handle.shutdown();
         let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// 6.3 监听信令：结构化错误（unknown_bus / unknown_peer / limit）、
+    /// seq 幂等（重复 monitor_start 不重复分配 peer）、stop 后可再开。
+    #[tokio::test]
+    async fn ws_monitor_signaling_validation_and_idempotency() {
+        use futures_util::StreamExt as _;
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-ws-monitor-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                meter_hz: 1,
+            },
+            hub.clone(),
+        )
+        .expect("启动成功");
+
+        // 开放访问模式（默认）：无需配对直接连接。
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let request = ws_request(
+            &url,
+            None,
+            &format!("http://127.0.0.1:{}", handle.addr().port()),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("连接 /ws");
+        // 丢弃 initial_state。
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("initial_state 超时")
+            .expect("流结束")
+            .expect("协议错误");
+        assert!(first.into_text().unwrap().contains("initial_state"));
+
+        // 注入两条监听抽头（不启动真实引擎，直接写 StateHub）。
+        hub.set_monitor_taps(vec![
+            (
+                loopmaster_audio_core::BusId("bus_a".into()),
+                loopmaster_audio_windows::MonitorTapEndpoint::new().unwrap(),
+            ),
+            (
+                loopmaster_audio_core::BusId("bus_b".into()),
+                loopmaster_audio_windows::MonitorTapEndpoint::new().unwrap(),
+            ),
+        ]);
+
+        type TestWs = tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >;
+
+        async fn send_action(ws: &mut TestWs, seq: u64, action: &str, data: serde_json::Value) {
+            use futures_util::SinkExt as _;
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({ "seq": seq, "action": action, "data": data }).to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+
+        async fn next_text(ws: &mut TestWs) -> String {
+            use futures_util::StreamExt as _;
+            loop {
+                let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("响应超时")
+                    .expect("流结束")
+                    .expect("协议错误");
+                if let Ok(text) = message.into_text() {
+                    return text;
+                }
+            }
+        }
+
+        // 1) 未知 bus → 结构化错误。
+        send_action(
+            &mut ws,
+            1,
+            "monitor_start",
+            serde_json::json!({"bus_id": "nope"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""error":"rejected""#), "{text}");
+        assert!(text.contains(r#""code":"unknown_bus""#), "{text}");
+
+        // 2) 正常 start → ack + peer_id。
+        send_action(
+            &mut ws,
+            2,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_start""#), "{text}");
+        let peer1: u64 = serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap()
+            .get("peer_id")
+            .and_then(|v| v.as_u64())
+            .expect("ack 应带 peer_id");
+
+        // 3) 同 seq 幂等：回放缓存响应，不分配新 peer。
+        send_action(
+            &mut ws,
+            2,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        let replayed: u64 = serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap()
+            .get("peer_id")
+            .and_then(|v| v.as_u64())
+            .expect("幂等响应应带相同 peer_id");
+        assert_eq!(replayed, peer1, "重复 seq 不得创建新 peer");
+
+        // 4) 并发上限 = 2：第二条成功，第三条 limit_reached。
+        send_action(
+            &mut ws,
+            3,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_b"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_start""#), "{text}");
+        send_action(
+            &mut ws,
+            4,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""code":"monitor_limit_reached""#), "{text}");
+
+        // 5) webrtc_offer 未知 peer → unknown_peer；stop 后可再开。
+        send_action(
+            &mut ws,
+            5,
+            "webrtc_offer",
+            serde_json::json!({"peer_id": 999, "sdp": "v=0"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""code":"unknown_peer""#), "{text}");
+        send_action(
+            &mut ws,
+            6,
+            "monitor_stop",
+            serde_json::json!({"peer_id": peer1}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_stop""#), "{text}");
+        send_action(
+            &mut ws,
+            7,
+            "monitor_start",
+            serde_json::json!({"bus_id": "bus_a"}),
+        )
+        .await;
+        let text = next_text(&mut ws).await;
+        assert!(text.contains(r#""ack":"monitor_start""#), "{text}");
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+    }
+
+    /// 6.3 端到端验收（真实引擎 + Rust WebRTC 接收端，`#[ignore]`）。
+    ///
+    /// 链路：WASAPI loopback 真实声源 → 引擎混音 → MonitorTap 丢旧 FIFO →
+    /// Opus 编码 → webrtc-rs 推流 → 本测试充当浏览器（recvonly PC）解码，
+    /// 以 `inbound-rtp.bytes_received` 持续增长作为"音频真实流动"判据。
+    /// 本机需存在 render 设备；`cargo test -p loopmaster-app-service -- --ignored`
+    #[tokio::test]
+    #[ignore = "需要真实音频设备；验收时以 --ignored 显式运行"]
+    async fn monitor_e2e_real_engine_to_webrtc_receiver() {
+        use std::time::Instant;
+
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use loopmaster_audio_core::{
+            BusSpec, EndpointId, SendSpec, SinkId, SinkKind, SinkSpec, SourceId, SourceKind,
+            SourceSpec,
+        };
+        use loopmaster_audio_windows::{EndpointFlow, WindowsAudioBackend};
+        use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+        use webrtc::media_stream::track_remote::TrackRemote;
+        use webrtc::peer_connection::{
+            PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, StatsSelector,
+        };
+
+        use crate::command::EngineCommand;
+        use crate::engine::EngineService;
+
+        // 1) 真实 render 设备（loopback 采集它的播放混音）。
+        let backend = WindowsAudioBackend::new().expect("COM 初始化");
+        let endpoints = backend.enumerate_endpoints().expect("枚举设备");
+        let Some(render) = endpoints
+            .iter()
+            .find(|endpoint| endpoint.flow == EndpointFlow::Render)
+        else {
+            eprintln!("[e2e] 本机无 render 设备，跳过");
+            return;
+        };
+        eprintln!("[e2e] loopback 设备: {}", render.name);
+
+        // 2) 路由图与引擎。
+        let config_dir = std::env::temp_dir().join(format!(
+            "loopmaster-monitor-e2e-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let hub = std::sync::Arc::new(StateHub::new(config_dir.join("config.json")));
+        let mut graph = loopmaster_audio_core::RouteGraph::default();
+        graph.sources.push(SourceSpec {
+            id: SourceId("e2e_loopback".into()),
+            kind: SourceKind::DeviceLoopback,
+            endpoint_id: Some(EndpointId(render.id.0.clone())),
+            process_id: None,
+            executable_path: None,
+            stream_name: None,
+            display_name: "E2E Loopback".into(),
+        });
+        graph.buses.push(BusSpec {
+            id: loopmaster_audio_core::BusId("e2e_bus".into()),
+            display_name: "E2E 总线".into(),
+        });
+        graph.sinks.push(SinkSpec {
+            id: SinkId("e2e_sink".into()),
+            endpoint_id: EndpointId(render.id.0.clone()),
+            display_name: "E2E 扬声器".into(),
+            kind: SinkKind::Device,
+            stream_name: None,
+            remote_addr: None,
+        });
+        graph.sends.push(SendSpec::SourceToBus {
+            id: loopmaster_audio_core::SendId("e2e_send".into()),
+            source_id: SourceId("e2e_loopback".into()),
+            bus_id: loopmaster_audio_core::BusId("e2e_bus".into()),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        });
+        graph.sends.push(SendSpec::BusToSink {
+            id: loopmaster_audio_core::SendId("e2e_send_out".into()),
+            bus_id: loopmaster_audio_core::BusId("e2e_bus".into()),
+            sink_id: SinkId("e2e_sink".into()),
+            gain_db: 0.0,
+            muted: false,
+            enabled: true,
+            channel_map: Vec::new(),
+        });
+
+        let engine = EngineService::new(graph.clone()).expect("创建引擎服务");
+        engine.command(EngineCommand::Start).expect("启动引擎");
+        // 等待 supervisor 发送监听抽头。
+        let mut taps = None;
+        for _ in 0..100 {
+            if let Some(handles) = engine.poll_monitor_tap_handles() {
+                taps = Some(handles);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let taps = taps.expect("引擎应发送监听抽头句柄");
+        assert_eq!(taps.taps.len(), 1, "每条 bus 一个抽头");
+        hub.set_monitor_taps(taps.taps);
+        eprintln!("[e2e] 引擎已启动，监听抽头就绪");
+
+        // 3) Web 服务器 + /ws 客户端。
+        let handle = start(
+            WebServerConfig {
+                port: 0,
+                tls: false,
+                meter_hz: 5,
+            },
+            hub.clone(),
+        )
+        .expect("启动 Web 服务器");
+        let url = format!("ws://127.0.0.1:{}/ws", handle.addr().port());
+        let request = ws_request(
+            &url,
+            None,
+            &format!("http://127.0.0.1:{}", handle.addr().port()),
+        );
+        let (mut ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("连接 /ws");
+        let initial = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("initial_state 超时")
+            .expect("流结束")
+            .expect("协议错误");
+        let initial = initial.into_text().unwrap();
+        assert!(
+            initial.contains(r#""monitor_available":["e2e_bus"]"#),
+            "initial_state 应含 monitor_available: {initial}"
+        );
+
+        // monitor_start → ack peer_id。
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({"seq": 1, "action": "monitor_start", "data": {"bus_id": "e2e_bus"}})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        let peer_id = loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), ws.next())
+                .await
+                .expect("monitor_start 应答超时")
+                .expect("流结束")
+                .expect("协议错误");
+            let text = message.into_text().unwrap();
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                if value.get("ack").and_then(|ack| ack.as_str()) == Some("monitor_start") {
+                    break value
+                        .get("peer_id")
+                        .and_then(|id| id.as_u64())
+                        .expect("ack 应带 peer_id");
+                }
+                if value.get("error").is_some() {
+                    panic!("monitor_start 被拒绝: {text}");
+                }
+            }
+        };
+        eprintln!("[e2e] monitor_start 成功，peer_id={peer_id}");
+
+        // 4) Rust WebRTC 接收端（等价浏览器 recvonly PC）。
+        let mut media = rtc::peer_connection::configuration::media_engine::MediaEngine::default();
+        media
+            .register_codec(
+                rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                    rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                        mime_type: "audio/opus".to_owned(),
+                        clock_rate: 48_000,
+                        channels: 2,
+                        sdp_fmtp_line: "minptime=20;stereo=1;sprop-stereo=1".to_owned(),
+                        rtcp_feedback: vec![],
+                    },
+                    payload_type: crate::web_server::monitor::PAYLOAD_TYPE_OPUS,
+                },
+                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
+            )
+            .unwrap();
+        let registry =
+            rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors(
+                rtc::interceptor::Registry::new(),
+                &mut media,
+            )
+            .unwrap();
+        let (track_tx, mut track_rx) = webrtc::runtime::channel::<()>(1);
+        struct RecvHandler {
+            track_tx: webrtc::runtime::Sender<()>,
+        }
+        #[async_trait::async_trait]
+        impl PeerConnectionEventHandler for RecvHandler {
+            async fn on_track(&self, _track: std::sync::Arc<dyn TrackRemote>) {
+                let _ = self.track_tx.try_send(());
+            }
+        }
+        let config = rtc::peer_connection::configuration::RTCConfigurationBuilder::new()
+            .with_ice_servers(vec![])
+            .build();
+        let receiver: std::sync::Arc<dyn PeerConnection> = std::sync::Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(config)
+                .with_media_engine(media)
+                .with_interceptor_registry(registry)
+                .with_handler(std::sync::Arc::new(RecvHandler { track_tx }))
+                .with_udp_addrs(vec!["0.0.0.0:0"])
+                .build()
+                .await
+                .expect("创建接收端 PC"),
+        );
+        receiver
+            .add_transceiver_from_kind(
+                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    streams: vec![],
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .expect("添加 recvonly transceiver");
+        let offer = receiver.create_offer(None).await.expect("createOffer");
+        receiver
+            .set_local_description(offer.clone())
+            .await
+            .expect("setLocalDescription");
+
+        // 5) 信令：offer → answer。
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({
+                "seq": 2,
+                "action": "webrtc_offer",
+                "data": { "peer_id": peer_id, "sdp": offer.sdp },
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+        let mut answered = false;
+        let mut ack_seen = false;
+        for _ in 0..20 {
+            let message = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("信令应答超时")
+                .expect("流结束")
+                .expect("协议错误");
+            let text = message.into_text().unwrap();
+            if text.contains(r#""event":"webrtc_answer""#) {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let sdp = value
+                    .pointer("/data/sdp")
+                    .and_then(|sdp| sdp.as_str())
+                    .expect("answer 应带 sdp");
+                receiver
+                    .set_remote_description(
+                        rtc::peer_connection::sdp::RTCSessionDescription::answer(sdp.to_owned())
+                            .expect("answer SDP 合法"),
+                    )
+                    .await
+                    .expect("setRemoteDescription");
+                answered = true;
+            } else if text.contains(r#""ack":"webrtc_offer""#) {
+                ack_seen = true;
+            }
+            if answered && ack_seen {
+                break;
+            }
+        }
+        assert!(answered && ack_seen, "应同时收到 ack 与 webrtc_answer");
+
+        // 6) 等待媒体轨与字节流动（音频判据：inbound bytes 持续增长）。
+        tokio::time::timeout(Duration::from_secs(10), track_rx.recv())
+            .await
+            .expect("应收到远端音轨")
+            .expect("信号通道");
+        eprintln!("[e2e] 已收到远端音轨（ontrack）");
+
+        let mut first_bytes: Option<u64> = None;
+        let mut first_packets: Option<u64> = None;
+        let mut last_bytes = 0u64;
+        let mut last_packets = 0u64;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let report = receiver
+                .get_stats(Instant::now(), StatsSelector::None)
+                .await;
+            for entry in report.iter() {
+                if let rtc::statistics::report::RTCStatsReportEntry::InboundRtp(stats) = entry {
+                    let bytes = stats.bytes_received;
+                    let packets = stats.received_rtp_stream_stats.packets_received;
+                    last_bytes = bytes;
+                    last_packets = packets;
+                    if first_bytes.is_none() && bytes > 0 {
+                        first_bytes = Some(bytes);
+                        first_packets = Some(packets);
+                    }
+                }
+            }
+            // 静音段 Opus 帧极小（DTX 关闭下 ~2B/帧），以包数增长为"无断流"判据。
+            if let (Some(first_packets), Some(_)) = (first_packets, first_bytes) {
+                if last_packets.saturating_sub(first_packets) >= 100 {
+                    break;
+                }
+            }
+        }
+        eprintln!(
+            "[e2e] 音频流动判据: packets {last_packets}（首采 {first_packets:?}）, bytes {last_bytes}（首采 {first_bytes:?}）"
+        );
+        assert!(first_packets.is_some(), "应收到 RTP 载荷（音频流动）");
+        assert!(
+            last_packets.saturating_sub(first_packets.unwrap_or(0)) >= 100,
+            "RTP 包流应持续到达（无断流，50 pps × 2s）: packets={last_packets}"
+        );
+        assert!(last_bytes > first_bytes.unwrap_or(0), "字节流应增长");
+
+        // 7) 收尾：monitor_stop → ack；引擎与服务器关闭。
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({"seq": 3, "action": "monitor_stop", "data": {"peer_id": peer_id}})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        let _ = engine.command(EngineCommand::Stop);
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&config_dir);
+        eprintln!("[e2e] 通过");
     }
 
     /// 30/60Hz 电平广播实测（原型对比，`#[ignore]`：手动运行并读输出）。

@@ -2493,6 +2493,28 @@ pub fn run() {
             let watcher_state = app.state::<Arc<AppState>>().inner().clone();
             spawn_process_watcher(app.handle().clone(), watcher_state);
 
+            // 6.3 监听抽头 pump：随引擎 session 重建把 MonitorTap 句柄写入
+            // StateHub（Web 监听管线按 bus_id 查询）。引擎停止时清空。
+            let pump_state = app.state::<Arc<AppState>>().inner().clone();
+            std::thread::Builder::new()
+                .name("loopmaster-monitor-tap-pump".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let engine = pump_state.engine();
+                    let Some(engine) = engine.as_ref() else {
+                        continue;
+                    };
+                    if let Some(handles) = engine.poll_monitor_tap_handles() {
+                        let count = handles.taps.len();
+                        pump_state.set_monitor_taps(handles.taps);
+                        log_line(&format!("monitor-tap: 已注册 {count} 条 bus 监听抽头"));
+                    }
+                    if !engine.status().running {
+                        pump_state.clear_monitor_taps();
+                    }
+                })
+                .expect("创建监听抽头 pump 线程失败");
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

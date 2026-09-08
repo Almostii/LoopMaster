@@ -13,8 +13,8 @@ mod test_tone;
 pub mod vban;
 
 pub use fifo::{
-    AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, PopResult, PushResult,
-    UnalignedSamples,
+    AudioFifo, AudioFifoConsumer, AudioFifoProducer, FifoConfigError, LossyFifo, PopResult,
+    PushResult, UnalignedSamples,
 };
 pub use mixer::{MixerError, MixerPlan};
 pub use resampler::{

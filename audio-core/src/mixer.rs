@@ -276,6 +276,21 @@ impl MixerPlan {
         &self.send_rms
     }
 
+    /// 最近一次 [`process`](Self::process) 后指定 bus 的混音结果只读视图。
+    ///
+    /// 返回交错 f32 切片，长度 = `block_frames() × bus_channels()`；
+    /// `bus_index` 为 `graph.buses` 中的序号，越界返回 `None`。
+    ///
+    /// 语义说明：该缓冲是"各 source send 应用增益后的 bus 累加和"，
+    /// **不含** bus→sink send 的增益/静音/enable（那在阶段 2 才应用）。
+    /// 视图仅在下一次 `process` 调用前有效，调用方应立即拷贝。
+    /// 实时安全：仅一次切片运算，无锁无分配。
+    pub fn bus_block(&self, bus_index: usize) -> Option<&[f32]> {
+        let bus_block_samples = self.block_frames * self.bus_channels;
+        let start = bus_index.checked_mul(bus_block_samples)?;
+        self.bus_blocks.get(start..start + bus_block_samples)
+    }
+
     /// 将 source block 经内部 Bus 混音到 sink block。
     ///
     /// source 可短于固定 block 长度，缺少的尾帧按静音处理；sink 必须提供完整
