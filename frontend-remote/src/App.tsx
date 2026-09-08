@@ -18,14 +18,15 @@ const STATUS_TEXT: Record<ConnectionStatus, string> = {
   disconnected: "未连接",
 };
 
-const MONITOR_STATUS_TEXT: Record<MonitorStatus, string> = {
-  idle: "未监听",
-  connecting: "监听连接中…",
+/** 胶囊按钮上的文案（idle/failed 为可开始动作，其余为状态展示、点击停止）。 */
+const MONITOR_BUTTON_TEXT: Record<MonitorStatus, string> = {
+  idle: "监听",
+  connecting: "连接中…",
   playing: "监听中",
-  degraded: "监听中（网络劣化）",
-  reconnecting: "监听重连中…",
-  permission_required: "需要配对",
-  failed: "监听失败",
+  degraded: "监听中·劣化",
+  reconnecting: "重连中…",
+  permission_required: "需配对",
+  failed: "重试监听",
 };
 
 /** 引擎状态 → 中文（后端下发原始字符串，做兜底映射）。 */
@@ -363,11 +364,12 @@ export default function App() {
         <div className="console-header-right">
           {monitor.availableBuses.length > 0 && (
             <div className="monitor-chip">
-              {monitor.availableBuses.length > 1 && monitor.status === "idle" && (
+              {monitor.availableBuses.length > 1 && (
                 <select
                   className="monitor-bus-select"
                   id="monitor-bus-select"
                   defaultValue={monitor.availableBuses[0]}
+                  disabled={monitor.status !== "idle" && monitor.status !== "failed"}
                   aria-label="监听通道"
                 >
                   {monitor.availableBuses.map((busId) => (
@@ -379,9 +381,16 @@ export default function App() {
               )}
               <button
                 type="button"
-                className={`monitor-toggle ${monitor.status}`}
+                className={`monitor-toggle ${monitor.paused ? "paused" : monitor.status}`}
+                title={
+                  monitor.status === "playing" || monitor.status === "degraded"
+                    ? `已收 ${monitor.packets} 包；点击停止监听`
+                    : undefined
+                }
                 onClick={() => {
-                  if (monitor.status === "idle" || monitor.status === "failed") {
+                  if (monitor.paused) {
+                    void monitor.resume();
+                  } else if (monitor.status === "idle" || monitor.status === "failed") {
                     const select = document.getElementById(
                       "monitor-bus-select",
                     ) as HTMLSelectElement | null;
@@ -391,24 +400,13 @@ export default function App() {
                   }
                 }}
               >
-                {monitor.status === "idle" || monitor.status === "failed"
-                  ? "开始监听"
-                  : "停止监听"}
+                <span className={`monitor-dot ${monitor.paused ? "paused" : monitor.status}`} />
+                {monitor.paused ? "点按播放" : MONITOR_BUTTON_TEXT[monitor.status]}
               </button>
-              {monitor.status !== "idle" && (
-                <span className={`monitor-state ${monitor.status}`}>
-                  {monitor.paused ? "已被浏览器暂停，请点按播放" : MONITOR_STATUS_TEXT[monitor.status]}
-                  <span className="status-revision"> · {monitor.packets} 包</span>
+              {monitor.status === "failed" && monitor.error && (
+                <span className="monitor-error" title={monitor.error}>
+                  {monitor.error}
                 </span>
-              )}
-              {monitor.paused && (
-                <button
-                  type="button"
-                  className="monitor-toggle connecting"
-                  onClick={() => void monitor.resume()}
-                >
-                  点按播放
-                </button>
               )}
             </div>
           )}

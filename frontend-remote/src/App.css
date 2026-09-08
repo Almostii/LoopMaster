@@ -147,7 +147,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 8px 16px;
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
@@ -156,6 +157,7 @@ body {
 .console-title {
   font-weight: 700;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .console-brand {
@@ -176,7 +178,10 @@ body {
 .console-header-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
 }
 
 .theme-toggle {
@@ -190,6 +195,7 @@ body {
   color: var(--text-dim);
   font-size: 11px;
   font-weight: 600;
+  transition: color 0.15s ease, border-color 0.15s ease;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
@@ -214,6 +220,7 @@ body {
   gap: 6px;
   font-size: 12px;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .status-dot {
@@ -251,69 +258,138 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .monitor-bus-select {
   max-width: 120px;
   padding: 3px 6px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
   font-size: 11px;
+  transition: opacity 0.15s ease, border-color 0.15s ease;
 }
 
+.monitor-bus-select:disabled {
+  opacity: 0.45;
+}
+
+/* 与 .theme-toggle 同款胶囊：透明底 + 描边 + 状态点 + 文字 */
 .monitor-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 12px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
-  color: var(--accent-strong);
+  color: var(--text-dim);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   touch-action: manipulation;
+  white-space: nowrap;
+  transition: color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 
-.monitor-toggle.playing,
-.monitor-toggle.degraded,
-.monitor-toggle.connecting,
-.monitor-toggle.reconnecting {
-  border-color: var(--danger);
-  color: var(--danger);
+.monitor-toggle:active {
+  transform: translateY(1px);
 }
 
-.monitor-toggle.permission_required {
+.monitor-toggle:hover:not(:disabled),
+.theme-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.monitor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  flex: none;
+}
+
+/* 监听中：青绿（品牌色） */
+.monitor-toggle.playing {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.monitor-toggle.playing .monitor-dot {
+  background: var(--accent);
+}
+
+/* 过渡/劣化：橙 + 脉冲 */
+.monitor-toggle.connecting .monitor-dot,
+.monitor-toggle.reconnecting .monitor-dot,
+.monitor-toggle.degraded .monitor-dot {
+  background: var(--warn);
+}
+
+.monitor-toggle.degraded {
   border-color: var(--warn);
   color: var(--warn);
 }
 
-.monitor-toggle:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.monitor-state {
-  font-size: 11px;
+.monitor-toggle.connecting,
+.monitor-toggle.reconnecting {
   color: var(--text-dim);
 }
 
-.monitor-state.playing {
-  color: var(--accent-strong);
+.monitor-toggle.connecting .monitor-dot,
+.monitor-toggle.reconnecting .monitor-dot {
+  animation: pulse 1s infinite;
 }
 
-.monitor-state.degraded {
-  color: var(--warn);
-}
-
-.monitor-state.failed,
-.monitor-state.permission_required {
+/* 失败/被拦：红 */
+.monitor-toggle.failed,
+.monitor-toggle.paused,
+.monitor-toggle.permission_required {
+  border-color: var(--danger);
   color: var(--danger);
 }
 
-.monitor-state.reconnecting,
-.monitor-state.connecting {
-  animation: pulse 1s infinite;
+.monitor-toggle.failed .monitor-dot,
+.monitor-toggle.paused .monitor-dot,
+.monitor-toggle.permission_required .monitor-dot {
+  background: var(--danger);
+}
+
+.monitor-error {
+  font-size: 11px;
+  color: var(--danger);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 移动端：头部元素收窄，避免挤压溢出 */
+@media (max-width: 480px) {
+  .console-title {
+    font-size: 12px;
+  }
+
+  .console-header {
+    padding: 6px 12px;
+  }
+
+  .monitor-bus-select {
+    max-width: 88px;
+  }
+
+  .monitor-toggle {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .monitor-error {
+    max-width: 150px;
+  }
 }
 
 .console-tabs {
